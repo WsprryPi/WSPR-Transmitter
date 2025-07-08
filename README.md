@@ -5,6 +5,7 @@ A self-contained C++ class for DMA-driven WSPR (Weak Signal Propagation Reporter
 
 <!-- omit in toc -->
 ## Table of Contents
+
 - [Repository Layout](#repository-layout)
 - [Dependencies](#dependencies)
 - [Building](#building)
@@ -22,7 +23,7 @@ A self-contained C++ class for DMA-driven WSPR (Weak Signal Propagation Reporter
 
 ## Repository Layout
 
-```
+```text
 /src
   ├── main.cpp             # Example/demo application
   ├── Makefile             # Build script (assumes dependencies at peer level)
@@ -38,8 +39,8 @@ A self-contained C++ class for DMA-driven WSPR (Weak Signal Propagation Reporter
 
 ## Dependencies
 
-* **WSPR-Message** (symbol generation) — expected at `../../WSPR-Message/src`
-* **Broadcom-Mailbox** (DMA/mailbox interface) — expected at `../../Broadcom-Mailbox/src`
+- **WSPR-Message** (symbol generation) — expected at `../../WSPR-Message/src`
+- **Mailbox** (DMA/mailbox interface) — expected at `../../Mailbox/src`
 
 The current Makefile assumes the dependencies are at the same folder level as this repo in a larger project.
 
@@ -64,8 +65,8 @@ make debug
 sudo ./build/bin/wspr-transmitter_test
 ```
 
-* Requires linking against pthreads (`-pthread`).
-* Must be run as root (for `/dev/mem` access).
+- Requires linking against pthreads (`-pthread`).
+- Must be run as root (for `/dev/mem` access).
 
 The `Makefile` is quite comprehensive and includes a `help` argument:
 
@@ -110,29 +111,30 @@ void setTransmissionCallbacks(
 
 #### Configuration
 
-* Fully initialize frequency, power, PPM, callsign/grid, offset:
+- Fully initialize frequency, power, PPM, callsign/grid, offset:
 
-```cpp
-void setupTransmission(
-    double frequency,
-    int    power_dbm,
-    double ppm,
-    std::string callsign = "",
-    std::string grid     = "",
-    bool    use_offset   = false
-);
-```
-* Rebuild DMA frequency table when PPM changes at runtime:
+  ```cpp
+  void setupTransmission(
+      double frequency,
+      int    power_dbm,
+      double ppm,
+      std::string callsign = "",
+      std::string grid     = "",
+      bool    use_offset   = false
+  );
+  ```
 
-```cpp
-void updateDMAForPPM(double ppm_new);
-```
+- Rebuild DMA frequency table when PPM changes at runtime:
 
-* POSIX scheduling for the future transmit thread (SCHED\_FIFO/RR):
+  ```cpp
+  void updateDMAForPPM(double ppm_new);
+  ```
 
-```cpp
-void setThreadScheduling(int policy, int priority);
-```
+- POSIX scheduling for the future transmit thread (SCHED\_FIFO/RR):
+
+  ```cpp
+  void setThreadScheduling(int policy, int priority);
+  ```
 
 #### Transmission Control
 
@@ -175,7 +177,3 @@ sudo ./build/bin/wspr-transmitter_test
 ## License
 
 MIT — see [LICENSE.md](../LICENSE.md).
-
----
-
-*2025 © Lee C. Bussy (@LBussy)*
