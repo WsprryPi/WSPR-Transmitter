@@ -609,7 +609,10 @@ private:
 
         void stop()
         {
-            stop_requested_.store(true, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                stop_requested_.store(true, std::memory_order_release);
+            }
             cv_.notify_all();
 
             if (thread_.joinable() &&
@@ -678,6 +681,11 @@ private:
                 {
                     continue;
                 }
+
+                // If a stop was requested while we were evaluating timing,
+                // do not schedule another transmission.
+                if (stop_requested_.load(std::memory_order_acquire))
+                    break;
 
                 const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     when.time_since_epoch())

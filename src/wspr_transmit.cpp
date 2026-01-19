@@ -450,13 +450,12 @@ void WsprTransmitter::transmit()
         return;
     }
 
-    if (stop_requested_.load())
+    if (stop_requested_.load(std::memory_order_acquire))
     {
         if (debug)
         {
             std::cerr << debug_tag << "transmit() aborted before start." << std::endl;
         }
-        fire_end_cb("Transmission aborted before start.", 0.0);
         return;
     }
 
