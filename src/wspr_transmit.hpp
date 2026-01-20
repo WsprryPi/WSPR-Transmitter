@@ -521,6 +521,10 @@ private:
     static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
     #endif
 
+    static_assert(
+        PWM_CLOCKS_PER_ITER_NOMINAL > 0,
+        "PWM_CLOCKS_PER_ITER_NOMINAL must be non-zero.");
+
     static inline constexpr std::array<int, 8> DRIVE_STRENGTH_TABLE = {
         2, 4, 6, 8, 10, 12, 14, 16};
 

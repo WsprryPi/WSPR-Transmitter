@@ -1126,6 +1126,9 @@ void WsprTransmitter::transmit_symbol(
     const int f0_idx = static_cast<int>(sym_num) * 2;
     const int f1_idx = f0_idx + 1;
 
+    const std::int64_t pwm_clocks_per_iter =
+        static_cast<std::int64_t>(PWM_CLOCKS_PER_ITER_NOMINAL);
+
     // Always push the producer away from DMA head at the start of this call.
     advance_with_lead();
 
@@ -1135,7 +1138,7 @@ void WsprTransmitter::transmit_symbol(
         while (!shouldStop())
         {
             const std::uint32_t n_pwmclk =
-                static_cast<std::uint32_t>(PWM_CLOCKS_PER_ITER_NOMINAL);
+                static_cast<std::uint32_t>(pwm_clocks_per_iter);
 
             // SOURCE_AD
             bufPtr = (bufPtr + 1) & kMask;
@@ -1201,7 +1204,7 @@ void WsprTransmitter::transmit_symbol(
             << " pwm_clock_init_=" << std::fixed << std::setprecision(3)
             << pwm_clock_init_ << std::defaultfloat
             << " n_pwmclk_per_sym=" << n_pwmclk_per_sym
-            << " PWM_CLOCKS_PER_ITER_NOMINAL=" << PWM_CLOCKS_PER_ITER_NOMINAL
+            << " pwm_clocks_per_iter=" << pwm_clocks_per_iter
             << std::endl;
     }
 
@@ -1226,7 +1229,7 @@ void WsprTransmitter::transmit_symbol(
            !shouldStop())
     {
         // Compute clocks for this chunk.
-        std::int64_t n_pwmclk = PWM_CLOCKS_PER_ITER_NOMINAL;
+        std::int64_t n_pwmclk = pwm_clocks_per_iter;
 
         // Jitter (retain behavior; keep math in 64-bit).
         n_pwmclk += static_cast<std::int64_t>(std::llround(
