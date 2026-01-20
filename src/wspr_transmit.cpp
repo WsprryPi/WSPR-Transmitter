@@ -342,7 +342,6 @@ void WsprTransmitter::clearSoftOff() noexcept
     soft_off_.store(false, std::memory_order_release);
 }
 
-
 void WsprTransmitter::enableTransmission()
 {
     stop_requested_.store(false, std::memory_order_release);
@@ -380,8 +379,12 @@ void WsprTransmitter::disableTransmission()
     stop_requested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
 
-    // Stop the scheduler thread and prevent any further launches.
-    soft_off_.store(true, std::memory_order_release);
+    // Stop the scheduler thread. Note: do not set soft_off_ here.
+    //
+    // soft_off_ is an application-level "no new scheduling" latch (used
+    // for Ctrl-C / graceful shutdown). disableTransmission() is also used
+    // internally during reconfiguration (e.g., setupTransmission()), and
+    // must not permanently prevent future enableTransmission() calls.
     scheduler_.stop();
 
     // Join the transmit thread under a mutex so the scheduler cannot

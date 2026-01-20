@@ -504,22 +504,22 @@ private:
     static constexpr uint32_t DMA_BUS_BASE = 0x7E007000;
     static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
 
-    //
-    // This constant controls how many PWM "clocks" worth of work we try
-    // to cover per inner-loop iteration in transmit_symbol().
-    //
-    // On 32-bit builds, the per-iteration overhead of updating DMA control
-    // blocks is much higher, and a small nominal value can stretch a
-    // 110-second WSPR frame into multiple minutes. Use a larger chunk size
-    // on 32-bit to keep runtime bounded.
-    //
-    // The symbol timing math is still driven by n_pwmclk_per_sym, so this
-    // only changes how frequently we patch the DMA ring.
-    #if INTPTR_MAX == INT32_MAX
+//
+// This constant controls how many PWM "clocks" worth of work we try
+// to cover per inner-loop iteration in transmit_symbol().
+//
+// On 32-bit builds, the per-iteration overhead of updating DMA control
+// blocks is much higher, and a small nominal value can stretch a
+// 110-second WSPR frame into multiple minutes. Use a larger chunk size
+// on 32-bit to keep runtime bounded.
+//
+// The symbol timing math is still driven by n_pwmclk_per_sym, so this
+// only changes how frequently we patch the DMA ring.
+#if INTPTR_MAX == INT32_MAX
     static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 50000;
-    #else
+#else
     static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
-    #endif
+#endif
 
     static_assert(
         PWM_CLOCKS_PER_ITER_NOMINAL > 0,
@@ -769,6 +769,20 @@ private:
 
                 auto when = nextEvent();
 
+                // Be conservative about late or ambiguous scheduling.
+                //
+                // WSPR frames must start exactly on the window boundary. If
+                // the computed boundary is effectively "now" or in the past
+                // (for example due to clock adjustments or coarse rounding),
+                // do not start late. Skip to the next window instead.
+                const auto now_check = std::chrono::system_clock::now();
+                constexpr auto kLateTolerance =
+                    std::chrono::milliseconds(50);
+                if (now_check + kLateTolerance >= when)
+                {
+                    when += std::chrono::seconds(2 * 60);
+                }
+
                 // Spawn the TX thread slightly before the window boundary so it
                 // can apply affinity/scheduling and then sleep until the exact
                 // boundary.
@@ -776,8 +790,19 @@ private:
                 const auto pre = when - kLead;
 
                 std::unique_lock<std::mutex> lk(mtx_);
-                cv_.wait_until(lk, pre, [this]
-                               { return stop_requested_.load(std::memory_order_acquire); });
+                while (!stop_requested_.load(std::memory_order_acquire) &&
+                       !parent_->soft_off_.load(std::memory_order_acquire) &&
+                       std::chrono::system_clock::now() < pre)
+                {
+                    cv_.wait_until(
+                        lk,
+                        pre,
+                        [this]
+                        {
+                            return stop_requested_.load(std::memory_order_acquire);
+                        });
+                }
+
                 if (stop_requested_.load(std::memory_order_acquire) ||
                     parent_->soft_off_.load(std::memory_order_acquire))
                 {
@@ -788,7 +813,6 @@ private:
                 // "starting late" when the daemon is launched too late or the
                 // system is heavily loaded.
                 const auto now = std::chrono::system_clock::now();
-                constexpr auto kLateTolerance = std::chrono::milliseconds(50);
                 if (now > when + kLateTolerance)
                 {
                     continue;
@@ -821,6 +845,15 @@ private:
                 if (parent_->tx_thread_.joinable())
                 {
                     parent_->tx_thread_.join();
+                }
+
+                // If we waited for a prior transmission to finish and are now
+                // past the target window, do not start late. Instead, skip to
+                // the next computed window.
+                const auto now_post_join = std::chrono::system_clock::now();
+                if (now_post_join > when + kLateTolerance)
+                {
+                    continue;
                 }
 
                 // Clear the parent stop flag only immediately before launch.
