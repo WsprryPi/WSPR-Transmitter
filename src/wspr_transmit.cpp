@@ -1126,14 +1126,6 @@ void WsprTransmitter::transmit_symbol(
     const int f0_idx = static_cast<int>(sym_num) * 2;
     const int f1_idx = f0_idx + 1;
 
-    // Increase chunk size on 32-bit to reduce CB churn and collision risk.
-    std::int64_t nominal = static_cast<std::int64_t>(PWM_CLOCKS_PER_ITER_NOMINAL);
-    if (sizeof(void *) == 4)
-        nominal *= 16;
-
-    if (nominal < 1)
-        nominal = 1;
-
     // Always push the producer away from DMA head at the start of this call.
     advance_with_lead();
 
@@ -1143,7 +1135,7 @@ void WsprTransmitter::transmit_symbol(
         while (!shouldStop())
         {
             const std::uint32_t n_pwmclk =
-                static_cast<std::uint32_t>(nominal);
+                static_cast<std::uint32_t>(PWM_CLOCKS_PER_ITER_NOMINAL);
 
             // SOURCE_AD
             bufPtr = (bufPtr + 1) & kMask;
@@ -1234,7 +1226,7 @@ void WsprTransmitter::transmit_symbol(
            !shouldStop())
     {
         // Compute clocks for this chunk.
-        std::int64_t n_pwmclk = nominal;
+        std::int64_t n_pwmclk = PWM_CLOCKS_PER_ITER_NOMINAL;
 
         // Jitter (retain behavior; keep math in 64-bit).
         n_pwmclk += static_cast<std::int64_t>(std::llround(
