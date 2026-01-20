@@ -210,7 +210,7 @@ debug: build/bin/$(TEST_OUT)
 	$(Q)echo "Debug build completed successfully."
 
 test: debug
-	$(Q)$(SUDO) ./build/bin/$(TEST_OUT)
+	$(Q)$(SUDO) ./build/bin/$(TEST_OUT) --now --oneshot
 
 gdb: debug
 	$(Q)$(SUDO) sudo gdb --args ./build/bin/$(TEST_OUT)

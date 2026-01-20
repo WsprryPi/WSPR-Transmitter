@@ -321,31 +321,78 @@ void WsprTransmitter::setThreadScheduling(int policy, int priority)
     thread_priority_ = priority;
 }
 
+void WsprTransmitter::setOneShot(bool enable) noexcept
+{
+    one_shot_.store(enable, std::memory_order_release);
+}
+
+void WsprTransmitter::setTransmitNow(bool enable) noexcept
+{
+    transmit_now_.store(enable, std::memory_order_release);
+}
+
+void WsprTransmitter::requestSoftOff() noexcept
+{
+    soft_off_.store(true, std::memory_order_release);
+    scheduler_.notify();
+}
+
+void WsprTransmitter::clearSoftOff() noexcept
+{
+    soft_off_.store(false, std::memory_order_release);
+}
+
+
 void WsprTransmitter::enableTransmission()
 {
     stop_requested_.store(false, std::memory_order_release);
-    if (trans_params_.is_tone)
+
+    // If the application has requested a soft-off, do not start scheduling.
+    if (!trans_params_.is_tone && soft_off_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    const bool immediate = trans_params_.is_tone ||
+                           transmit_now_.load(std::memory_order_acquire);
+
+    if (immediate)
     {
         scheduled_start_rt_ns_.store(0, std::memory_order_release);
+
+        std::lock_guard<std::mutex> lk(tx_thread_mtx_);
+        if (tx_thread_.joinable())
+        {
+            tx_thread_.join();
+        }
+
         tx_thread_ = std::thread(&WsprTransmitter::thread_entry, this);
+        return;
     }
-    else
-    {
-        scheduler_.start();
-    }
+
+    scheduler_.start();
 }
 
 void WsprTransmitter::disableTransmission()
 {
-    scheduler_.stop();
-
+    // Set the stop flag first so a newly spawned transmit thread
+    // will abort before it touches DMA/PWM state.
     stop_requested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
 
-    if (tx_thread_.joinable() &&
-        tx_thread_.get_id() != std::this_thread::get_id())
+    // Stop the scheduler thread and prevent any further launches.
+    soft_off_.store(true, std::memory_order_release);
+    scheduler_.stop();
+
+    // Join the transmit thread under a mutex so the scheduler cannot
+    // race with us and start a new thread while we are joining.
     {
-        tx_thread_.join();
+        std::lock_guard<std::mutex> lk(tx_thread_mtx_);
+        if (tx_thread_.joinable() &&
+            tx_thread_.get_id() != std::this_thread::get_id())
+        {
+            tx_thread_.join();
+        }
     }
 }
 
@@ -442,6 +489,18 @@ inline void WsprTransmitter::fire_end_cb(const std::string &msg, double elapsed)
     }
 }
 
+bool WsprTransmitter::shouldStop() const noexcept
+{
+    if (stop_requested_.load(std::memory_order_acquire))
+        return true;
+
+    const std::atomic<bool> *ext = external_stop_flag_;
+    if (ext && ext->load(std::memory_order_acquire))
+        return true;
+
+    return false;
+}
+
 void WsprTransmitter::transmit()
 {
     if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
@@ -450,7 +509,7 @@ void WsprTransmitter::transmit()
         return;
     }
 
-    if (stop_requested_.load(std::memory_order_acquire))
+    if (shouldStop())
     {
         if (debug)
         {
@@ -491,12 +550,13 @@ void WsprTransmitter::transmit()
         transmit_on();
         TxOffGuard tx_guard(this);
 
-        while (!stop_requested_.load())
+        while (!shouldStop())
         {
             transmit_symbol(
                 0,
                 0.0,
-                dummyBuf);
+                dummyBuf,
+                -1);
         }
 
         transmit_off();
@@ -545,7 +605,7 @@ void WsprTransmitter::transmit()
         transmit_on();
         TxOffGuard tx_guard(this);
 
-        for (int i = 0; i < symbol_count && !stop_requested_.load(); ++i)
+        for (int i = 0; i < symbol_count && !shouldStop(); ++i)
         {
             const int64_t offset_ns =
                 static_cast<int64_t>(std::llround(static_cast<double>(i) * symtime * 1e9));
@@ -554,10 +614,48 @@ void WsprTransmitter::transmit()
 
             sleep_until_abs(target);
 
+            if (debug)
+            {
+                struct timespec now{};
+                clock_gettime(CLOCK_MONOTONIC, &now);
+
+                const int64_t late_ns =
+                    (now.tv_sec - target.tv_sec) * 1'000'000'000LL +
+                    (now.tv_nsec - target.tv_nsec);
+
+                if (late_ns > 1'000'000) // >1 ms late
+                {
+                    std::cerr << debug_tag
+                              << "Symbol overrun: "
+                              << late_ns / 1e6
+                              << " ms late"
+                              << std::endl;
+                }
+            }
+
+            if (shouldStop())
+            {
+                break;
+            }
+
             transmit_symbol(
                 static_cast<int>(trans_params_.symbols[i]),
                 symtime,
-                bufPtr);
+                bufPtr,
+                i);
+        }
+
+        // Allow the final symbol's queued DMA work to drain before turning off
+        // the clock. Without this, we can cut the last symbol short by roughly
+        // one symbol period.
+        if (!shouldStop())
+        {
+            const int64_t end_ns =
+                static_cast<int64_t>(std::llround(
+                    static_cast<double>(symbol_count) * symtime * 1e9));
+
+            const timespec end_target = add_ns(t0_ts, end_ns);
+            sleep_until_abs(end_target);
         }
 
         transmit_off();
@@ -925,6 +1023,25 @@ void WsprTransmitter::transmit_on()
  */
 void WsprTransmitter::transmit_off()
 {
+    const bool was_on = transmit_on_.load(std::memory_order_acquire);
+
+    // Avoid duplicate "DMA before off" prints during normal end-of-TX
+    // shutdown where transmit_off() may be called multiple times.
+    if (debug && was_on && dma_config_.peripheral_base_virtual != nullptr)
+    {
+        const std::uint32_t conblk =
+            static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x04));
+        const std::uint32_t cs =
+            static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x00));
+
+        std::cerr << debug_tag
+                  << "DMA before off: CS=0x"
+                  << std::hex << cs
+                  << " CONBLK_AD=0x" << conblk
+                  << std::dec
+                  << std::endl;
+    }
+
     // Disable the clock, effectively turning off transmission.
     disable_clock();
 }
@@ -942,208 +1059,247 @@ void WsprTransmitter::transmit_off()
 void WsprTransmitter::transmit_symbol(
     const std::uint32_t &sym_num,
     const double &tsym,
-    std::uint32_t &bufPtr)
+    std::uint32_t &bufPtr,
+    int symbol_index)
 {
-    // Early-exit if a stop was already requested
-    if (stop_requested_.load(std::memory_order_acquire))
+    // Early-exit if a stop was already requested.
+    if (shouldStop())
     {
-        if (debug)
-            std::cout << debug_tag << "transmit_symbol(" << sym_num
-                      << ") aborted before start." << std::endl;
         return;
     }
 
+    constexpr std::uint32_t kMask = 0x3FFu; // 1024 ring
+    constexpr std::uint32_t kLead = 64u;    // Keep producer ahead of DMA
+    constexpr int kPollSleepUs = 50;        // Short backoff
+    constexpr int kMaxWaitUs = 200000;      // 200 ms safety timeout per CB write
+
+    auto dma_conblk_ad = [&]() -> std::uint32_t
+    {
+        // DMA channel CONBLK_AD register (bus-mapped)
+        return static_cast<std::uint32_t>(
+            access_bus_address(DMA_BUS_BASE + 0x04));
+    };
+
+    auto wait_cb_not_active = [&](std::uint32_t idx) -> bool
+    {
+        // Wait until DMA is NOT executing this CB.
+        const std::uint32_t target =
+            static_cast<std::uint32_t>(instructions_[idx].b);
+
+        int waited_us = 0;
+        while (!shouldStop())
+        {
+            const std::uint32_t cur = dma_conblk_ad();
+            if (cur != target)
+                return true;
+
+            // If DMA isn't advancing, do not deadlock forever.
+            if (waited_us >= kMaxWaitUs)
+            {
+                if (debug)
+                {
+                    std::cerr << debug_tag
+                              << "DMA appears stuck at CONBLK_AD=0x"
+                              << std::hex << cur << std::dec
+                              << ", forcing stop to avoid deadlock."
+                              << std::endl;
+                }
+                stop_requested_.store(true, std::memory_order_release);
+                stop_cv_.notify_all();
+                return false;
+            }
+
+            usleep(kPollSleepUs);
+            waited_us += kPollSleepUs;
+        }
+        return false;
+    };
+
+    auto advance_with_lead = [&]() -> void
+    {
+        // Keep producer ahead. Only do this when starting a new symbol
+        // (bufPtr points at the last written CB).
+        bufPtr = (bufPtr + kLead) & kMask;
+    };
+
     const bool is_tone = (tsym == 0.0);
-    const int f0_idx = sym_num * 2;
+    const int f0_idx = static_cast<int>(sym_num) * 2;
     const int f1_idx = f0_idx + 1;
+
+    // Increase chunk size on 32-bit to reduce CB churn and collision risk.
+    std::int64_t nominal = static_cast<std::int64_t>(PWM_CLOCKS_PER_ITER_NOMINAL);
+    if (sizeof(void *) == 4)
+        nominal *= 16;
+
+    if (nominal < 1)
+        nominal = 1;
+
+    // Always push the producer away from DMA head at the start of this call.
+    advance_with_lead();
 
     if (is_tone)
     {
-        // Continuous tone
-        while (!stop_requested_.load(std::memory_order_acquire))
+        // Continuous tone.
+        while (!shouldStop())
         {
-            const std::uint32_t n_pwmclk = PWM_CLOCKS_PER_ITER_NOMINAL;
+            const std::uint32_t n_pwmclk =
+                static_cast<std::uint32_t>(nominal);
 
             // SOURCE_AD
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
+            bufPtr = (bufPtr + 1) & kMask;
+            if (!wait_cb_not_active(bufPtr))
+                return;
+
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f0_idx * 4;
+                static_cast<std::uint32_t>(
+                    static_cast<std::uintptr_t>(const_page_.b) +
+                    static_cast<std::uintptr_t>(f0_idx * 4));
 
             // TXFR_LEN
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
+            bufPtr = (bufPtr + 1) & kMask;
+            if (!wait_cb_not_active(bufPtr))
+                return;
+
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_pwmclk;
         }
+
+        return;
     }
 
-    else
+    // WSPR symbol mode.
+    //
+    // IMPORTANT: TXFR_LEN counts the number of DMA transfers paced by PWM DREQ
+    // at the PWM *sample* rate, not at the raw PWM clock rate. The sample rate
+    // is PWM clock divided by the PWM range (the DMA table size). On 32-bit
+    // builds, using the raw clock here causes each symbol to run ~1024x too
+    // long and drift accumulates.
+    const std::uint32_t table_size =
+        static_cast<std::uint32_t>(
+            std::max<std::size_t>(1U, trans_params_.dma_table_freq.size()));
+
+    const double pwm_sample_hz =
+        pwm_clock_init_ /
+        static_cast<double>(table_size);
+    const std::int64_t n_pwmclk_per_sym =
+        static_cast<std::int64_t>(std::llround(pwm_sample_hz * tsym));
+
+    if (debug)
     {
-        // Calculate PWM clocks per symbol.
-        const std::int64_t n_pwmclk_per_sym =
-            static_cast<std::int64_t>(std::llround(pwm_clock_init_ * tsym));
+        const int total_symbols =
+            static_cast<int>(trans_params_.symbols.size());
 
-        if (n_pwmclk_per_sym <= 0 || n_pwmclk_per_sym > 5'000'000'000LL)
-            throw std::runtime_error(
-                "transmit_symbol(): invalid n_pwmclk_per_sym (bad PWM clock).");
+        std::cerr
+            << debug_tag
+            << "sym=" << sym_num
+            << " idx=";
 
-        std::int64_t n_pwmclk_transmitted = 0;
-        std::int64_t n_f0_transmitted = 0;
-
-        // Precompute interpolation ratio outside the loop.
-        const double f0_freq = trans_params_.dma_table_freq[f0_idx];
-        const double f1_freq = trans_params_.dma_table_freq[f1_idx];
-        const double tone_freq =
-            trans_params_.frequency - 1.5 * trans_params_.tone_spacing +
-            sym_num * trans_params_.tone_spacing;
-
-        const double f0_ratio =
-            1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
-
-        while (n_pwmclk_transmitted < n_pwmclk_per_sym &&
-               !stop_requested_.load(std::memory_order_acquire))
+        if (symbol_index >= 0)
         {
-            // --- compute clocks for this chunk ---
-            std::int64_t n_pwmclk =
-                static_cast<std::int64_t>(PWM_CLOCKS_PER_ITER_NOMINAL);
-
-            // Apply jitter (same behavior as before, but keep math in 64-bit).
-            n_pwmclk += static_cast<std::int64_t>(std::llround(
-                (std::rand() / (RAND_MAX + 1.0) - 0.5) *
-                static_cast<double>(n_pwmclk)));
-
-            // Never allow non-positive chunk sizes.
-            if (n_pwmclk <= 0)
-                n_pwmclk = 1;
-
-            // Clamp to remaining symbol clocks.
-            if (n_pwmclk_transmitted + n_pwmclk > n_pwmclk_per_sym)
-                n_pwmclk = n_pwmclk_per_sym - n_pwmclk_transmitted;
-
-            // Compute how many of these clocks should be f0.
-            std::int64_t n_f0 = static_cast<std::int64_t>(std::llround(
-                                    f0_ratio * static_cast<double>(
-                                        n_pwmclk_transmitted + n_pwmclk))) -
-                                n_f0_transmitted;
-
-            // Clamp for safety (prevents negative/overflow TXFR_LEN writes).
-            if (n_f0 < 0)
-                n_f0 = 0;
-            if (n_f0 > n_pwmclk)
-                n_f0 = n_pwmclk;
-
-            const std::int64_t n_f1 = n_pwmclk - n_f0;
-
-            // f0 SOURCE_AD
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(
-                    lk,
-                    std::chrono::milliseconds(1),
-                    [&]
-                    {
-                        return stop_requested_.load(
-                                   std::memory_order_acquire) ||
-                               static_cast<std::uintptr_t>(
-                                   access_bus_address(DMA_BUS_BASE + 0x04)) !=
-                                   reinterpret_cast<std::uintptr_t>(
-                                       instructions_[bufPtr].b);
-                    });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                static_cast<std::uintptr_t>(const_page_.b) +
-                static_cast<std::uintptr_t>(f0_idx * 4);
-
-            // f0 TXFR_LEN
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(
-                    lk,
-                    std::chrono::milliseconds(1),
-                    [&]
-                    {
-                        return stop_requested_.load(
-                                   std::memory_order_acquire) ||
-                               static_cast<std::uintptr_t>(
-                                   access_bus_address(DMA_BUS_BASE + 0x04)) !=
-                                   reinterpret_cast<std::uintptr_t>(
-                                       instructions_[bufPtr].b);
-                    });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
-                static_cast<std::uint32_t>(n_f0);
-
-            // f1 SOURCE_AD
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(
-                    lk,
-                    std::chrono::milliseconds(1),
-                    [&]
-                    {
-                        return stop_requested_.load(
-                                   std::memory_order_acquire) ||
-                               static_cast<std::uintptr_t>(
-                                   access_bus_address(DMA_BUS_BASE + 0x04)) !=
-                                   reinterpret_cast<std::uintptr_t>(
-                                       instructions_[bufPtr].b);
-                    });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                static_cast<std::uintptr_t>(const_page_.b) +
-                static_cast<std::uintptr_t>(f1_idx * 4);
-
-            // f1 TXFR_LEN
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(
-                    lk,
-                    std::chrono::milliseconds(1),
-                    [&]
-                    {
-                        return stop_requested_.load(
-                                   std::memory_order_acquire) ||
-                               static_cast<std::uintptr_t>(
-                                   access_bus_address(DMA_BUS_BASE + 0x04)) !=
-                                   reinterpret_cast<std::uintptr_t>(
-                                       instructions_[bufPtr].b);
-                    });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
-                static_cast<std::uint32_t>(n_f1);
-
-            // Update counters.
-            n_pwmclk_transmitted += n_pwmclk;
-            n_f0_transmitted += n_f0;
+            std::cerr
+                << (symbol_index + 1)
+                << "/" << total_symbols;
         }
+        else
+        {
+            std::cerr << "-";
+        }
+
+        std::cerr
+            << " tsym=" << std::setprecision(6) << tsym
+            << " pwm_clock_init_=" << std::fixed << std::setprecision(3)
+            << pwm_clock_init_ << std::defaultfloat
+            << " n_pwmclk_per_sym=" << n_pwmclk_per_sym
+            << " PWM_CLOCKS_PER_ITER_NOMINAL=" << PWM_CLOCKS_PER_ITER_NOMINAL
+            << std::endl;
     }
 
+    if (n_pwmclk_per_sym <= 0 || n_pwmclk_per_sym > 5'000'000'000LL)
+        throw std::runtime_error(
+            "transmit_symbol(): invalid n_pwmclk_per_sym (bad PWM clock).");
+
+    std::int64_t n_pwmclk_transmitted = 0;
+    std::int64_t n_f0_transmitted = 0;
+
+    // Precompute interpolation ratio outside the loop.
+    const double f0_freq = trans_params_.dma_table_freq[f0_idx];
+    const double f1_freq = trans_params_.dma_table_freq[f1_idx];
+    const double tone_freq =
+        trans_params_.frequency - 1.5 * trans_params_.tone_spacing +
+        static_cast<double>(sym_num) * trans_params_.tone_spacing;
+
+    const double f0_ratio =
+        1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
+
+    while (n_pwmclk_transmitted < n_pwmclk_per_sym &&
+           !shouldStop())
+    {
+        // Compute clocks for this chunk.
+        std::int64_t n_pwmclk = nominal;
+
+        // Jitter (retain behavior; keep math in 64-bit).
+        n_pwmclk += static_cast<std::int64_t>(std::llround(
+            (std::rand() / (RAND_MAX + 1.0) - 0.5) *
+            static_cast<double>(n_pwmclk)));
+
+        if (n_pwmclk <= 0)
+            n_pwmclk = 1;
+
+        if (n_pwmclk_transmitted + n_pwmclk > n_pwmclk_per_sym)
+            n_pwmclk = n_pwmclk_per_sym - n_pwmclk_transmitted;
+
+        // Compute how many of these clocks should be f0.
+        std::int64_t n_f0 =
+            static_cast<std::int64_t>(std::llround(
+                f0_ratio * static_cast<double>(n_pwmclk_transmitted + n_pwmclk))) -
+            n_f0_transmitted;
+
+        if (n_f0 < 0)
+            n_f0 = 0;
+        if (n_f0 > n_pwmclk)
+            n_f0 = n_pwmclk;
+
+        const std::int64_t n_f1 = n_pwmclk - n_f0;
+
+        // f0 SOURCE_AD
+        bufPtr = (bufPtr + 1) & kMask;
+        if (!wait_cb_not_active(bufPtr))
+            return;
+
+        reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
+            static_cast<std::uint32_t>(
+                static_cast<std::uintptr_t>(const_page_.b) +
+                static_cast<std::uintptr_t>(f0_idx * 4));
+
+        // f0 TXFR_LEN
+        bufPtr = (bufPtr + 1) & kMask;
+        if (!wait_cb_not_active(bufPtr))
+            return;
+
+        reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
+            static_cast<std::uint32_t>(n_f0);
+
+        // f1 SOURCE_AD
+        bufPtr = (bufPtr + 1) & kMask;
+        if (!wait_cb_not_active(bufPtr))
+            return;
+
+        reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
+            static_cast<std::uint32_t>(
+                static_cast<std::uintptr_t>(const_page_.b) +
+                static_cast<std::uintptr_t>(f1_idx * 4));
+
+        // f1 TXFR_LEN
+        bufPtr = (bufPtr + 1) & kMask;
+        if (!wait_cb_not_active(bufPtr))
+            return;
+
+        reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
+            static_cast<std::uint32_t>(n_f1);
+
+        // Update counters.
+        n_pwmclk_transmitted += n_pwmclk;
+        n_f0_transmitted += n_f0;
+    }
 }
 
 /**

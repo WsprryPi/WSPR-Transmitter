@@ -98,6 +98,37 @@ static std::atomic<bool> g_terminate{false};
  */
 static int sig_pipe_fds[2] = {-1, -1};
 
+struct AppArgs
+{
+    bool transmit_now = false;
+    bool one_shot = false;
+};
+
+AppArgs parse_args(int argc, char **argv)
+{
+    AppArgs args;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string_view a = argv[i];
+        if (a == "--now" || a == "-n")
+        {
+            args.transmit_now = true;
+        }
+        else if (a == "--oneshot" || a == "--one-shot" || a == "-1")
+        {
+            args.one_shot = true;
+        }
+        else if (a == "--help" || a == "-h")
+        {
+            std::cout << "Options:\n"
+                      << "  -n, --now        Start WSPR immediately (no window wait).\n"
+                      << "  -1, --oneshot    Run exactly one WSPR transmission and exit.\n";
+            std::exit(0);
+        }
+    }
+    return args;
+}
+
 /**
  * @brief RAII class to temporarily modify terminal input settings
  *
@@ -322,19 +353,16 @@ bool select_wspr()
  */
 void sig_handler(int)
 {
-    // Message to print when signal is received
+    // Keep the signal handler async-signal-safe.
+    // Do NOT call into the transmitter here (may deadlock on 32-bit).
     const char msg[] = "Caught signal\nShutting down transmissions.\n";
-    write(STDERR_FILENO, msg, sizeof(msg) - 1);  // Async-signal-safe
+    (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
 
-    // Trigger transmitter stop
-    wsprTransmitter.stop();
+    g_terminate.store(true, std::memory_order_release);
 
-    // Set global termination flag
-    g_terminate.store(true);
-
-    // Wake up the main thread if it's blocked on select()/poll()
+    // Wake up the main thread if it's blocked on select()/poll().
     const char wake = 1;
-    write(sig_pipe_fds[1], &wake, 1);  // Async-signal-safe
+    (void)write(sig_pipe_fds[1], &wake, 1);
 }
 
 /**
@@ -509,6 +537,15 @@ void wait_for_completion(bool isWspr)
         {
             g_end_cv.wait_for(lk, std::chrono::milliseconds(100));
         }
+        if (g_terminate.load(std::memory_order_acquire) && !g_transmission_done)
+        {
+            lk.unlock();
+            // Soft-off prevents any new transmissions, then we stop the
+            // current transmission thread cooperatively.
+            wsprTransmitter.requestSoftOff();
+            wsprTransmitter.stopTransmission();
+            return;
+        }
 
         if (g_transmission_done)
             std::cout << "WSPR transmission complete." << std::endl;
@@ -544,10 +581,12 @@ void wait_for_completion(bool isWspr)
  *
  * @return 0 on normal termination, 1 on unrecoverable failure.
  */
-int main()
+int main(int argc, char **argv)
 {
     try
     {
+        const AppArgs args = parse_args(argc, argv);
+
         // Set up signal handling and the self-pipe mechanism
         setup_signal_handlers();
 
@@ -563,10 +602,16 @@ int main()
         // Configure transmitter settings based on user selection
         configure_transmitter(isWspr);
 
+        wsprTransmitter.setTransmitNow(args.transmit_now);
+        wsprTransmitter.setOneShot(args.one_shot);
+
         if (isWspr)
         {
-            // WSPR mode waits for the next time slot
-            std::cout << "Waiting for next transmission window." << std::endl;
+            // WSPR mode waits for the next time slot unless --now was supplied
+            if (!args.transmit_now)
+                std::cout << "Waiting for next transmission window." << std::endl;
+            else
+                std::cout << "Transmit-now enabled. Starting immediately." << std::endl;
         }
         else
         {
@@ -574,7 +619,6 @@ int main()
             std::cout << "Press <spacebar> to begin test tone." << std::endl;
             wait_for_space_or_signal();
         }
-
         // Begin scheduled or immediate transmission
         wsprTransmitter.enableTransmission();
 

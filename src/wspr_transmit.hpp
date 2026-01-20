@@ -175,6 +175,36 @@ public:
     void setThreadScheduling(int policy, int priority);
 
     /**
+     * @brief Enable or disable one-shot scheduling for WSPR mode.
+     *
+     * When enabled, the scheduler will launch exactly one WSPR transmission
+     * and then stop without scheduling further windows.
+     */
+    void setOneShot(bool enable) noexcept;
+
+    /**
+     * @brief Enable or disable immediate transmission for WSPR mode.
+     *
+     * When enabled, WSPR mode bypasses the next-window scheduler and starts
+     * immediately (useful for testing).
+     */
+    void setTransmitNow(bool enable) noexcept;
+
+    /**
+     * @brief Request a "soft off".
+     *
+     * Prevents any new WSPR transmissions from being scheduled while allowing
+     * any currently running transmission to continue or be stopped cleanly by
+     * stopTransmission()/stop().
+     */
+    void requestSoftOff() noexcept;
+
+    /**
+     * @brief Clear a previously requested "soft off".
+     */
+    void clearSoftOff() noexcept;
+
+    /**
      * @brief Start transmission, either immediately or via the scheduler.
      *
      * @details
@@ -268,6 +298,17 @@ private:
     std::thread tx_thread_;
 
     /**
+     * @brief Guards tx_thread_ lifecycle against stop/scheduler races.
+     *
+     * @details The scheduler thread can finish a transmission and quickly
+     * attempt to start the next. The owning thread may call stop() right
+     * after the end callback fires. This mutex ensures that joining and
+     * launching tx_thread_ cannot interleave in a way that creates an
+     * extra transmission or a stuck join.
+     */
+    std::mutex tx_thread_mtx_;
+
+    /**
      * @brief POSIX scheduling policy for the transmission thread.
      *
      * One of SCHED_FIFO, SCHED_RR, or SCHED_OTHER.
@@ -289,6 +330,42 @@ private:
      * exit at the next interruption point.
      */
     std::atomic<bool> stop_requested_{false};
+
+    /**
+     * @brief Flag indicating that new transmissions must not be scheduled.
+     *
+     * When set, the scheduler loop will stop launching new transmissions.
+     * This does not stop any currently running transmit thread.
+     */
+    std::atomic<bool> soft_off_{false};
+
+    /**
+     * @brief Flag indicating that the scheduler should run exactly one
+     *        transmission and then stop.
+     */
+    std::atomic<bool> one_shot_{false};
+
+    /**
+     * @brief Flag indicating that the next transmission should start
+     *        immediately.
+     */
+    std::atomic<bool> transmit_now_{false};
+
+    /**
+     * @brief Optional external stop flag.
+     *
+     * When set to a non-null pointer, shouldStop() will also consider the
+     * external flag value.
+     */
+    const std::atomic<bool> *external_stop_flag_{nullptr};
+
+    /**
+     * @brief Aggregate internal and external stop requests.
+     *
+     * @return true if either stop_requested_ or the external termination
+     *         flag (if provided) is set.
+     */
+    bool shouldStop() const noexcept;
 
     /**
      * @brief Condition variable used to wake the transmission thread.
@@ -427,7 +504,22 @@ private:
     static constexpr uint32_t DMA_BUS_BASE = 0x7E007000;
     static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
 
+    //
+    // This constant controls how many PWM "clocks" worth of work we try
+    // to cover per inner-loop iteration in transmit_symbol().
+    //
+    // On 32-bit builds, the per-iteration overhead of updating DMA control
+    // blocks is much higher, and a small nominal value can stretch a
+    // 110-second WSPR frame into multiple minutes. Use a larger chunk size
+    // on 32-bit to keep runtime bounded.
+    //
+    // The symbol timing math is still driven by n_pwmclk_per_sym, so this
+    // only changes how frequently we patch the DMA ring.
+    #if INTPTR_MAX == INT32_MAX
+    static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 50000;
+    #else
     static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
+    #endif
 
     static inline constexpr std::array<int, 8> DRIVE_STRENGTH_TABLE = {
         2, 4, 6, 8, 10, 12, 14, 16};
@@ -569,7 +661,8 @@ private:
     void transmit_symbol(
         const std::uint32_t &sym_num,
         const double &tsym,
-        std::uint32_t &bufPtr);
+        std::uint32_t &bufPtr,
+        int symbol_index = -1);
 
     void clear_dma_setup();
     double bit_trunc(const double &d, const int &lsb);
@@ -622,6 +715,11 @@ private:
             }
         }
 
+        void notify() noexcept
+        {
+            cv_.notify_all();
+        }
+
     private:
         WsprTransmitter *parent_;
         std::thread thread_;
@@ -656,8 +754,15 @@ private:
 
         void run()
         {
-            while (!stop_requested_.load(std::memory_order_acquire))
+            while (!stop_requested_.load(std::memory_order_acquire) &&
+                   !parent_->soft_off_.load(std::memory_order_acquire))
             {
+                if (parent_->external_stop_flag_ &&
+                    parent_->external_stop_flag_->load(std::memory_order_acquire))
+                {
+                    break;
+                }
+
                 auto when = nextEvent();
 
                 // Spawn the TX thread slightly before the window boundary so it
@@ -669,8 +774,11 @@ private:
                 std::unique_lock<std::mutex> lk(mtx_);
                 cv_.wait_until(lk, pre, [this]
                                { return stop_requested_.load(std::memory_order_acquire); });
-                if (stop_requested_.load(std::memory_order_acquire))
+                if (stop_requested_.load(std::memory_order_acquire) ||
+                    parent_->soft_off_.load(std::memory_order_acquire))
+                {
                     break;
+                }
 
                 // If we missed the boundary, skip this cycle. This prevents
                 // "starting late" when the daemon is launched too late or the
@@ -684,21 +792,44 @@ private:
 
                 // If a stop was requested while we were evaluating timing,
                 // do not schedule another transmission.
-                if (stop_requested_.load(std::memory_order_acquire))
+                if (stop_requested_.load(std::memory_order_acquire) ||
+                    parent_->soft_off_.load(std::memory_order_acquire))
+                {
                     break;
+                }
 
                 const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     when.time_since_epoch())
                                     .count();
                 parent_->scheduled_start_rt_ns_.store(ns, std::memory_order_release);
 
-                parent_->stop_requested_.store(false, std::memory_order_release);
+                // Synchronize with stop()/disableTransmission() so we don't
+                // race a join/start with a shutdown request.
+                std::lock_guard<std::mutex> tx_lk(parent_->tx_thread_mtx_);
 
+                if (stop_requested_.load(std::memory_order_acquire) ||
+                    parent_->shouldStop())
+                {
+                    break;
+                }
+
+                // Join any prior TX thread before launching a new one.
                 if (parent_->tx_thread_.joinable())
                 {
                     parent_->tx_thread_.join();
                 }
-                parent_->tx_thread_ = std::thread(&WsprTransmitter::thread_entry, parent_);
+
+                // Clear the parent stop flag only immediately before launch.
+                parent_->stop_requested_.store(false, std::memory_order_release);
+
+                parent_->tx_thread_ = std::thread(
+                    &WsprTransmitter::thread_entry,
+                    parent_);
+
+                if (parent_->one_shot_.load(std::memory_order_acquire))
+                {
+                    break;
+                }
             }
         }
     };
