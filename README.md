@@ -146,7 +146,7 @@ void stop();  // disable + cleanup
 #### Status & Debug
 
 ```cpp
-bool isTransmitting() const noexcept;
+bool wsprTransmitter.getState() == WsprTransmitter::State::TRANSMITTING const noexcept;
 void printParameters();      // dumps current config & symbols
 ```
 

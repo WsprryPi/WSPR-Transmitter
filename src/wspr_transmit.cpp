@@ -411,9 +411,9 @@ void WsprTransmitter::stop()
     dma_cleanup();
 }
 
-bool WsprTransmitter::isTransmitting() const noexcept
+WsprTransmitter::State WsprTransmitter::getState() const noexcept
 {
-    return transmit_on_.load(std::memory_order_acquire);
+    return state_.load(std::memory_order_acquire);
 }
 
 void WsprTransmitter::printParameters()
@@ -982,7 +982,7 @@ void WsprTransmitter::deallocate_memory_pool()
  */
 void WsprTransmitter::disable_clock()
 {
-    transmit_on_.store(false, std::memory_order_release);
+    state_.store(State::ENABLED, std::memory_order_release);
 
     if (dma_config_.peripheral_base_virtual == nullptr)
         return;
@@ -1018,7 +1018,7 @@ void WsprTransmitter::transmit_on()
     access_bus_address(CM_GP0CTL_BUS) = temp;
 
     // Set semaphore
-    transmit_on_.store(true);
+    state_.store(State::TRANSMITTING, std::memory_order_release);
 }
 
 /**
@@ -1027,7 +1027,9 @@ void WsprTransmitter::transmit_on()
  */
 void WsprTransmitter::transmit_off()
 {
-    const bool was_on = transmit_on_.load(std::memory_order_acquire);
+    const bool was_on =
+        (state_.load(std::memory_order_acquire) ==
+         State::TRANSMITTING);
 
     // Avoid duplicate "DMA before off" prints during normal end-of-TX
     // shutdown where transmit_off() may be called multiple times.
@@ -1661,4 +1663,33 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
             assert((tuning_word[i] & (~0xFFFu)) == (tuning_word[i + 1] & (~0xFFFu)));
         }
     }
+}
+
+constexpr const char *WsprTransmitter::stateToString(State state) noexcept
+{
+    switch (state)
+    {
+    case State::DISABLED:
+        return "DISABLED";
+    case State::ENABLED:
+        return "ENABLED";
+    case State::TRANSMITTING:
+        return "TRANSMITTING";
+    case State::HUNG:
+        return "HUNG";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+std::string WsprTransmitter::stateToLower(State state)
+{
+    std::string s = stateToString(state);
+    std::transform(
+        s.begin(),
+        s.end(),
+        s.begin(),
+        [](unsigned char c)
+        { return std::tolower(c); });
+    return s;
 }

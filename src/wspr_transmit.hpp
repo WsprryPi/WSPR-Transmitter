@@ -71,6 +71,20 @@ class WsprTransmitter
 {
 public:
     /**
+     * @brief Transmission state for the transmitter.
+     */
+    enum class State
+    {
+        DISABLED,     /**< Not enabled to transmit */
+        ENABLED,      /**< Enabled to transmit, idle */
+        TRANSMITTING, /**< Actively transmitting */
+        HUNG          /**< Reserved for future fault handling */
+    };
+
+    static constexpr const char *stateToString(State state) noexcept;
+    std::string stateToLower(State state);
+
+    /**
      * @brief Constructs a WSPR transmitter with default settings.
      *
      * This is for global constructions, parameters are set via
@@ -247,14 +261,14 @@ public:
     void stop();
 
     /**
-     * @brief Check if the GPIO is bound to the clock.
+     * @brief Get the current transmission state.
      *
      * @details Returns a value indicating if the system is transmitting
-     * in any way,
+     * in any way.
      *
-     * @return `true` if clock is engaged, `false` otherwise.
+     * @return The current transmitter state.
      */
-    bool isTransmitting() const noexcept;
+    State getState() const noexcept;
 
     /**
      * @brief Prints current transmission parameters and encoded WSPR symbols.
@@ -376,12 +390,12 @@ private:
     std::condition_variable stop_cv_;
 
     /**
-     * @brief Bool used to store transmission state.
+     * @brief Stores the current transmission state.
      *
      * True when transmit_on() is called, false when transmit_off() or
      * disable_clock() is called.
      */
-    std::atomic<bool> transmit_on_{false};
+    std::atomic<State> state_{State::DISABLED};
 
     /**
      * @brief Scheduled wall-clock start time for windowed WSPR transmissions.
@@ -625,6 +639,7 @@ private:
         uint32_t : 13;
         uint32_t PASSWD : 8;
     };
+
     static_assert(sizeof(GPCTL) == 4, "GPCTL must be exactly 32 bits.");
 
     struct DMAregs
