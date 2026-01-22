@@ -595,6 +595,7 @@ void WsprTransmitter::transmit()
         }
 
         // Fire callback as close to the first symbol as possible.
+        // TODO: Take this out to 6 decimal points
         fire_start_cb("", trans_params_.frequency);
 
         // Anchor symbol timing to monotonic clock.
