@@ -39,7 +39,7 @@
 #include <cstring>   // std::memcpy, std::strerror
 #include <cstdlib>   // std::rand, RAND_MAX
 #include <fstream>   // std::ifstream
-#include <iomanip>   // std::setprecision
+#include <iomanip>   // std::setprecision, std::setw, std::setfill
 #include <iostream>  // std::cout, std::cerr
 #include <optional>  // std::optional
 #include <random>    // std::random_device, std::mt19937, std::uniform_real_distribution
@@ -67,18 +67,6 @@ namespace
 {
     static constexpr size_t NUM_PAGES = 4096;
 
-    /**
-     * @brief RAII for a pool of DMA-capable pages allocated via mailbox.
-     *
-     * On construction:
-     *   1. Calls `memAlloc()` for `numpages`.
-     *   2. Calls `memLock()` to get the bus address.
-     *   3. Calls `mapMem()` to map into user space.
-     *
-     * On destruction: unmaps, unlocks, and frees the pages automatically.
-     *
-     * @throws std::runtime_error on any mailbox or mapping failure.
-     */
     class MailboxMemoryPool
     {
         size_t total_size_;
@@ -87,24 +75,18 @@ namespace
         volatile uint8_t *virt_addr_;
 
     public:
-        /**
-         * @param numpages  Number of pages to allocate (1 const + N instr).
-         */
         MailboxMemoryPool(unsigned numpages)
             : total_size_(numpages * Mailbox::PAGE_SIZE),
               mem_ref_(0), bus_addr_(0), virt_addr_(nullptr)
         {
             try
             {
-                // Allocate
                 mem_ref_ = mailbox.memAlloc(total_size_, Mailbox::BLOCK_SIZE);
 
-                // Lock
                 bus_addr_ = mailbox.memLock(mem_ref_);
                 if (bus_addr_ == 0)
                     throw std::runtime_error("MailboxMemoryPool: memLock failed");
 
-                // Map
                 auto phys = static_cast<off_t>(Mailbox::busToPhysical(bus_addr_));
                 virt_addr_ = mailbox.mapMem(phys, total_size_);
                 if (virt_addr_ == nullptr)
@@ -112,14 +94,11 @@ namespace
             }
             catch (const std::runtime_error &e)
             {
-                // If it was a timeout, mailbox is already closed by memAlloc(),
-                // so just re-throw and let caller decide to reopen & retry.
                 if (std::string(e.what()).find("timed out") != std::string::npos)
                 {
                     throw;
                 }
 
-                // Otherwise, clean up any allocation we made, then re-throw
                 if (virt_addr_)
                 {
                     mailbox.unMapMem(virt_addr_, total_size_);
@@ -135,11 +114,10 @@ namespace
                     mailbox.memFree(mem_ref_);
                     mem_ref_ = 0;
                 }
-                throw; // preserve the original error
+                throw;
             }
         }
 
-        /** Unmap, unlock, and free on destruction. */
         ~MailboxMemoryPool()
         {
             if (virt_addr_)
@@ -153,13 +131,10 @@ namespace
             }
         }
 
-        /** @return Virtual base pointer for the DMA pages. */
         volatile uint8_t *virt() const { return virt_addr_; }
-        /** @return Bus address of the first DMA page. */
         std::uintptr_t bus() const { return bus_addr_; }
     };
 
-    // Sleep until absolute monotonic‐clock time `ts_target`
     static inline void sleep_until_abs(const struct timespec &ts_target)
     {
         int err;
@@ -169,7 +144,6 @@ namespace
                     &ts_target,
                     nullptr)) == EINTR)
         {
-            // Retry if interrupted by a signal
         }
         if (err != 0)
         {
@@ -178,86 +152,95 @@ namespace
                                     "WsprTransmitter: clock_nanosleep failed");
         }
     }
+
+    static inline void sleep_until_abs_realtime(const struct timespec &ts_target)
+    {
+        int err;
+        while ((err = clock_nanosleep(
+                    CLOCK_REALTIME,
+                    TIMER_ABSTIME,
+                    &ts_target,
+                    nullptr)) == EINTR)
+        {
+        }
+        if (err != 0)
+        {
+            throw std::system_error(err,
+                                    std::generic_category(),
+                                    "WsprTransmitter: clock_nanosleep REALTIME failed");
+        }
+    }
+
+    static inline timespec add_ns(timespec t, int64_t ns)
+    {
+        t.tv_sec += ns / 1000000000LL;
+        t.tv_nsec += static_cast<long>(ns % 1000000000LL);
+        if (t.tv_nsec >= 1000000000L)
+        {
+            t.tv_sec++;
+            t.tv_nsec -= 1000000000L;
+        }
+        else if (t.tv_nsec < 0)
+        {
+            t.tv_sec--;
+            t.tv_nsec += 1000000000L;
+        }
+        return t;
+    }
+
+    static inline bool gpclk0_wait_not_busy(volatile int &gp0ctl_reg, int max_us)
+    {
+        const int polls = (max_us <= 0) ? 0 : (max_us / 100);
+        for (int i = 0; i < polls; ++i)
+        {
+            if ((gp0ctl_reg & (1 << 7)) == 0)
+                return true;
+
+            struct timespec ts{};
+            ts.tv_sec = 0;
+            ts.tv_nsec = 100000; // 100us
+            nanosleep(&ts, nullptr);
+        }
+        return ((gp0ctl_reg & (1 << 7)) == 0);
+    }
+
+    static inline void gpclk0_disable_wait(volatile int &gp0ctl_reg)
+    {
+        uint32_t ctl = static_cast<uint32_t>(gp0ctl_reg);
+        ctl = (ctl & 0x7EFu) | 0x5A000000u;
+        gp0ctl_reg = static_cast<int>(ctl);
+
+        if (gpclk0_wait_not_busy(gp0ctl_reg, 200000))
+            return;
+
+        ctl = static_cast<uint32_t>(gp0ctl_reg);
+        ctl |= (1u << 5);   // KILL
+        ctl |= 0x5A000000u; // PASSWD
+        gp0ctl_reg = static_cast<int>(ctl);
+
+        (void)gpclk0_wait_not_busy(gp0ctl_reg, 200000);
+    }
+
 } // end anonymous namespace
 
-/**
- * @brief Global instance of the WSPR transmitter.
- *
- * @details This instance provides a globally accessible transmitter object
- * for configuring and initiating WSPR transmissions. It is constructed at
- * program startup and destructed automatically on exit.
- */
 WsprTransmitter wsprTransmitter;
 
 /* Public Methods */
 
-/**
- * @brief Constructs a WSPR transmitter with default settings.
- *
- * @details Initializes the WSPR transmitter object. Transmission parameters
- * are configured later via setupTransmission(). This constructor does not
- * allocate hardware resources or initiate any transmissions.
- */
 WsprTransmitter::WsprTransmitter() = default;
 
-/**
- * @brief Destructor for the WSPR transmitter.
- *
- * @details Cleans up DMA, mailbox, and memory-mapped resources associated
- * with the WSPR transmission process. Automatically called at program exit
- * if wsprTransmitter is used as a global object.
- */
 WsprTransmitter::~WsprTransmitter()
 {
-    // Stop scheduling new windows and any current TX
-    disableTransmission(); // Stops scheduler + joins any tx_thread_
-    dma_cleanup();         // In case anything still mapped
+    disableTransmission();
+    dma_cleanup();
 }
 
-/**
- * @brief Install optional callbacks for transmission start/end.
- *
- * @param[in] start_cb
- *   Called on the transmit thread immediately before the first symbol
- *   (or tone) is emitted. If null, no start notification is made.
- *   The callback receives a std::variant containing either a double
- *   (transmit frequency) or a std::string (custom message).
- *
- * @param[in] end_cb
- *   Called on the transmit thread immediately after the last WSPR
- *   symbol is sent (but before DMA/PWM are torn down). If null,
- *   no completion notification is made.
- *   The callback uses the same variant format as the start callback.
- */
 void WsprTransmitter::setTransmissionCallbacks(StartCallback start_cb, EndCallback end_cb)
 {
     on_transmit_start_ = std::move(start_cb);
     on_transmit_end_ = std::move(end_cb);
 }
 
-/**
- * @brief Configure and start a WSPR transmission.
- *
- * @details Performs the following sequence:
- *   1. Set the desired RF frequency and power level.
- *   2. Populate WSPR symbol data if transmitting a message.
- *   3. Determine WSPR mode (2‑tone or 15‑tone) and symbol timing.
- *   4. Optionally apply a random frequency offset to spread spectral load.
- *   5. Initialize DMA and mailbox resources.
- *   6. Apply the specified PPM calibration to the PLLD clock.
- *   7. Rebuild the DMA frequency table with the new PPM‑corrected clock.
- *   8. Update the actual center frequency after any hardware adjustments.
- *
- * @param[in] frequency    Target RF frequency in Hz.
- * @param[in] power        Transmit power index (0‑n).
- * @param[in] ppm          Parts‑per‑million correction to apply (e.g. +11.135).
- * @param[in] callsign     Optional callsign for WSPR message.
- * @param[in] grid_square  Optional Maidenhead grid locator.
- * @param[in] power_dbm    dBm value for WSPR message (ignored if tone).
- * @param[in] use_offset   True to apply a small random offset within band.
- *
- * @throws std::runtime_error if DMA setup or mailbox operations fail.
- */
 void WsprTransmitter::setupTransmission(
     double frequency,
     int power,
@@ -267,17 +250,14 @@ void WsprTransmitter::setupTransmission(
     int power_dbm,
     bool use_offset)
 {
-    // If we’ve already got DMA up, tear down the old run
     if (dma_setup_done_)
     {
-        disableTransmission(); // Stop the trandmission and scheduler
-        dma_cleanup();         // Now unmap/free everything
+        disableTransmission();
+        dma_cleanup();
     }
 
-    // Clear the stop flag so the next thread can run
     stop_requested_.store(false);
 
-    // Set transmission parameters
     trans_params_.call_sign = call_sign;
     trans_params_.grid_square = grid_square;
     trans_params_.power_dbm = power_dbm;
@@ -286,7 +266,6 @@ void WsprTransmitter::setupTransmission(
     trans_params_.power = power;
     trans_params_.use_offset = use_offset;
 
-    // Default to tone‑only; load WSPR message if provided
     if (!trans_params_.call_sign.empty() && !trans_params_.grid_square.empty() && trans_params_.power_dbm != 0)
     {
         trans_params_.is_tone = false;
@@ -298,186 +277,147 @@ void WsprTransmitter::setupTransmission(
         trans_params_.is_tone = true;
     }
 
-    // Choose WSPR mode and symbol timing
     int offset_freq = 0;
-    // WSPR‑2 mode
     trans_params_.symtime = WSPR_SYMTIME;
     if (trans_params_.use_offset)
         offset_freq = WSPR_RAND_OFFSET;
     trans_params_.tone_spacing = 1.0 / trans_params_.symtime;
 
-    // Apply random offset if requested
     if (trans_params_.use_offset)
     {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_real_distribution<> dis(-1.0, 1.0);
-        // Skip offset if frequency is 0.0
         if (trans_params_.frequency != 0.0)
             trans_params_.frequency += dis(gen) * offset_freq;
     }
 
-    // Initialize DMA, mapping, and control blocks
     setup_dma();
 
-    // Apply PPM correction to the PLLD clock
-    // (use a stored nominal base frequency for repeatable resets)
     dma_config_.plld_clock_frequency =
         dma_config_.plld_nominal_freq * (1 - ppm / 1e6);
 
-    // Build the DMA frequency lookup table with new clock
-    // Sets center_actual according to hardware limitations
     double center_actual = trans_params_.frequency;
     setup_dma_freq_table(center_actual);
 
-    // Update actual frequency after any hardware adjustments
-    // Do not update if frequency = 0 (skip)
     if (trans_params_.frequency != 0.0)
         trans_params_.frequency = center_actual;
 }
 
-/**
- * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
- *
- * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
- * @throws std::runtime_error if peripherals aren’t mapped.
- */
 void WsprTransmitter::updateDMAForPPM(double ppm_new)
 {
-    // Apply the PPM correction to your working PLLD clock.
     dma_config_.plld_clock_frequency =
         dma_config_.plld_nominal_freq * (1.0 - ppm_new / 1e6);
 
-    // Recompute the DMA frequency table in place.
-    // Pass in your current center frequency so it can adjust if needed.
     double center_actual = trans_params_.frequency;
     setup_dma_freq_table(center_actual);
     if (trans_params_.frequency != 0.0)
         trans_params_.frequency = center_actual;
 }
 
-/**
- * @brief Configure POSIX scheduling policy & priority for future transmissions.
- *
- * @details
- *   This must be called _before_ `startTransmission()` if you need real-time
- *   scheduling.  The next call to `startTransmission()` will launch its thread
- *   under the given policy/priority.
- *
- * @param[in] policy
- *   One of the standard POSIX policies (e.g. SCHED_FIFO, SCHED_RR, SCHED_OTHER).
- * @param[in] priority
- *   Thread priority (1–99) for real-time policies; ignored under SCHED_OTHER.
- */
 void WsprTransmitter::setThreadScheduling(int policy, int priority)
 {
     thread_policy_ = policy;
     thread_priority_ = priority;
 }
 
-/**
- * @brief Begin transmission immediately for tone mode, or schedule for the next
- *        WSPR window.
- *
- * @details
- *   – If `trans_params_.is_tone == true`, this will spawn the TX thread
- *     immediately (bypassing the scheduler) so you can start/stop your
- *     test tone on demand.
- *   – Otherwise it launches the scheduler thread, which waits for the next
- *     valid WSPR window and then fires off a transmission.
- */
+void WsprTransmitter::setOneShot(bool enable) noexcept
+{
+    one_shot_.store(enable, std::memory_order_release);
+}
+
+void WsprTransmitter::setTransmitNow(bool enable) noexcept
+{
+    transmit_now_.store(enable, std::memory_order_release);
+}
+
+void WsprTransmitter::requestSoftOff() noexcept
+{
+    soft_off_.store(true, std::memory_order_release);
+    scheduler_.notify();
+}
+
+void WsprTransmitter::clearSoftOff() noexcept
+{
+    soft_off_.store(false, std::memory_order_release);
+}
+
 void WsprTransmitter::enableTransmission()
 {
     stop_requested_.store(false, std::memory_order_release);
-    if (trans_params_.is_tone)
+
+    // If the application has requested a soft-off, do not start scheduling.
+    if (!trans_params_.is_tone && soft_off_.load(std::memory_order_acquire))
     {
-        // immediate start for tone tests
+        return;
+    }
+
+    const bool immediate = trans_params_.is_tone ||
+                           transmit_now_.load(std::memory_order_acquire);
+
+    if (immediate)
+    {
+        scheduled_start_rt_ns_.store(0, std::memory_order_release);
+
+        std::lock_guard<std::mutex> lk(tx_thread_mtx_);
+        if (tx_thread_.joinable())
+        {
+            tx_thread_.join();
+        }
+
         tx_thread_ = std::thread(&WsprTransmitter::thread_entry, this);
+        return;
     }
-    else
-    {
-        // Scheduled WSPR window
-        scheduler_.start();
-    }
+
+    scheduler_.start();
 }
 
-/**
- * @brief Cancels the scheduler (and any running transmission).
- *
- * Waits for the scheduler thread to stop, and forces any in‐flight
- * transmission to end.
- */
 void WsprTransmitter::disableTransmission()
 {
-    // Stop scheduling further windows
-    scheduler_.stop();
-
-    // if a transmit thread is running, signal & join it too
+    // Set the stop flag first so a newly spawned transmit thread
+    // will abort before it touches DMA/PWM state.
     stop_requested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
 
-    if (tx_thread_.joinable() &&
-        tx_thread_.get_id() != std::this_thread::get_id())
+    // Stop the scheduler thread. Note: do not set soft_off_ here.
+    //
+    // soft_off_ is an application-level "no new scheduling" latch (used
+    // for Ctrl-C / graceful shutdown). disableTransmission() is also used
+    // internally during reconfiguration (e.g., setupTransmission()), and
+    // must not permanently prevent future enableTransmission() calls.
+    scheduler_.stop();
+
+    // Join the transmit thread under a mutex so the scheduler cannot
+    // race with us and start a new thread while we are joining.
     {
-        tx_thread_.join();
+        std::lock_guard<std::mutex> lk(tx_thread_mtx_);
+        if (tx_thread_.joinable() &&
+            tx_thread_.get_id() != std::this_thread::get_id())
+        {
+            tx_thread_.join();
+        }
     }
 }
 
-/**
- * @brief Request an in‑flight transmission to stop.
- *
- * @details Sets the internal stop flag so that ongoing loops in the transmit
- *          thread will exit at the next interruption point. Notifies any
- *          condition_variable waits to unblock the thread promptly.
- */
 void WsprTransmitter::stopTransmission()
 {
-    // Tell the worker to stop
     stop_requested_.store(true);
-    // Unblock any waits
     stop_cv_.notify_all();
 }
 
-/**
- * @brief Gracefully stops scheduler and any in-flight transmission, then cleans up.
- *
- * @details
- *   1. Calls disableTransmission() to stop the scheduler thread and join any tx_thread_.
- *   2. Performs DMA/PWM/mailbox cleanup.
- */
 void WsprTransmitter::stop()
 {
-    disableTransmission(); // stops scheduler, signals & joins tx_thread_
-    dma_cleanup();         // unmaps peripherals, frees mailbox memory
+    disableTransmission();
+    dma_cleanup();
 }
 
-/**
- * @brief Check if the GPIO is bound to the clock.
- *
- * @details Returns a value indicating if the system is transmitting
- * in any way,
- *
- * @return `true` if clock is engaged, `false` otherwise.
- */
 bool WsprTransmitter::isTransmitting() const noexcept
 {
     return transmit_on_.load(std::memory_order_acquire);
 }
 
-/**
- * @brief Prints current transmission parameters and encoded WSPR symbols.
- *
- * @details Displays the configured WSPR parameters including frequency,
- * power, mode, tone/test settings, and symbol timing. If tone mode is
- * enabled (`trans_params_.is_tone == true`), message-related fields like
- * call sign and symbols are shown as "N/A".
- *
- * This function is useful for debugging and verifying that all transmission
- * settings and symbol sequences are correctly populated before transmission.
- */
 void WsprTransmitter::printParameters()
 {
-    // General transmission metadata
     std::cout << "Call Sign:         "
               << (trans_params_.is_tone ? "N/A" : trans_params_.call_sign) << std::endl;
 
@@ -504,7 +444,6 @@ void WsprTransmitter::printParameters()
     std::cout << "DMA Table Size:    "
               << trans_params_.dma_table_freq.size() << std::endl;
 
-    // Print symbols unless in tone mode
     if (trans_params_.is_tone)
     {
         std::cout << "WSPR Symbols:      N/A" << std::endl;
@@ -522,7 +461,6 @@ void WsprTransmitter::printParameters()
                 std::cout << ", ";
             }
 
-            // Insert newline every 18 symbols for readability
             if ((i + 1) % 18 == 0 && i < symbol_count - 1)
             {
                 std::cout << std::endl;
@@ -534,34 +472,16 @@ void WsprTransmitter::printParameters()
 
 /* Private Methods */
 
-/**
- * @brief Invoke the start‐transmission callback with an empty message.
- *
- * @details Ensures the callback is valid before calling, providing an
- *          empty string to match the `CallbackArg` signature.
- *
- * @param cb  The callback to invoke just before starting transmission.
- */
 inline void WsprTransmitter::fire_start_cb(const std::string &msg, const double frequency)
 {
     if (on_transmit_start_)
     {
-        // Capture msg, frequency, and cb by value
         std::thread([cb = on_transmit_start_, msg, frequency]()
                     { cb(msg, frequency); })
             .detach();
     }
 }
 
-/**
- * @brief Invoke the end‐transmission callback with a message.
- *
- * @details Ensures the callback is valid before calling, passing the
- *          provided message string to the user’s callback function.
- *
- * @param cb   The callback to invoke immediately after transmission.
- * @param msg  The message string to pass into the callback.
- */
 inline void WsprTransmitter::fire_end_cb(const std::string &msg, double elapsed)
 {
     if (on_transmit_end_)
@@ -572,118 +492,187 @@ inline void WsprTransmitter::fire_end_cb(const std::string &msg, double elapsed)
     }
 }
 
-/**
- * @brief Perform DMA-driven RF transmission.
- *
- * @details
- *   1. Records the start time as a reference for symbol scheduling.
- *   2. Enables the PWM clock and DMA engine for transmission.
- *   3. If in tone mode, continuously transmits a fixed‑frequency test tone.
- *   4. Otherwise, transmits each WSPR symbol in sequence, using gettimeofday()
- *      and `timeval_subtract()` to schedule precise symbol timing.
- *   5. Disables transmission when complete.
- *
- * @note In tone mode (`trans_params_.is_tone == true`), this function only
- *       returns via SIGINT.
- */
+bool WsprTransmitter::shouldStop() const noexcept
+{
+    if (stop_requested_.load(std::memory_order_acquire))
+        return true;
+
+    const std::atomic<bool> *ext = external_stop_flag_;
+    if (ext && ext->load(std::memory_order_acquire))
+        return true;
+
+    return false;
+}
+
 void WsprTransmitter::transmit()
 {
-    // If we're not in tone‐test mode and frequency was zeroed out, skip.
     if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
     {
         fire_end_cb("Skipping transmission (frequency = 0.0).", 0.0);
         return;
     }
 
-    // Existing stop‐requested check
-    if (stop_requested_.load())
+    if (shouldStop())
     {
         if (debug)
         {
             std::cerr << debug_tag << "transmit() aborted before start." << std::endl;
         }
-        fire_end_cb("Transmission aborted before start.", 0.0);
         return;
     }
 
-    // Choose tone vs WSPR
+    // RAII guard that guarantees TX is turned off no matter how we exit.
+    struct TxOffGuard
+    {
+        WsprTransmitter *self;
+        bool enabled;
+
+        explicit TxOffGuard(WsprTransmitter *s)
+            : self{s}, enabled{true}
+        {
+        }
+
+        void dismiss()
+        {
+            enabled = false;
+        }
+
+        ~TxOffGuard()
+        {
+            if (enabled && self)
+            {
+                self->transmit_off();
+            }
+        }
+    };
+
     if (trans_params_.is_tone)
     {
-        int dummyBuf = 0;
+        std::uint32_t dummyBuf = 0;
 
-        // Enable PWM clock and DMA transmission
         transmit_on();
-        // Continuous tone loop — exit as soon as stop_requested_ is true
-        while (!stop_requested_.load())
+        TxOffGuard tx_guard(this);
+
+        while (!shouldStop())
         {
             transmit_symbol(
-                0,       // Symbol number
-                0.0,     // Test-tone
-                dummyBuf // DMA buffer index
-            );
+                0,
+                0.0,
+                dummyBuf,
+                -1);
         }
+
         transmit_off();
+        tx_guard.dismiss();
     }
     else
     {
-        // Initialize DMA buffer index
-        int bufPtr = 0;
+        std::uint32_t bufPtr = 0;
 
-        // Fire callback with frequency as an argument
+        // Align to the scheduler-provided realtime boundary before starting TX.
+        const std::int64_t start_rt_ns =
+            scheduled_start_rt_ns_.load(std::memory_order_acquire);
+        if (start_rt_ns != 0)
+        {
+            struct timespec start_rt{};
+            start_rt.tv_sec = start_rt_ns / 1000000000LL;
+            start_rt.tv_nsec = static_cast<long>(start_rt_ns % 1000000000LL);
+
+            sleep_until_abs_realtime(start_rt);
+
+            if (debug)
+            {
+                struct timespec now_rt{};
+                clock_gettime(CLOCK_REALTIME, &now_rt);
+                std::cerr << debug_tag
+                          << "TX start realtime = "
+                          << now_rt.tv_sec
+                          << "."
+                          << std::setw(9) << std::setfill('0') << now_rt.tv_nsec
+                          << std::setfill(' ')
+                          << std::endl;
+            }
+        }
+
+        // Fire callback as close to the first symbol as possible.
+        // TODO: Take this out to 6 decimal points
         fire_start_cb("", trans_params_.frequency);
 
-        // Capture both a chrono and a timespec timestamp at start
+        // Anchor symbol timing to monotonic clock.
         auto t0_chrono = std::chrono::steady_clock::now();
-        struct timespec t0_ts;
+        struct timespec t0_ts{};
         clock_gettime(CLOCK_MONOTONIC, &t0_ts);
 
         const int symbol_count = static_cast<int>(trans_params_.symbols.size());
-        const double symtime = trans_params_.symtime; // e.g. 0.682667 s
+        const double symtime = trans_params_.symtime;
 
-        // Begin transmission
         transmit_on();
-        for (int i = 0; i < symbol_count && !stop_requested_.load(); ++i)
-        {
-            // Compute absolute target time = t0_ts + i * symtime
-            long offset_ns = static_cast<long>(i * symtime * 1e9);
-            struct timespec target = t0_ts;
-            target.tv_sec += offset_ns / 1000000000;
-            target.tv_nsec += offset_ns % 1000000000;
-            if (target.tv_nsec >= 1000000000)
-            {
-                target.tv_sec++;
-                target.tv_nsec -= 1000000000;
-            }
+        TxOffGuard tx_guard(this);
 
-            // Sleep until the exact slot
+        for (int i = 0; i < symbol_count && !shouldStop(); ++i)
+        {
+            const int64_t offset_ns =
+                static_cast<int64_t>(std::llround(static_cast<double>(i) * symtime * 1e9));
+
+            timespec target = add_ns(t0_ts, offset_ns);
+
             sleep_until_abs(target);
 
-            // Emit symbol i for exactly symtime seconds
+            if (debug)
+            {
+                struct timespec now{};
+                clock_gettime(CLOCK_MONOTONIC, &now);
+
+                const int64_t late_ns =
+                    (now.tv_sec - target.tv_sec) * 1'000'000'000LL +
+                    (now.tv_nsec - target.tv_nsec);
+
+                if (late_ns > 1'000'000) // >1 ms late
+                {
+                    std::cerr << debug_tag
+                              << "Symbol overrun: "
+                              << late_ns / 1e6
+                              << " ms late"
+                              << std::endl;
+                }
+            }
+
+            if (shouldStop())
+            {
+                break;
+            }
+
             transmit_symbol(
                 static_cast<int>(trans_params_.symbols[i]),
                 symtime,
-                bufPtr);
+                bufPtr,
+                i);
         }
-        transmit_off();
 
-        // Measure actual elapsed time in seconds, round to 3 decimals
+        // Allow the final symbol's queued DMA work to drain before turning off
+        // the clock. Without this, we can cut the last symbol short by roughly
+        // one symbol period.
+        if (!shouldStop())
+        {
+            const int64_t end_ns =
+                static_cast<int64_t>(std::llround(
+                    static_cast<double>(symbol_count) * symtime * 1e9));
+
+            const timespec end_target = add_ns(t0_ts, end_ns);
+            sleep_until_abs(end_target);
+        }
+
+        transmit_off();
+        tx_guard.dismiss();
+
         auto t1 = std::chrono::steady_clock::now();
         double total = std::chrono::duration<double>(t1 - t0_chrono).count();
         total = std::round(total * 1000.0) / 1000.0;
 
-        // Invoke the completion callback if set
         fire_end_cb("", total);
     }
 }
 
-/**
- * @brief Waits for the background transmission thread to finish.
- *
- * @details If the transmission thread was launched via
- *          startTransmission(), this call will block until
- *          that thread has completed and joined. After returning,
- *          tx_thread_ is no longer joinable.
- */
 void WsprTransmitter::join_transmission()
 {
     if (tx_thread_.joinable())
@@ -692,41 +681,21 @@ void WsprTransmitter::join_transmission()
     }
 }
 
-/**
- * @brief Clean up DMA and mailbox resources.
- *
- * @details Performs teardown in the following order:
- *   1. Prevent multiple invocations.
- *   2. Stop any ongoing DMA transfers and disable the PWM clock.
- *   3. Restore saved clock and PWM register values.
- *   4. Reset the DMA controller.
- *   5. Unmap the peripheral base address region.
- *   6. Deallocate mailbox memory pages.
- *   7. Close the mailbox.
- *   8. Remove the local device file.
- *   9. Reset all configuration data to defaults.
- *
- * @note This function is idempotent; subsequent calls are no‑ops.
- */
 void WsprTransmitter::dma_cleanup()
 {
-    // Only clean up if we have something to tear down
     if (!dma_setup_done_)
     {
         return;
     }
     dma_setup_done_ = false;
 
-    // If we never mapped the peripherals, nothing to tear down:
     if (!dma_config_.peripheral_base_virtual)
     {
         return;
     }
 
-    // Stop DMA transfers and disable PWM clock
     transmit_off();
 
-    // Restore original clock and PWM registers
     access_bus_address(CM_GP0DIV_BUS) = dma_config_.orig_gp0div;
     access_bus_address(CM_GP0CTL_BUS) = dma_config_.orig_gp0ctl;
     access_bus_address(PWM_BUS_BASE + 0x00) = dma_config_.orig_pwm_ctl;
@@ -735,37 +704,22 @@ void WsprTransmitter::dma_cleanup()
     access_bus_address(PWM_BUS_BASE + 0x20) = dma_config_.orig_pwm_rng2;
     access_bus_address(PWM_BUS_BASE + 0x08) = dma_config_.orig_pwm_fifocfg;
 
-    // Reset DMA controller registers
     clear_dma_setup();
 
-    // Unmap peripheral region if mapped
     if (dma_config_.peripheral_base_virtual)
     {
         ::mailbox.unMapMem(dma_config_.peripheral_base_virtual, Mailbox::PAGE_SIZE * NUM_PAGES);
         dma_config_.peripheral_base_virtual = nullptr;
     }
 
-    // Deallocate mailbox-allocated memory pages
     deallocate_memory_pool();
 
-    // Close mailbox if open
     mailbox.close();
 
-    // Reset global configuration structures to defaults
-    dma_config_ = DMAConfig();         // Uses your in-class initializers
-    mailbox_struct_ = MailboxStruct(); // Uses your in-class initializers
+    dma_config_ = DMAConfig();
+    mailbox_struct_ = MailboxStruct();
 }
 
-/**
- * @brief Get the GPIO drive strength in milliamps.
- *
- * Maps a drive strength level (0–7) to its corresponding current drive
- * capability in milliamps (mA).
- *
- * @param level Drive strength level (0–7).
- * @return int   Drive strength in mA.
- * @throws std::out_of_range if level is outside the [0,7] range.
- */
 constexpr int WsprTransmitter::get_gpio_power_mw(int level)
 {
     if (level < 0 || level >= static_cast<int>(DRIVE_STRENGTH_TABLE.size()))
@@ -775,16 +729,6 @@ constexpr int WsprTransmitter::get_gpio_power_mw(int level)
     return DRIVE_STRENGTH_TABLE[level];
 }
 
-/**
- * @brief Convert power in milliwatts to decibels referenced to 1 mW (dBm).
- *
- * Uses the formula:
- * PdBm=10*LOG10(mW/1) where mW = power in milliwatts
- *
- * @param mw  Power in milliwatts. Must be greater than 0.
- * @return    Power in dBm.
- * @throws    std::domain_error if mw is not positive.
- */
 inline double WsprTransmitter::convert_mw_dbm(double mw)
 {
     if (mw <= 0.0)
@@ -794,18 +738,8 @@ inline double WsprTransmitter::convert_mw_dbm(double mw)
     return 10.0 * std::log10(mw);
 }
 
-/**
- * @brief Entry point for the background transmission thread.
- *
- * @details Applies the configured POSIX scheduling policy and priority
- *          (via set_thread_priority()), then invokes transmit() to carry
- *          out the actual transmission work. This method runs inside the
- *          new thread and returns only when transmit() completes or a
- *          stop request is observed.
- */
 void WsprTransmitter::thread_entry()
 {
-    // Pin this thread to CPU 0
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     CPU_SET(0, &cpus);
@@ -814,14 +748,12 @@ void WsprTransmitter::thread_entry()
                                          &cpus);
     if (aff_ret != 0)
     {
-        // Affinity failed; warn but continue
         std::cerr << debug_tag
                   << "thread_entry(): failed to set CPU affinity: "
                   << std::strerror(aff_ret)
                   << std::endl;
     }
 
-    // Bump our own scheduling parameters first:
     try
     {
         set_thread_priority();
@@ -836,20 +768,11 @@ void WsprTransmitter::thread_entry()
         throw std::domain_error(
             std::string("WsprTransmitter::thread_entry(): Unexpected error: ") + e.what());
     }
-    // Actually do the work (blocking until complete or stop_requested_)
     transmit();
 }
 
-/**
- * @brief Applies the configured scheduling policy and priority to this thread.
- *
- * @details Builds a sched_param struct using thread_priority_ and invokes
- *          pthread_setschedparam() with thread_policy_ on the current thread.
- *          If the call fails, raise a warning.
- */
 void WsprTransmitter::set_thread_priority()
 {
-    // Only real‑time policies use priority > 0
     sched_param sch{};
     sch.sched_priority = thread_priority_;
     int ret = pthread_setschedparam(pthread_self(), thread_policy_, &sch);
@@ -862,94 +785,24 @@ void WsprTransmitter::set_thread_priority()
     }
 }
 
-/**
- * @brief Calculates the virtual address for a given bus address.
- *
- * This function calculates the appropriate virtual address for accessing the
- * given bus address in the peripheral space. It does so by subtracting 0x7e000000
- * from the supplied bus address to obtain the offset into the peripheral address space,
- * then adds that offset to the virtual base address of the peripherals.
- *
- * @param bus_addr The bus address from which to calculate the corresponding virtual address.
- * @return A reference to a volatile int located at the computed virtual address.
- */
 inline volatile int &WsprTransmitter::access_bus_address(std::uintptr_t bus_addr)
 {
-    // Compute byte‐offset from the bus address
     std::uintptr_t offset = Mailbox::offsetFromBase(bus_addr);
-
-    // Add the offset, then cast to a volatile‐int pointer and dereference.
     return *reinterpret_cast<volatile int *>(dma_config_.peripheral_base_virtual + offset);
 }
 
-/**
- * @brief Sets a specified bit at a bus address in the peripheral address space.
- *
- * This function accesses the virtual address corresponding to the given bus address using
- * the `access_bus_address()` function and sets the bit at the provided position.
- *
- * @param base The bus address in the peripheral address space.
- * @param bit The bit number to set (0-indexed).
- */
 inline void WsprTransmitter::set_bit_bus_address(std::uintptr_t base, unsigned int bit)
 {
     access_bus_address(base) |= 1 << bit;
 }
 
-/**
- * @brief Clears a specified bit at a bus address in the peripheral address space.
- *
- * This function accesses the virtual address corresponding to the given bus address using
- * the `access_bus_address()` function and clears the bit at the provided position.
- *
- * @param base The bus address in the peripheral address space.
- * @param bit The bit number to clear (0-indexed).
- */
 inline void WsprTransmitter::clear_bit_bus_address(std::uintptr_t base, unsigned int bit)
 {
     access_bus_address(base) &= ~(1 << bit);
 }
 
-/**
- * @brief Computes the difference between two time values.
- * @details Calculates `t2 - t1` and stores the result in `result`. If `t2 < t1`,
- *          the function returns `1`, otherwise, it returns `0`.
- *
- * @param[out] result Pointer to `timeval` struct to store the difference.
- * @param[in] t2 Pointer to the later `timeval` structure.
- * @param[in] t1 Pointer to the earlier `timeval` structure.
- * @return Returns `1` if the difference is negative (t2 < t1), otherwise `0`.
- */
-int WsprTransmitter::symbol_timeval_subtract(struct timeval *result, const struct timeval *t2, const struct timeval *t1)
-{
-    // Compute the time difference in microseconds
-    long int diff_usec = (t2->tv_usec + 1000000 * t2->tv_sec) - (t1->tv_usec + 1000000 * t1->tv_sec);
-
-    // Compute seconds and microseconds for the result
-    result->tv_sec = diff_usec / 1000000;
-    result->tv_usec = diff_usec % 1000000;
-
-    // Return 1 if t2 < t1 (negative difference), otherwise 0
-    return (diff_usec < 0) ? 1 : 0;
-}
-
-/**
- * @brief Initialize DMAConfig PLLD frequencies and mailbox memory flag.
- *
- * @details
- *   1. Reads the Raspberry Pi hardware revision from `/proc/cpuinfo` (cached
- *      after first read).
- *   2. Determines the processor ID (BCM2835, BCM2836/37, or BCM2711).
- *   3. Sets `dma_config_.plld_nominal_freq` to the board’s true PLLD base
- *      frequency (500 MHz for Pi 1/2/3, 750 MHz for Pi 4).
- *   4. Initializes `dma_config_.plld_clock_frequency` equal to
- *      `plld_nominal_freq` (zero PPM correction).
- *
- * @throws std::runtime_error if the processor ID is unrecognized.
- */
 void WsprTransmitter::get_plld()
 {
-    // Cache the revision to avoid repeated file I/O
     static std::optional<unsigned> cached_revision;
     if (!cached_revision)
     {
@@ -970,7 +823,7 @@ void WsprTransmitter::get_plld()
         }
         if (!cached_revision)
         {
-            cached_revision = 0; // Fallback if parsing fails
+            cached_revision = 0;
         }
     }
 
@@ -990,16 +843,16 @@ void WsprTransmitter::get_plld()
     double base_freq_hz = 500e6;
     switch (proc_id)
     {
-    case BCMChip::BCM_HOST_PROCESSOR_BCM2835: // Pi 1
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2835:
         base_freq_hz = 500e6;
         break;
 
-    case BCMChip::BCM_HOST_PROCESSOR_BCM2836: // Pi 2
-    case BCMChip::BCM_HOST_PROCESSOR_BCM2837: // Pi 3
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2836:
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2837:
         base_freq_hz = 500e6;
         break;
 
-    case BCMChip::BCM_HOST_PROCESSOR_BCM2711: // Pi 4
+    case BCMChip::BCM_HOST_PROCESSOR_BCM2711:
         base_freq_hz = 750e6;
         break;
 
@@ -1009,11 +862,9 @@ void WsprTransmitter::get_plld()
             std::string(to_string(proc_id)) + ")");
     }
 
-    // Store nominal and initial (zero‑PPM) working frequency
     dma_config_.plld_nominal_freq = base_freq_hz;
     dma_config_.plld_clock_frequency = base_freq_hz;
 
-    // Sanity check
     if (dma_config_.plld_clock_frequency <= 0)
     {
         std::cerr << "Error: Invalid PLLD frequency; defaulting to 500 MHz" << std::endl;
@@ -1131,28 +982,12 @@ void WsprTransmitter::deallocate_memory_pool()
  */
 void WsprTransmitter::disable_clock()
 {
-    // Set semaphore
-    transmit_on_.store(false);
+    transmit_on_.store(false, std::memory_order_release);
 
-    // Ensure memory-mapped peripherals are initialized before proceeding.
     if (dma_config_.peripheral_base_virtual == nullptr)
-    {
         return;
-    }
 
-    // Read current clock settings from the clock control register.
-    auto settings = access_bus_address(CM_GP0CTL_BUS);
-
-    // Disable the clock: clear the enable bit while preserving other settings.
-    // Apply the required password (0x5A000000) to modify the register.
-    settings = (settings & 0x7EF) | 0x5A000000;
-    access_bus_address(CM_GP0CTL_BUS) = static_cast<int>(settings);
-
-    // Wait until the clock is no longer busy.
-    while (access_bus_address(CM_GP0CTL_BUS) & (1 << 7))
-    {
-        // Busy-wait loop to ensure clock disable is complete.
-    }
+    gpclk0_disable_wait(access_bus_address(CM_GP0CTL_BUS));
 }
 
 /**
@@ -1192,6 +1027,25 @@ void WsprTransmitter::transmit_on()
  */
 void WsprTransmitter::transmit_off()
 {
+    const bool was_on = transmit_on_.load(std::memory_order_acquire);
+
+    // Avoid duplicate "DMA before off" prints during normal end-of-TX
+    // shutdown where transmit_off() may be called multiple times.
+    if (debug && was_on && dma_config_.peripheral_base_virtual != nullptr)
+    {
+        const std::uint32_t conblk =
+            static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x04));
+        const std::uint32_t cs =
+            static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x00));
+
+        std::cerr << debug_tag
+                  << "DMA before off: CS=0x"
+                  << std::hex << cs
+                  << " CONBLK_AD=0x" << conblk
+                  << std::dec
+                  << std::endl;
+    }
+
     // Disable the clock, effectively turning off transmission.
     disable_clock();
 }
@@ -1207,139 +1061,243 @@ void WsprTransmitter::transmit_off()
  * @param[in,out] bufPtr The buffer pointer index for DMA instruction handling.
  */
 void WsprTransmitter::transmit_symbol(
-    const int &sym_num,
+    const std::uint32_t &sym_num,
     const double &tsym,
-    int &bufPtr)
+    std::uint32_t &bufPtr,
+    int symbol_index)
 {
-    // Early-exit if a stop was already requested
-    if (stop_requested_.load(std::memory_order_acquire))
+    // Early-exit if a stop was already requested.
+    if (shouldStop())
     {
-        if (debug)
-            std::cout << debug_tag << "transmit_symbol(" << sym_num
-                      << ") aborted before start." << std::endl;
         return;
     }
 
+    constexpr std::uint32_t kMask = 0x3FFu; // 1024 ring
+    constexpr std::uint32_t kLead = 64u;    // Keep producer ahead of DMA
+    constexpr int kPollSleepUs = 50;        // Short backoff
+    constexpr int kMaxWaitUs = 200000;      // 200 ms safety timeout per CB write
+
+    auto dma_conblk_ad = [&]() -> std::uint32_t
+    {
+        // DMA channel CONBLK_AD register (bus-mapped)
+        return static_cast<std::uint32_t>(
+            access_bus_address(DMA_BUS_BASE + 0x04));
+    };
+
+    auto wait_cb_not_active = [&](std::uint32_t idx) -> bool
+    {
+        // Wait until DMA is NOT executing this CB.
+        const std::uint32_t target =
+            static_cast<std::uint32_t>(instructions_[idx].b);
+
+        int waited_us = 0;
+        while (!shouldStop())
+        {
+            const std::uint32_t cur = dma_conblk_ad();
+            if (cur != target)
+                return true;
+
+            // If DMA isn't advancing, do not deadlock forever.
+            if (waited_us >= kMaxWaitUs)
+            {
+                if (debug)
+                {
+                    std::cerr << debug_tag
+                              << "DMA appears stuck at CONBLK_AD=0x"
+                              << std::hex << cur << std::dec
+                              << ", forcing stop to avoid deadlock."
+                              << std::endl;
+                }
+                stop_requested_.store(true, std::memory_order_release);
+                stop_cv_.notify_all();
+                return false;
+            }
+
+            usleep(kPollSleepUs);
+            waited_us += kPollSleepUs;
+        }
+        return false;
+    };
+
+    auto advance_with_lead = [&]() -> void
+    {
+        // Keep producer ahead. Only do this when starting a new symbol
+        // (bufPtr points at the last written CB).
+        bufPtr = (bufPtr + kLead) & kMask;
+    };
+
     const bool is_tone = (tsym == 0.0);
-    const int f0_idx = sym_num * 2;
+    const int f0_idx = static_cast<int>(sym_num) * 2;
     const int f1_idx = f0_idx + 1;
+
+    const std::int64_t pwm_clocks_per_iter =
+        static_cast<std::int64_t>(PWM_CLOCKS_PER_ITER_NOMINAL);
+
+    // Always push the producer away from DMA head at the start of this call.
+    advance_with_lead();
 
     if (is_tone)
     {
-        // Continuous tone
-        while (!stop_requested_.load(std::memory_order_acquire))
+        // Continuous tone.
+        while (!shouldStop())
         {
-            const long int n_pwmclk = PWM_CLOCKS_PER_ITER_NOMINAL;
+            const std::uint32_t n_pwmclk =
+                static_cast<std::uint32_t>(pwm_clocks_per_iter);
 
             // SOURCE_AD
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
+            bufPtr = (bufPtr + 1) & kMask;
+            if (!wait_cb_not_active(bufPtr))
+                return;
+
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f0_idx * 4;
+                static_cast<std::uint32_t>(
+                    static_cast<std::uintptr_t>(const_page_.b) +
+                    static_cast<std::uintptr_t>(f0_idx * 4));
 
             // TXFR_LEN
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
+            bufPtr = (bufPtr + 1) & kMask;
+            if (!wait_cb_not_active(bufPtr))
+                return;
+
             reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_pwmclk;
         }
+
+        return;
     }
-    else
+
+    // WSPR symbol mode.
+    //
+    // IMPORTANT: TXFR_LEN counts the number of DMA transfers paced by PWM DREQ
+    // at the PWM *sample* rate, not at the raw PWM clock rate. The sample rate
+    // is PWM clock divided by the PWM range (the DMA table size). On 32-bit
+    // builds, using the raw clock here causes each symbol to run ~1024x too
+    // long and drift accumulates.
+    const std::uint32_t table_size =
+        static_cast<std::uint32_t>(
+            std::max<std::size_t>(1U, trans_params_.dma_table_freq.size()));
+
+    const double pwm_sample_hz =
+        pwm_clock_init_ /
+        static_cast<double>(table_size);
+    const std::int64_t n_pwmclk_per_sym =
+        static_cast<std::int64_t>(std::llround(pwm_sample_hz * tsym));
+
+    if (debug)
     {
-        // Calculate PWM freq
-        const long int n_pwmclk_per_sym = std::lround(pwm_clock_init_ * tsym);
-        long int n_pwmclk_transmitted = 0;
-        long int n_f0_transmitted = 0;
+        const int total_symbols =
+            static_cast<int>(trans_params_.symbols.size());
 
-        // Precompute interpolation ratio outside the loop
-        const double f0_freq = trans_params_.dma_table_freq[f0_idx];
-        const double f1_freq = trans_params_.dma_table_freq[f1_idx];
-        const double tone_freq =
-            trans_params_.frequency - 1.5 * trans_params_.tone_spacing + sym_num * trans_params_.tone_spacing;
-        const double f0_ratio =
-            1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
+        std::cerr
+            << debug_tag
+            << "sym=" << sym_num
+            << " idx=";
 
-        while (n_pwmclk_transmitted < n_pwmclk_per_sym &&
-               !stop_requested_.load(std::memory_order_acquire))
+        if (symbol_index >= 0)
         {
-            // --- compute clocks for this chunk ---
-            long int n_pwmclk =
-                PWM_CLOCKS_PER_ITER_NOMINAL;
-            n_pwmclk += std::lround(
-                (std::rand() / (RAND_MAX + 1.0) - 0.5) * n_pwmclk);
-            if (n_pwmclk_transmitted + n_pwmclk > n_pwmclk_per_sym)
-                n_pwmclk = n_pwmclk_per_sym - n_pwmclk_transmitted;
-
-            const long int n_f0 = std::lround(f0_ratio * (n_pwmclk_transmitted + n_pwmclk)) - n_f0_transmitted;
-            const long int n_f1 = n_pwmclk - n_f0;
-
-            // f0 SOURCE_AD
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f0_idx * 4;
-
-            // f0 TXFR_LEN
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f0;
-
-            // f1 SOURCE_AD
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
-                reinterpret_cast<std::uintptr_t>(const_page_.b) + f1_idx * 4;
-
-            // f1 TXFR_LEN
-            bufPtr = (bufPtr + 1) & 0x3FF;
-            {
-                std::unique_lock<std::mutex> lk(stop_mutex_);
-                stop_cv_.wait_for(lk, std::chrono::milliseconds(1), [&]
-                                  { return stop_requested_.load(std::memory_order_acquire) || static_cast<std::uintptr_t>(
-                                                                                                  access_bus_address(DMA_BUS_BASE + 0x04)) != reinterpret_cast<std::uintptr_t>(instructions_[bufPtr].b); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    return;
-            }
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_f1;
-
-            // Update counters
-            n_pwmclk_transmitted += n_pwmclk;
-            n_f0_transmitted += n_f0;
+            std::cerr
+                << (symbol_index + 1)
+                << "/" << total_symbols;
         }
+        else
+        {
+            std::cerr << "-";
+        }
+
+        std::cerr
+            << " tsym=" << std::setprecision(6) << tsym
+            << " pwm_clock_init_=" << std::fixed << std::setprecision(3)
+            << pwm_clock_init_ << std::defaultfloat
+            << " n_pwmclk_per_sym=" << n_pwmclk_per_sym
+            << " pwm_clocks_per_iter=" << pwm_clocks_per_iter
+            << std::endl;
+    }
+
+    if (n_pwmclk_per_sym <= 0 || n_pwmclk_per_sym > 5'000'000'000LL)
+        throw std::runtime_error(
+            "transmit_symbol(): invalid n_pwmclk_per_sym (bad PWM clock).");
+
+    std::int64_t n_pwmclk_transmitted = 0;
+    std::int64_t n_f0_transmitted = 0;
+
+    // Precompute interpolation ratio outside the loop.
+    const double f0_freq = trans_params_.dma_table_freq[f0_idx];
+    const double f1_freq = trans_params_.dma_table_freq[f1_idx];
+    const double tone_freq =
+        trans_params_.frequency - 1.5 * trans_params_.tone_spacing +
+        static_cast<double>(sym_num) * trans_params_.tone_spacing;
+
+    const double f0_ratio =
+        1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
+
+    while (n_pwmclk_transmitted < n_pwmclk_per_sym &&
+           !shouldStop())
+    {
+        // Compute clocks for this chunk.
+        std::int64_t n_pwmclk = pwm_clocks_per_iter;
+
+        // Jitter (retain behavior; keep math in 64-bit).
+        n_pwmclk += static_cast<std::int64_t>(std::llround(
+            (std::rand() / (RAND_MAX + 1.0) - 0.5) *
+            static_cast<double>(n_pwmclk)));
+
+        if (n_pwmclk <= 0)
+            n_pwmclk = 1;
+
+        if (n_pwmclk_transmitted + n_pwmclk > n_pwmclk_per_sym)
+            n_pwmclk = n_pwmclk_per_sym - n_pwmclk_transmitted;
+
+        // Compute how many of these clocks should be f0.
+        std::int64_t n_f0 =
+            static_cast<std::int64_t>(std::llround(
+                f0_ratio * static_cast<double>(n_pwmclk_transmitted + n_pwmclk))) -
+            n_f0_transmitted;
+
+        if (n_f0 < 0)
+            n_f0 = 0;
+        if (n_f0 > n_pwmclk)
+            n_f0 = n_pwmclk;
+
+        const std::int64_t n_f1 = n_pwmclk - n_f0;
+
+        // f0 SOURCE_AD
+        bufPtr = (bufPtr + 1) & kMask;
+        if (!wait_cb_not_active(bufPtr))
+            return;
+
+        reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
+            static_cast<std::uint32_t>(
+                static_cast<std::uintptr_t>(const_page_.b) +
+                static_cast<std::uintptr_t>(f0_idx * 4));
+
+        // f0 TXFR_LEN
+        bufPtr = (bufPtr + 1) & kMask;
+        if (!wait_cb_not_active(bufPtr))
+            return;
+
+        reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
+            static_cast<std::uint32_t>(n_f0);
+
+        // f1 SOURCE_AD
+        bufPtr = (bufPtr + 1) & kMask;
+        if (!wait_cb_not_active(bufPtr))
+            return;
+
+        reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
+            static_cast<std::uint32_t>(
+                static_cast<std::uintptr_t>(const_page_.b) +
+                static_cast<std::uintptr_t>(f1_idx * 4));
+
+        // f1 TXFR_LEN
+        bufPtr = (bufPtr + 1) & kMask;
+        if (!wait_cb_not_active(bufPtr))
+            return;
+
+        reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
+            static_cast<std::uint32_t>(n_f1);
+
+        // Update counters.
+        n_pwmclk_transmitted += n_pwmclk;
+        n_f0_transmitted += n_f0;
     }
 }
 
@@ -1598,7 +1556,28 @@ void WsprTransmitter::setup_dma()
     uint32_t div_reg = static_cast<uint32_t>(
         access_bus_address(CLK_BUS_BASE + 41 * 4));
     uint32_t divisor = (div_reg >> 12) & 0xFFF; // bits 23–12
+
+    if (divisor == 0)
+    {
+        throw std::runtime_error(
+            "setup_dma(): PWM clock divisor read back as 0 (bad register read/mapping).");
+    }
+
     pwm_clock_init_ = dma_config_.plld_clock_frequency / double(divisor);
+
+    if (!std::isfinite(pwm_clock_init_) || pwm_clock_init_ < 1e6 || pwm_clock_init_ > 2e9)
+    {
+        throw std::runtime_error(
+            "setup_dma(): PWM clock computed out of range (bad divisor/readback).");
+    }
+
+    if (debug)
+        std::cerr << debug_tag
+                  << "PWM div reg=0x" << std::hex << div_reg << std::dec
+                  << " divisor=" << divisor
+                  << " pwm_clock_init_=" << std::fixed << std::setprecision(3)
+                  << pwm_clock_init_
+                  << std::endl;
 
     if (debug)
         std::cerr
@@ -1644,7 +1623,7 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
 
     // Initialize tuning word table.
     double tone0_freq = center_freq_actual - 1.5 * trans_params_.tone_spacing;
-    std::vector<long int> tuning_word(1024);
+    std::vector<std::uint32_t> tuning_word(1024);
 
     // Generate tuning words for WSPR tones.
     for (int i = 0; i < 8; i++)
@@ -1658,28 +1637,28 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
             div += std::pow(2.0, -12);
         }
 
-        tuning_word[i] = static_cast<int>(div * std::pow(2.0, 12));
+        tuning_word[i] = static_cast<std::uint32_t>(div * std::pow(2.0, 12));
     }
 
     // Fill the remaining table with default values.
     for (int i = 8; i < 1024; i++)
     {
         double div = 500 + i;
-        tuning_word[i] = static_cast<int>(div * std::pow(2.0, 12));
+        tuning_word[i] = static_cast<std::uint32_t>(div * std::pow(2.0, 12));
     }
 
     // Program the DMA table.
     for (int i = 0; i < 1024; i++)
     {
-        trans_params_.dma_table_freq[i] = dma_config_.plld_clock_frequency / (tuning_word[i] / std::pow(2.0, 12));
+        trans_params_.dma_table_freq[i] = dma_config_.plld_clock_frequency / (static_cast<double>(tuning_word[i]) / std::pow(2.0, 12));
 
         // Store values in the memory-mapped page.
-        reinterpret_cast<int *>(const_page_.v)[i] = (0x5A << 24) + tuning_word[i];
+        reinterpret_cast<std::uint32_t *>(const_page_.v)[i] = (0x5Au << 24) + tuning_word[i];
 
         // Ensure adjacent tuning words have the same integer portion for valid tone generation.
         if ((i % 2 == 0) && (i < 8))
         {
-            assert((tuning_word[i] & (~0xFFF)) == (tuning_word[i + 1] & (~0xFFF)));
+            assert((tuning_word[i] & (~0xFFFu)) == (tuning_word[i + 1] & (~0xFFFu)));
         }
     }
 }
