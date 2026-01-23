@@ -9,10 +9,12 @@
 #include <condition_variable> // g_end_cv
 #include <csignal>            // sigaction, std::signal
 #include <cstring>            // strsignal()
+#include <cstdlib>            // setenv()
 #include <cstdio>             // getchar()
 #include <iomanip>            // std::ostringstream
 #include <iostream>           // std::cout, std::getline
 #include <mutex>              // g_end_mtx
+#include <optional>           // std::optional
 #include <string>             // std::string
 
 // POSIX & System-Specific Headers
@@ -102,6 +104,7 @@ struct AppArgs
 {
     bool transmit_now = false;
     bool one_shot = false;
+    std::optional<std::string> inject_wd_stall; // Value for WSPR_TX_INJECT_WD_STALL
 };
 
 AppArgs parse_args(int argc, char **argv)
@@ -118,11 +121,39 @@ AppArgs parse_args(int argc, char **argv)
         {
             args.one_shot = true;
         }
+else if (a.rfind("--inject-wd-stall", 0) == 0)
+{
+    std::string value;
+
+    // Support: --inject-wd-stall=5  or  --inject-wd-stall 5
+    const auto eq = a.find('=');
+    if (eq != std::string_view::npos)
+    {
+        value = std::string(a.substr(eq + 1));
+    }
+    else
+    {
+        if (i + 1 < argc)
+        {
+            value = argv[++i];
+        }
+        else
+        {
+            value = "1";
+        }
+    }
+
+    args.inject_wd_stall = value;
+
+    // Also push into the environment so the transmitter can see it.
+    ::setenv("WSPR_TX_INJECT_WD_STALL", value.c_str(), 1);
+}
         else if (a == "--help" || a == "-h")
         {
             std::cout << "Options:\n"
                       << "  -n, --now        Start WSPR immediately (no window wait).\n"
-                      << "  -1, --oneshot    Run exactly one WSPR transmission and exit.\n";
+                      << "  -1, --oneshot    Run exactly one WSPR transmission and exit.\n"
+                      "  --inject-wd-stall [N|Nms]  Inject a watchdog stall after N seconds or Nms.\n";
             std::exit(0);
         }
     }
@@ -531,15 +562,39 @@ void wait_for_completion(bool isWspr)
 {
     if (isWspr)
     {
+        // Hard ceiling so unrecoverable DMA faults cannot hang forever.
+        const auto max_wait = std::chrono::seconds(200);
+        const auto deadline = std::chrono::steady_clock::now() + max_wait;
+
         std::unique_lock<std::mutex> lk(g_end_mtx);
         while (!g_transmission_done &&
                !g_terminate.load(std::memory_order_acquire))
         {
-            g_end_cv.wait_for(lk, std::chrono::milliseconds(100));
+            // Abort early if the transmitter has detected a DMA stall.
+            if (wsprTransmitter.watchdogFaulted())
+            {
+                std::cout << "DMA watchdog fault detected. Aborting WSPR transmission." << std::endl;
+                wsprTransmitter.requestSoftOff();
+                wsprTransmitter.requestStopTx();
+                return;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+            {
+                std::cout << "Timeout waiting for WSPR completion. Aborting transmission." << std::endl;
+                wsprTransmitter.requestSoftOff();
+                wsprTransmitter.requestStopTx();
+                return;
+            }
+
+            const auto slice = std::min(std::chrono::milliseconds(100),
+                                        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now));
+            g_end_cv.wait_for(lk, slice);
         }
+
         if (g_terminate.load(std::memory_order_acquire) && !g_transmission_done)
         {
-            lk.unlock();
             // Soft-off prevents any new transmissions, then we stop the
             // current transmission thread cooperatively.
             wsprTransmitter.requestSoftOff();

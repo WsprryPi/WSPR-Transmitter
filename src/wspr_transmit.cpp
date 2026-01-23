@@ -581,12 +581,24 @@ void WsprTransmitter::shutdown()
             tx_thread_.join();
         }
     }
+
+    stop_watchdog();
 }
 
 void WsprTransmitter::requestStopTx()
 {
     stop_requested_.store(true);
     stop_cv_.notify_all();
+}
+
+bool WsprTransmitter::watchdogFaulted() const noexcept
+{
+    return watchdog_faulted_.load(std::memory_order_acquire);
+}
+
+void WsprTransmitter::clearWatchdogFault() noexcept
+{
+    watchdog_faulted_.store(false, std::memory_order_release);
 }
 
 void WsprTransmitter::stopAndJoin()
@@ -686,6 +698,229 @@ bool WsprTransmitter::shouldStop() const noexcept
         return true;
 
     return false;
+}
+
+void WsprTransmitter::start_watchdog()
+{
+    if (watchdog_faulted_.load(std::memory_order_acquire))
+    {
+        // Preserve the fault latch until the application explicitly clears it.
+        return;
+    }
+
+    // Avoid spawning multiple watchdog threads.
+    const bool was_stopped = watchdog_stop_.exchange(false, std::memory_order_acq_rel);
+    if (!was_stopped)
+    {
+        return;
+    }
+
+    // If a previous watchdog thread exists, join it.
+    if (watchdog_thread_.joinable() &&
+        watchdog_thread_.get_id() != std::this_thread::get_id())
+    {
+        watchdog_thread_.join();
+    }
+
+    constexpr auto kPollPeriod = std::chrono::milliseconds(20);
+    constexpr auto kStallTimeout = std::chrono::milliseconds(250);
+    constexpr auto kHeartbeatPeriod = std::chrono::seconds(2);
+// Optional watchdog stall injection for testing.
+// Set WSPR_TX_INJECT_WD_STALL to:
+// - "1" to stall immediately once DMA becomes active
+// - "<N>" to stall after N seconds (integer)
+// - "<N>ms" to stall after N milliseconds (integer)
+std::optional<std::chrono::nanoseconds> inject_stall_after;
+if (const char *env = std::getenv("WSPR_TX_INJECT_WD_STALL"))
+{
+    const std::string_view v(env);
+    if (!v.empty() && v != "0")
+    {
+        const bool is_ms = (v.size() >= 2 && v.substr(v.size() - 2) == "ms");
+        std::string tmp(v);
+        if (is_ms)
+            tmp.resize(tmp.size() - 2);
+
+        char *endp = nullptr;
+        const long n = std::strtol(tmp.c_str(), &endp, 10);
+        if (endp != nullptr && *endp == '\0' && n > 0)
+        {
+            if (is_ms)
+                inject_stall_after = std::chrono::milliseconds(n);
+            else
+                inject_stall_after = std::chrono::seconds(n);
+        }
+        else if (v == "1")
+        {
+            inject_stall_after = std::chrono::seconds(0);
+        }
+    }
+}
+
+    const auto now = std::chrono::steady_clock::now();
+    watchdog_last_change_ns_.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(),
+        std::memory_order_release);
+    watchdog_last_conblk_.store(0, std::memory_order_release);
+
+    if (debug)
+    {
+        std::cerr << debug_tag << "DMA watchdog started." << std::endl;
+    }
+
+    watchdog_thread_ = std::thread(
+        [this, kPollPeriod, kStallTimeout, kHeartbeatPeriod, inject_stall_after]
+        {
+            auto read_conblk = [this]() -> std::uint32_t
+            {
+                // DMA channel CONBLK_AD register (bus-mapped)
+                return static_cast<std::uint32_t>(
+                    access_bus_address(DMA_BUS_BASE + 0x04));
+            };
+
+            auto read_cs = [this]() -> std::uint32_t
+            {
+                // DMA channel CS register (bus-mapped)
+                return static_cast<std::uint32_t>(
+                    access_bus_address(DMA_BUS_BASE + 0x00));
+            };
+
+            auto last_heartbeat = std::chrono::steady_clock::now();
+std::uint32_t last_heartbeat_conblk = 0;
+
+// Stall injection state (test-only).
+bool injected = false;
+std::optional<std::chrono::steady_clock::time_point> tx_start;
+std::uint32_t injected_conblk = 0;
+
+while (!watchdog_stop_.load(std::memory_order_acquire))
+            {
+                if (state_.load(std::memory_order_acquire) != State::TRANSMITTING)
+                {
+                    std::this_thread::sleep_for(kPollPeriod);
+                    continue;
+                }
+
+                const std::uint32_t cs = read_cs();
+                const bool active = (cs & 0x1u) != 0u;
+
+                if (!active)
+                {
+                    // Not active: reset stall timer.
+                    const auto ts = std::chrono::steady_clock::now();
+                    watchdog_last_change_ns_.store(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(ts.time_since_epoch()).count(),
+                        std::memory_order_release);
+                    watchdog_last_conblk_.store(read_conblk(), std::memory_order_release);
+                    std::this_thread::sleep_for(kPollPeriod);
+                    continue;
+                }
+
+                                const auto now_tp = std::chrono::steady_clock::now();
+                if (!tx_start.has_value())
+                    tx_start = now_tp;
+
+                if (!injected && inject_stall_after.has_value())
+                {
+                    const auto elapsed = now_tp - *tx_start;
+                    const auto after = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        *inject_stall_after);
+                    if (elapsed >= after)
+                    {
+                        injected = true;
+                        injected_conblk = read_conblk();
+#ifdef DEBUG_WSPR_TRANSMIT
+                        if (debug)
+                        {
+                            std::cerr << "[WSPR-Transmitter] DMA watchdog: injecting stall."
+                                      << " after="
+                                      << std::chrono::duration_cast<std::chrono::milliseconds>(*inject_stall_after).count()
+                                      << " ms"
+                                      << std::endl;
+                        }
+#endif
+                    }
+                }
+
+                const std::uint32_t conblk = injected ? injected_conblk : read_conblk();
+                const std::uint32_t last = watchdog_last_conblk_.load(std::memory_order_acquire);
+
+                if (conblk != last)
+                {
+                    const auto ts = std::chrono::steady_clock::now();
+                    watchdog_last_conblk_.store(conblk, std::memory_order_release);
+                    watchdog_last_change_ns_.store(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(ts.time_since_epoch()).count(),
+                        std::memory_order_release);
+                    std::this_thread::sleep_for(kPollPeriod);
+                    continue;
+                }
+
+                const auto now_ns =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(now_tp.time_since_epoch()).count();
+                const auto last_ns = watchdog_last_change_ns_.load(std::memory_order_acquire);
+
+                const auto stalled_for = std::chrono::nanoseconds(now_ns - last_ns);
+
+#ifdef DEBUG_WSPR_TRANSMIT
+                if (debug)
+                {
+                    if ((now_tp - last_heartbeat) >= kHeartbeatPeriod)
+                    {
+                        const bool advancing = (conblk != last_heartbeat_conblk);
+                        std::cerr
+                            << "[WSPR-Transmitter] DMA watchdog: CS=0x" << std::hex << cs
+                            << " CONBLK_AD=0x" << conblk
+                            << std::dec
+                            << (advancing ? " advancing" : " not-advancing")
+                            << " stalled_for="
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(stalled_for).count()
+                            << " ms"
+                            << std::endl;
+                        last_heartbeat = now_tp;
+                        last_heartbeat_conblk = conblk;
+                    }
+                }
+#endif
+
+                if (stalled_for >= kStallTimeout)
+                {
+                    watchdog_faulted_.store(true, std::memory_order_release);
+
+                    std::cerr << "[WSPR-Transmitter] DMA watchdog detected a stall."
+                              << " CS=0x" << std::hex << cs
+                              << " CONBLK_AD=0x" << conblk
+                              << std::dec
+                              << std::endl;
+
+                    // Request a cooperative stop so the transmit thread can unwind.
+                    requestStopTx();
+                    return;
+                }
+
+                std::this_thread::sleep_for(kPollPeriod);
+            }
+        });
+}
+
+void WsprTransmitter::stop_watchdog()
+{
+    const bool was_running = !watchdog_stop_.exchange(true, std::memory_order_acq_rel);
+    if (!was_running)
+    {
+        return;
+    }
+
+    if (watchdog_thread_.joinable() &&
+        watchdog_thread_.get_id() != std::this_thread::get_id())
+    {
+        watchdog_thread_.join();
+    }
+
+    if (debug)
+    {
+        std::cerr << debug_tag << "DMA watchdog stopped." << std::endl;
+    }
 }
 
 
@@ -1275,6 +1510,8 @@ void WsprTransmitter::transmit_on()
 
     // Set semaphore
     state_.store(State::TRANSMITTING, std::memory_order_release);
+
+    start_watchdog();
 }
 
 /**
@@ -1283,6 +1520,7 @@ void WsprTransmitter::transmit_on()
  */
 void WsprTransmitter::transmit_off()
 {
+    stop_watchdog();
     disable_hardware_sequence(true);
 }
 

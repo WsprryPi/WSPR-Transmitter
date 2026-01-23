@@ -291,6 +291,16 @@ public:
     void stopAndJoin();
 
     /**
+     * @brief Returns true if the DMA watchdog detected a stalled DMA engine.
+     */
+    bool watchdogFaulted() const noexcept;
+
+    /**
+     * @brief Clears the DMA watchdog fault latch.
+     */
+    void clearWatchdogFault() noexcept;
+
+    /**
      * @brief Get the current transmission state.
      *
      * @details Returns a value indicating if the system is transmitting
@@ -313,6 +323,14 @@ public:
     void dumpParameters();
 
 private:
+    void start_watchdog();
+    void stop_watchdog();
+
+    std::thread watchdog_thread_{};
+    std::atomic<bool> watchdog_stop_{true};
+    std::atomic<bool> watchdog_faulted_{false};
+    std::atomic<std::uint32_t> watchdog_last_conblk_{0};
+    std::atomic<std::chrono::steady_clock::time_point::rep> watchdog_last_change_ns_{0};
     /**
      * @brief Invoked just before each transmission begins.
      *
