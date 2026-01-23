@@ -45,6 +45,7 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <system_error>
 
@@ -685,6 +686,37 @@ bool WsprTransmitter::shouldStop() const noexcept
         return true;
 
     return false;
+}
+
+
+bool WsprTransmitter::waitInterruptibleFor(std::chrono::nanoseconds duration)
+{
+    std::unique_lock<std::mutex> lk(stop_mtx_);
+    const bool interrupted = stop_cv_.wait_for(
+        lk,
+        duration,
+        [this]
+        {
+            return shouldStop() || soft_off_.load(std::memory_order_acquire);
+        });
+
+    return !interrupted;
+}
+
+void WsprTransmitter::throwIfStopRequested(const char *context)
+{
+    if (!shouldStop() && !soft_off_.load(std::memory_order_acquire))
+        return;
+
+    std::string msg = "Stop requested";
+    if (context && *context)
+    {
+        msg += " while ";
+        msg += context;
+    }
+    msg += '.';
+
+    throw std::runtime_error(msg);
 }
 
 void WsprTransmitter::transmit()
@@ -1615,20 +1647,30 @@ void WsprTransmitter::create_dma_pages(
 
     // Configure the PWM clock (disable, set divisor, enable)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000026; // Source = PLLD, disable
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
+    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
     access_bus_address(CLK_BUS_BASE + 41 * 4) = 0x5A002000; // Set PWM divider to 2 (250MHz)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000016; // Source = PLLD, enable
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
+    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
 
     // Configure PWM registers
     access_bus_address(PWM_BUS_BASE + 0x0) = 0; // Disable PWM
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
+    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
     access_bus_address(PWM_BUS_BASE + 0x4) = -1; // Clear status errors
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
+    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
     access_bus_address(PWM_BUS_BASE + 0x10) = 32; // Set default range
     access_bus_address(PWM_BUS_BASE + 0x20) = 32;
     access_bus_address(PWM_BUS_BASE + 0x0) = -1; // Enable FIFO mode, repeat, serializer, and channel
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
+    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    throwIfStopRequested("waiting for hardware");
     access_bus_address(PWM_BUS_BASE + 0x8) = (1 << 31) | 0x0707; // Enable DMA
 
     // Obtain the base address as an integer pointer
@@ -1715,7 +1757,9 @@ void WsprTransmitter::setup_dma()
                 catch (...)
                 { /* Swallow */
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                throwIfStopRequested("waiting to reopen mailbox");
+                (void)waitInterruptibleFor(std::chrono::milliseconds(50));
+                throwIfStopRequested("waiting to reopen mailbox");
                 ::mailbox.open();
 
                 // And loop to retry

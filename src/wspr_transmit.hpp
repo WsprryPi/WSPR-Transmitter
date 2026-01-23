@@ -411,6 +411,22 @@ private:
      */
     bool shouldStop() const noexcept;
 
+
+    /**
+     * @brief Wait for the given duration unless a stop is requested.
+     *
+     * @param duration Duration to wait.
+     * @return true if the full duration elapsed, false if interrupted.
+     */
+    bool waitInterruptibleFor(std::chrono::nanoseconds duration);
+
+    /**
+     * @brief Throw if a stop has been requested.
+     *
+     * @param context Short context string for diagnostics.
+     */
+    void throwIfStopRequested(const char *context);
+
     /**
      * @brief Condition variable used to wake the transmission thread.
      *
@@ -418,6 +434,14 @@ private:
      * any waits so the thread can observe stop_requested_.
      */
     std::condition_variable stop_cv_;
+
+    /**
+     * @brief Mutex paired with stop_cv_.
+     *
+     * Used to implement interruptible waits that can be woken immediately
+     * when requestStopTx() is called.
+     */
+    mutable std::mutex stop_mtx_;
 
     /**
      * @brief Stores the current transmission state.
