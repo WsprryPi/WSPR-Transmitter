@@ -877,7 +877,7 @@ void WsprTransmitter::dma_cleanup()
         return;
     }
 
-    transmit_off();
+    disable_hardware_sequence(false);
 
     access_bus_address(CM_GP0DIV_BUS) = dma_config_.orig_gp0div;
     access_bus_address(CM_GP0CTL_BUS) = dma_config_.orig_gp0ctl;
@@ -886,8 +886,6 @@ void WsprTransmitter::dma_cleanup()
     access_bus_address(PWM_BUS_BASE + 0x10) = dma_config_.orig_pwm_rng1;
     access_bus_address(PWM_BUS_BASE + 0x20) = dma_config_.orig_pwm_rng2;
     access_bus_address(PWM_BUS_BASE + 0x08) = dma_config_.orig_pwm_fifocfg;
-
-    clear_dma_setup();
 
     if (dma_config_.peripheral_base_virtual)
     {
@@ -1158,6 +1156,49 @@ void WsprTransmitter::deallocate_memory_pool()
     mailbox_struct_.pool_cnt = 0;
 }
 
+// Disable DMA, PWM, then the output clock (in that order).
+// Centralizes the hardware shutdown sequence to avoid ordering drift across
+// call sites. This is safe to call multiple times.
+void WsprTransmitter::disable_hardware_sequence(bool verbose)
+{
+    const bool was_on =
+        (state_.load(std::memory_order_acquire) ==
+         State::TRANSMITTING);
+
+    if (verbose && debug && was_on && dma_config_.peripheral_base_virtual != nullptr)
+    {
+        const std::uint32_t conblk =
+            static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x04));
+        const std::uint32_t cs =
+            static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x00));
+
+        std::cerr << debug_tag
+                  << "DMA before off: CS=0x"
+                  << std::hex << cs
+                  << " CONBLK_AD=0x" << conblk
+                  << std::dec
+                  << std::endl;
+    }
+
+    if (dma_config_.peripheral_base_virtual == nullptr)
+    {
+        state_.store(State::ENABLED, std::memory_order_release);
+        return;
+    }
+
+    // Stop DMA first so it cannot continue writing while we tear down PWM/clock.
+    volatile DMAregs *DMA0 =
+        reinterpret_cast<volatile DMAregs *>(&(access_bus_address(DMA_BUS_BASE)));
+    DMA0->CS = 1u << 31; // Reset DMA
+
+    // Disable PWM next to stop DREQ generation and FIFO activity.
+    access_bus_address(PWM_BUS_BASE + 0x00) = 0; // Disable PWM
+    access_bus_address(PWM_BUS_BASE + 0x08) = 0; // Disable PWM DMA
+
+    // Finally, disable the output clock.
+    disable_clock();
+}
+
 /**
  * @brief Disables the PWM clock.
  * @details Clears the enable bit in the clock control register and waits
@@ -1210,30 +1251,9 @@ void WsprTransmitter::transmit_on()
  */
 void WsprTransmitter::transmit_off()
 {
-    const bool was_on =
-        (state_.load(std::memory_order_acquire) ==
-         State::TRANSMITTING);
-
-    // Avoid duplicate "DMA before off" prints during normal end-of-TX
-    // shutdown where transmit_off() may be called multiple times.
-    if (debug && was_on && dma_config_.peripheral_base_virtual != nullptr)
-    {
-        const std::uint32_t conblk =
-            static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x04));
-        const std::uint32_t cs =
-            static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x00));
-
-        std::cerr << debug_tag
-                  << "DMA before off: CS=0x"
-                  << std::hex << cs
-                  << " CONBLK_AD=0x" << conblk
-                  << std::dec
-                  << std::endl;
-    }
-
-    // Disable the clock, effectively turning off transmission.
-    disable_clock();
+    disable_hardware_sequence(true);
 }
+
 
 /**
  * @brief Transmits a symbol for a specified duration using DMA.
@@ -1484,29 +1504,6 @@ void WsprTransmitter::transmit_symbol(
         n_pwmclk_transmitted += n_pwmclk;
         n_f0_transmitted += n_f0;
     }
-}
-
-/**
- * @brief Disables and resets the DMA engine.
- * @details Ensures that the DMA controller is properly reset before exiting.
- *          If the peripheral memory mapping is not set up, the function returns early.
- */
-void WsprTransmitter::clear_dma_setup()
-{
-    // Turn off transmission.
-    transmit_off();
-
-    // Ensure memory-mapped peripherals are initialized before proceeding.
-    if (dma_config_.peripheral_base_virtual == nullptr)
-    {
-        return;
-    }
-
-    // Obtain a pointer to the DMA control registers.
-    volatile DMAregs *DMA0 = reinterpret_cast<volatile DMAregs *>(&(access_bus_address(DMA_BUS_BASE)));
-
-    // Reset the DMA controller by setting the reset bit (bit 31) in the control/status register.
-    DMA0->CS = 1 << 31;
 }
 
 /**

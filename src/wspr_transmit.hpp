@@ -703,6 +703,7 @@ private:
     void allocate_memory_pool(unsigned numpages);
     void get_real_mem_page_from_pool(void **vAddr, void **bAddr);
     void deallocate_memory_pool();
+    void disable_hardware_sequence(bool verbose);
     void disable_clock();
     void transmit_on();
     void transmit_off();
@@ -713,7 +714,6 @@ private:
         std::uint32_t &bufPtr,
         int symbol_index = -1);
 
-    void clear_dma_setup();
     double bit_trunc(const double &d, const int &lsb);
 
     void create_dma_pages(
