@@ -1,20 +1,24 @@
 <!-- omit in toc -->
 # WsprTransmitter
 
-A self-contained C++ class for DMA-driven WSPR (Weak Signal Propagation Reporter) transmission on Raspberry Pi or other Linux systems.  This library can be used standalone (via `main.cpp` demo) or incorporated into other projects by simply including `wspr_transmit.hpp` and `wspr_transmit.cpp`.
+A self-contained C++ class for DMA-driven WSPR (Weak Signal Propagation Reporter)
+transmission on Raspberry Pi or other Linux systems. This library can be used
+standalone (via the included `main.cpp` demo) or incorporated into other
+projects by including `wspr_transmit.hpp` and `wspr_transmit.cpp`.
 
 <!-- omit in toc -->
 ## Table of Contents
+
 - [Repository Layout](#repository-layout)
 - [Dependencies](#dependencies)
 - [Building](#building)
 - [Public API](#public-api)
   - [Class: `WsprTransmitter`](#class-wsprtransmitter)
-    - [Construction \& Destruction](#construction--destruction)
+    - [Construction & Destruction](#construction--destruction)
     - [Callbacks](#callbacks)
     - [Configuration](#configuration)
     - [Transmission Control](#transmission-control)
-    - [Status \& Debug](#status--debug)
+    - [Status & Debug](#status--debug)
 - [Demo](#demo)
 - [License](#license)
 
@@ -22,7 +26,7 @@ A self-contained C++ class for DMA-driven WSPR (Weak Signal Propagation Reporter
 
 ## Repository Layout
 
-```
+```text
 /src
   ├── main.cpp             # Example/demo application
   ├── Makefile             # Build script (assumes dependencies at peer level)
@@ -38,10 +42,12 @@ A self-contained C++ class for DMA-driven WSPR (Weak Signal Propagation Reporter
 
 ## Dependencies
 
-* **WSPR-Message** (symbol generation) — expected at `../../WSPR-Message/src`
-* **Broadcom-Mailbox** (DMA/mailbox interface) — expected at `../../Broadcom-Mailbox/src`
+- **WSPR-Message** (symbol generation) — expected at `../../WSPR-Message/src`
+- **Broadcom-Mailbox** (DMA/mailbox interface) — expected at
+  `../../Broadcom-Mailbox/src`
 
-The current Makefile assumes the dependencies are at the same folder level as this repo in a larger project.
+The current Makefile assumes the dependencies are at the same folder level as
+this repo in a larger project.
 
 > **Note:** This is where the `Makefile` includes the dependencies:
 >
@@ -64,10 +70,10 @@ make debug
 sudo ./build/bin/wspr-transmitter_test
 ```
 
-* Requires linking against pthreads (`-pthread`).
-* Must be run as root (for `/dev/mem` access).
+- Requires linking against pthreads (`-pthread`).
+- Must be run as root (for `/dev/mem` access).
 
-The `Makefile` is quite comprehensive and includes a `help` argument:
+The `Makefile` includes a `help` target:
 
 ```bash
 $ make help
@@ -92,43 +98,54 @@ Available targets:
 #### Construction & Destruction
 
 ```cpp
-WsprTransmitter();        // default ctor
-~WsprTransmitter();       // stops and cleans up
+WsprTransmitter();        // Default ctor
+~WsprTransmitter();       // Stops and cleans up (threads + hardware teardown)
 ```
 
 #### Callbacks
 
+Install optional callbacks for transmission start/end:
+
 ```cpp
-using Callback = std::function<void(const std::string &msg)>;
+using StartCallback = std::function<void(
+    const std::string &msg,
+    double frequency)>;
+
+using EndCallback = std::function<void(
+    const std::string &msg,
+    double elapsed_secs)>;
+
 void setTransmissionCallbacks(
-    Callback on_start = {},
-    Callback on_end   = {});
+    StartCallback on_start = {},
+    EndCallback   on_end   = {});
 ```
 
-* `on_start` fires just before transmission
-* `on_end` fires immediately after symbols/tone finish
+- `on_start` fires on the transmit thread immediately before emission begins.
+- `on_end` fires on the transmit thread immediately after emission completes.
 
 #### Configuration
 
-* Fully initialize frequency, power, PPM, callsign/grid, offset:
+Fully initialize frequency, power, PPM, callsign/grid, and optional random
+offset:
 
 ```cpp
-void setupTransmission(
+void configure(
     double frequency,
-    int    power_dbm,
+    int    power,
     double ppm,
-    std::string callsign = "",
-    std::string grid     = "",
-    bool    use_offset   = false
-);
+    std::string_view call_sign   = {},
+    std::string_view grid_square = {},
+    int    power_dbm             = 0,
+    bool   use_offset            = false);
 ```
-* Rebuild DMA frequency table when PPM changes at runtime:
+
+Rebuild the DMA frequency table when PPM changes at runtime:
 
 ```cpp
-void updateDMAForPPM(double ppm_new);
+void applyPpmCorrection(double ppm_new);
 ```
 
-* POSIX scheduling for the future transmit thread (SCHED\_FIFO/RR):
+POSIX scheduling for the transmit thread (SCHED_FIFO/RR):
 
 ```cpp
 void setThreadScheduling(int policy, int priority);
@@ -137,17 +154,25 @@ void setThreadScheduling(int policy, int priority);
 #### Transmission Control
 
 ```cpp
-void enableTransmission();   // non-blocking: tone or scheduler
-void disableTransmission();  // cancel scheduler + any active transmit
-void stopTransmission();     // request in-flight stop
-void stop();  // disable + cleanup
+void startAsync();     // Non-blocking: tone mode or scheduler
+void shutdown();       // Stop scheduler + request TX stop + join + hardware off
+void requestStopTx();  // Request an in-flight stop (soft stop)
+void stopAndJoin();    // Request stop and wait for scheduler/TX threads
 ```
 
 #### Status & Debug
 
 ```cpp
-bool wsprTransmitter.getState() == WsprTransmitter::State::TRANSMITTING const noexcept;
-void printParameters();      // dumps current config & symbols
+WsprTransmitter::State getState() const noexcept;
+void dumpParameters();  // Dumps current config and symbols
+```
+
+Example state check:
+
+```cpp
+if (wsprTransmitter.getState() == WsprTransmitter::State::TRANSMITTING) {
+    // ...
+}
 ```
 
 ---
@@ -156,13 +181,13 @@ void printParameters();      // dumps current config & symbols
 
 The provided `main.cpp` shows a minimal example:
 
-1. Pipe-based signal handling to catch `SIGINT`/`SIGTERM`.
-2. Choose WSPR vs tone mode.
-3. Configure PPM manually via `setupTransmission()`.
-4. Spawn transmission with `enableTransmission()`.
-5. Wait on condition variable or spacebar before shutdown.
+- Pipe-based signal handling to catch `SIGINT`/`SIGTERM`.
+- Choose WSPR vs tone mode.
+- Configure PPM and other parameters via `configure()`.
+- Start transmission with `startAsync()`.
+- Wait on condition variable or user input before shutdown.
 
-Compile (as shown above) with:
+Build and run:
 
 ```bash
 cd src
@@ -175,7 +200,3 @@ sudo ./build/bin/wspr-transmitter_test
 ## License
 
 MIT — see [LICENSE.md](../LICENSE.md).
-
----
-
-*2025 © Lee C. Bussy (@LBussy)*

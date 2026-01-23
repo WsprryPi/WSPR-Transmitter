@@ -348,8 +348,8 @@ bool select_wspr()
  * @param signal The signal number that triggered the handler (unused).
  *
  * @note Only async-signal-safe functions should be called from within
- *       this handler. Ensure `wsprTransmitter.stop()` is safe, or move
- *       its logic to a safe location based on `g_terminate`.
+ *       this handler. Ensure `wsprTransmitter.stopAndJoin()` is safe, or
+ *       move its logic to a safe location based on `g_terminate`.
  */
 void sig_handler(int)
 {
@@ -505,17 +505,17 @@ void configure_transmitter(bool isWspr)
                 end_cb(msg, elapsed_secs);
             });
 
-        wsprTransmitter.setupTransmission(
+        wsprTransmitter.configure(
             WSPR_FREQ, 0, config.ppm,
             CALLSIGN, GRID, POWER_DBM, /*use_offset=*/true);
     }
     else
     {
-        wsprTransmitter.setupTransmission(WSPR_FREQ, 0, config.ppm);
+        wsprTransmitter.configure(WSPR_FREQ, 0, config.ppm);
     }
 
 #ifdef DEBUG_WSPR_TRANSMIT
-    wsprTransmitter.printParameters();
+    wsprTransmitter.dumpParameters();
 #endif
 }
 
@@ -543,7 +543,7 @@ void wait_for_completion(bool isWspr)
             // Soft-off prevents any new transmissions, then we stop the
             // current transmission thread cooperatively.
             wsprTransmitter.requestSoftOff();
-            wsprTransmitter.stopTransmission();
+            wsprTransmitter.requestStopTx();
             return;
         }
 
@@ -620,13 +620,13 @@ int main(int argc, char **argv)
             wait_for_space_or_signal();
         }
         // Begin scheduled or immediate transmission
-        wsprTransmitter.enableTransmission();
+        wsprTransmitter.startAsync();
 
         // Wait for transmission to finish or be aborted
         wait_for_completion(isWspr);
 
         // Clean up and stop transmission
-        wsprTransmitter.stop();
+        wsprTransmitter.stopAndJoin();
         return 0;
     }
     catch (const std::exception &e)

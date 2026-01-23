@@ -1,5 +1,5 @@
 /**
- * @file wspr_transmit.cpp
+ * @file wspr_transmit.hpp
  * @brief A class to encapsulate configuration and DMA‑driven transmission of
  *        WSPR signals.
  *
@@ -56,7 +56,7 @@
  *   executing Weak Signal Propagation Reporter (WSPR) transmissions on a
  *   Raspberry Pi. It handles:
  *     - Configuration of RF frequency, power level, PPM calibration, and message
- *       parameters via setupTransmission().
+ *       parameters via configure().
  *     - Low‑level mailbox allocation, peripheral memory mapping, and DMA/PWM
  *       initialization for precise symbol timing.
  *     - Start/stop of transmission loops (tone mode or symbol mode).
@@ -82,13 +82,13 @@ public:
     };
 
     static constexpr const char *stateToString(State state) noexcept;
-    std::string stateToLower(State state);
+    std::string stateToStringLower(State state);
 
     /**
      * @brief Constructs a WSPR transmitter with default settings.
      *
      * This is for global constructions, parameters are set via
-     * setupTransmission().
+     * configure().
      */
     WsprTransmitter();
 
@@ -156,7 +156,16 @@ public:
      *
      * @throws std::runtime_error if DMA setup or mailbox operations fail.
      */
-    void setupTransmission(
+
+    /**
+     * @brief Configure transmitter parameters.
+     *
+     * @details
+     *   Sets frequency, power level, PPM calibration, and message parameters.
+     *   This does not start the scheduler or begin transmitting.
+     */
+    void configure(
+
         double frequency,
         int power,
         double ppm,
@@ -171,7 +180,7 @@ public:
      * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
      * @throws std::runtime_error if peripherals aren’t mapped.
      */
-    void updateDMAForPPM(double ppm_new);
+    void applyPpmCorrection(double ppm_new);
 
     /**
      * @brief Configure POSIX scheduling policy & priority for future transmissions.
@@ -209,7 +218,7 @@ public:
      *
      * Prevents any new WSPR transmissions from being scheduled while allowing
      * any currently running transmission to continue or be stopped cleanly by
-     * stopTransmission()/stop().
+     * requestStopTx()/stopAndJoin().
      */
     void requestSoftOff() noexcept;
 
@@ -231,7 +240,21 @@ public:
      *       after spawning the thread; in WSPR mode it returns immediately
      *       after starting the scheduler thread.
      */
-    void enableTransmission();
+
+    /**
+     * @brief Start transmission, either immediately or via the scheduler.
+     *
+     * @details
+     *   If `trans_params_.is_tone == true`, this will spawn the transmit
+     *   thread right away (bypassing the scheduler). Otherwise it launches
+     *   the background scheduler, which will fire at the next WSPR window
+     *   and then spawn the transmit thread.
+     *
+     * @note This call is non-blocking. In tone mode it returns immediately
+     *       after spawning the thread; in WSPR mode it returns immediately
+     *       after starting the scheduler thread.
+     */
+    void startAsync();
 
     /**
      * @brief Cancels the scheduler (and any running transmission).
@@ -239,26 +262,33 @@ public:
      * Waits for the scheduler thread to stop, and forces any in‐flight
      * transmission to end.
      */
-    void disableTransmission();
 
     /**
-     * @brief Request an in‑flight transmission to stop.
+     * @brief Stop scheduler and transmission and release hardware.
      *
-     * @details Sets the internal stop flag so that ongoing loops in the transmit
-     *          thread will exit at the next interruption point. Notifies any
-     *          condition_variable waits to unblock the thread promptly.
+     * @details
+     *   Cancels the scheduler (if running), requests any in-flight
+     *   transmission to stop, waits for threads to exit, and performs
+     *   hardware shutdown (DMA/PWM/clocks).
      */
-    void stopTransmission();
+    void shutdown();
 
     /**
-     * @brief Gracefully stops and waits for the transmission thread.
+     * @brief Request an in-flight transmission to stop.
      *
-     * @details Combines stopTransmission() to signal the worker thread to
-     *          exit, and join_transmission() to block until that thread has
-     *          fully terminated. After this call returns, no transmission
-     *          thread remains running.
+     * @details
+     *   Sets the internal stop flag so that ongoing loops in the transmit
+     *   thread can exit promptly.
      */
-    void stop();
+    void requestStopTx();
+
+    /**
+     * @brief Stop and wait for the scheduler/transmit threads.
+     *
+     * @details
+     *   Requests stop and joins threads as needed.
+     */
+    void stopAndJoin();
 
     /**
      * @brief Get the current transmission state.
@@ -280,7 +310,7 @@ public:
      * This function is useful for debugging and verifying that all transmission
      * settings and symbol sequences are correctly populated before transmission.
      */
-    void printParameters();
+    void dumpParameters();
 
 private:
     /**
@@ -315,9 +345,9 @@ private:
      * @brief Guards tx_thread_ lifecycle against stop/scheduler races.
      *
      * @details The scheduler thread can finish a transmission and quickly
-     * attempt to start the next. The owning thread may call stop() right
-     * after the end callback fires. This mutex ensures that joining and
-     * launching tx_thread_ cannot interleave in a way that creates an
+     * attempt to start the next. The owning thread may call stopAndJoin()
+     * right after the end callback fires. This mutex ensures that joining
+     * and launching tx_thread_ cannot interleave in a way that creates an
      * extra transmission or a stuck join.
      */
     std::mutex tx_thread_mtx_;
@@ -384,7 +414,7 @@ private:
     /**
      * @brief Condition variable used to wake the transmission thread.
      *
-     * stopTransmission() calls notify_all() on this to unblock
+     * requestStopTx() calls notify_all() on this to unblock
      * any waits so the thread can observe stop_requested_.
      */
     std::condition_variable stop_cv_;
@@ -846,7 +876,7 @@ private:
                                     .count();
                 parent_->scheduled_start_rt_ns_.store(ns, std::memory_order_release);
 
-                // Synchronize with stop()/disableTransmission() so we don't
+                // Synchronize with stop()/shutdown() so we don't
                 // race a join/start with a shutdown request.
                 std::lock_guard<std::mutex> tx_lk(parent_->tx_thread_mtx_);
 

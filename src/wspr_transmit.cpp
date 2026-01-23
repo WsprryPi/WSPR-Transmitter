@@ -231,7 +231,7 @@ WsprTransmitter::WsprTransmitter() = default;
 
 WsprTransmitter::~WsprTransmitter()
 {
-    disableTransmission();
+    shutdown();
     dma_cleanup();
 }
 
@@ -241,7 +241,7 @@ void WsprTransmitter::setTransmissionCallbacks(StartCallback start_cb, EndCallba
     on_transmit_end_ = std::move(end_cb);
 }
 
-void WsprTransmitter::setupTransmission(
+void WsprTransmitter::configure(
     double frequency,
     int power,
     double ppm,
@@ -252,7 +252,7 @@ void WsprTransmitter::setupTransmission(
 {
     if (dma_setup_done_)
     {
-        disableTransmission();
+        shutdown();
         dma_cleanup();
     }
 
@@ -304,7 +304,7 @@ void WsprTransmitter::setupTransmission(
         trans_params_.frequency = center_actual;
 }
 
-void WsprTransmitter::updateDMAForPPM(double ppm_new)
+void WsprTransmitter::applyPpmCorrection(double ppm_new)
 {
     dma_config_.plld_clock_frequency =
         dma_config_.plld_nominal_freq * (1.0 - ppm_new / 1e6);
@@ -342,7 +342,7 @@ void WsprTransmitter::clearSoftOff() noexcept
     soft_off_.store(false, std::memory_order_release);
 }
 
-void WsprTransmitter::enableTransmission()
+void WsprTransmitter::startAsync()
 {
     stop_requested_.store(false, std::memory_order_release);
 
@@ -372,7 +372,7 @@ void WsprTransmitter::enableTransmission()
     scheduler_.start();
 }
 
-void WsprTransmitter::disableTransmission()
+void WsprTransmitter::shutdown()
 {
     // Set the stop flag first so a newly spawned transmit thread
     // will abort before it touches DMA/PWM state.
@@ -382,8 +382,8 @@ void WsprTransmitter::disableTransmission()
     // Stop the scheduler thread. Note: do not set soft_off_ here.
     //
     // soft_off_ is an application-level "no new scheduling" latch (used
-    // for Ctrl-C / graceful shutdown). disableTransmission() is also used
-    // internally during reconfiguration (e.g., setupTransmission()), and
+    // for Ctrl-C / graceful shutdown). shutdown() is also used
+    // internally during reconfiguration (e.g., configure()), and
     // must not permanently prevent future enableTransmission() calls.
     scheduler_.stop();
 
@@ -399,15 +399,15 @@ void WsprTransmitter::disableTransmission()
     }
 }
 
-void WsprTransmitter::stopTransmission()
+void WsprTransmitter::requestStopTx()
 {
     stop_requested_.store(true);
     stop_cv_.notify_all();
 }
 
-void WsprTransmitter::stop()
+void WsprTransmitter::stopAndJoin()
 {
-    disableTransmission();
+    shutdown();
     dma_cleanup();
 }
 
@@ -416,7 +416,7 @@ WsprTransmitter::State WsprTransmitter::getState() const noexcept
     return state_.load(std::memory_order_acquire);
 }
 
-void WsprTransmitter::printParameters()
+void WsprTransmitter::dumpParameters()
 {
     std::cout << "Call Sign:         "
               << (trans_params_.is_tone ? "N/A" : trans_params_.call_sign) << std::endl;
@@ -1682,7 +1682,7 @@ constexpr const char *WsprTransmitter::stateToString(State state) noexcept
     }
 }
 
-std::string WsprTransmitter::stateToLower(State state)
+std::string WsprTransmitter::stateToStringLower(State state)
 {
     std::string s = stateToString(state);
     std::transform(
