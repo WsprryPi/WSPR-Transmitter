@@ -31,14 +31,14 @@
 #include "bcm_model.hpp"
 
 // C++ Standard Library Headers
-#include <algorithm> 
+#include <algorithm>
 #include <cassert>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
-#include <fstream> 
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <optional>
@@ -67,6 +67,27 @@ inline constexpr std::string_view debug_tag{"[WSPR-Transmitter] "};
 namespace
 {
     static constexpr size_t NUM_PAGES = 4096;
+
+    static inline int cpu_count() noexcept
+    {
+        long n = ::sysconf(_SC_NPROCESSORS_ONLN);
+        if (n < 1)
+            return 1;
+        if (n > INT32_MAX)
+            return INT32_MAX;
+        return static_cast<int>(n);
+    }
+
+    static inline int clamp_cpu(int cpu, int ncpu) noexcept
+    {
+        if (ncpu <= 1)
+            return 0;
+        if (cpu < 0)
+            return 0;
+        if (cpu >= ncpu)
+            return ncpu - 1;
+        return cpu;
+    }
 
     class MailboxMemoryPool
     {
@@ -154,21 +175,19 @@ namespace
         }
     }
 
-    static inline void sleep_until_abs_realtime(const struct timespec &ts_target)
+    static inline int64_t diff_ns(const timespec &a, const timespec &b)
     {
-        int err;
-        while ((err = clock_nanosleep(
-                    CLOCK_REALTIME,
-                    TIMER_ABSTIME,
-                    &ts_target,
-                    nullptr)) == EINTR)
+        return (a.tv_sec - b.tv_sec) * 1'000'000'000LL + (a.tv_nsec - b.tv_nsec);
+    }
+
+    static inline void busy_wait_until(clockid_t clk_id, const timespec &ts_target)
+    {
+        for (;;)
         {
-        }
-        if (err != 0)
-        {
-            throw std::system_error(err,
-                                    std::generic_category(),
-                                    "WsprTransmitter: clock_nanosleep REALTIME failed");
+            timespec now{};
+            clock_gettime(clk_id, &now);
+            if (diff_ns(now, ts_target) >= 0)
+                break;
         }
     }
 
@@ -187,6 +206,44 @@ namespace
             t.tv_nsec += 1000000000L;
         }
         return t;
+    }
+
+    static inline void sleep_until_abs_tight(clockid_t clk_id,
+                                             const timespec &ts_target,
+                                             int64_t spin_ns)
+    {
+        timespec pre = add_ns(ts_target, -spin_ns);
+
+        int err;
+        while ((err = clock_nanosleep(clk_id, TIMER_ABSTIME, &pre, nullptr)) == EINTR)
+        {
+        }
+        if (err != 0)
+        {
+            throw std::system_error(err,
+                                    std::generic_category(),
+                                    "clock_nanosleep failed");
+        }
+
+        busy_wait_until(clk_id, ts_target);
+    }
+
+    static inline void sleep_until_abs_realtime(const struct timespec &ts_target)
+    {
+        int err;
+        while ((err = clock_nanosleep(
+                    CLOCK_REALTIME,
+                    TIMER_ABSTIME,
+                    &ts_target,
+                    nullptr)) == EINTR)
+        {
+        }
+        if (err != 0)
+        {
+            throw std::system_error(err,
+                                    std::generic_category(),
+                                    "WsprTransmitter: clock_nanosleep REALTIME failed");
+        }
     }
 
     static inline bool gpclk0_wait_not_busy(volatile int &gp0ctl_reg, int max_us)
@@ -223,7 +280,6 @@ namespace
     }
 
 } // end anonymous namespace
-
 
 WsprTransmitter::TransmissionScheduler::TransmissionScheduler(
     WsprTransmitter *parent)
@@ -411,7 +467,17 @@ WsprTransmitter wsprTransmitter;
 
 /* Public Methods */
 
-WsprTransmitter::WsprTransmitter() = default;
+WsprTransmitter::WsprTransmitter()
+{
+    const int ncpu = cpu_count();
+    tx_cpu_ = clamp_cpu(tx_cpu_, ncpu);
+    watchdog_cpu_ = clamp_cpu(watchdog_cpu_, ncpu);
+
+    if (ncpu <= 1)
+    {
+        spin_ns_ = 0; // or 50'000 if you want a tiny spin
+    }
+}
 
 WsprTransmitter::~WsprTransmitter()
 {
@@ -702,6 +768,17 @@ bool WsprTransmitter::shouldStop() const noexcept
 
 void WsprTransmitter::start_watchdog()
 {
+    const int ncpu = cpu_count();
+
+    if (ncpu <= 1)
+    {
+        if (debug)
+            std::cerr << debug_tag
+                      << "Watchdog disabled (single CPU system)."
+                      << std::endl;
+        return;
+    }
+
     if (watchdog_faulted_.load(std::memory_order_acquire))
     {
         // Preserve the fault latch until the application explicitly clears it.
@@ -725,37 +802,37 @@ void WsprTransmitter::start_watchdog()
     constexpr auto kPollPeriod = std::chrono::milliseconds(20);
     constexpr auto kStallTimeout = std::chrono::milliseconds(250);
     constexpr auto kHeartbeatPeriod = std::chrono::seconds(2);
-// Optional watchdog stall injection for testing.
-// Set WSPR_TX_INJECT_WD_STALL to:
-// - "1" to stall immediately once DMA becomes active
-// - "<N>" to stall after N seconds (integer)
-// - "<N>ms" to stall after N milliseconds (integer)
-std::optional<std::chrono::nanoseconds> inject_stall_after;
-if (const char *env = std::getenv("WSPR_TX_INJECT_WD_STALL"))
-{
-    const std::string_view v(env);
-    if (!v.empty() && v != "0")
+    // Optional watchdog stall injection for testing.
+    // Set WSPR_TX_INJECT_WD_STALL to:
+    // - "1" to stall immediately once DMA becomes active
+    // - "<N>" to stall after N seconds (integer)
+    // - "<N>ms" to stall after N milliseconds (integer)
+    std::optional<std::chrono::nanoseconds> inject_stall_after;
+    if (const char *env = std::getenv("WSPR_TX_INJECT_WD_STALL"))
     {
-        const bool is_ms = (v.size() >= 2 && v.substr(v.size() - 2) == "ms");
-        std::string tmp(v);
-        if (is_ms)
-            tmp.resize(tmp.size() - 2);
-
-        char *endp = nullptr;
-        const long n = std::strtol(tmp.c_str(), &endp, 10);
-        if (endp != nullptr && *endp == '\0' && n > 0)
+        const std::string_view v(env);
+        if (!v.empty() && v != "0")
         {
+            const bool is_ms = (v.size() >= 2 && v.substr(v.size() - 2) == "ms");
+            std::string tmp(v);
             if (is_ms)
-                inject_stall_after = std::chrono::milliseconds(n);
-            else
-                inject_stall_after = std::chrono::seconds(n);
-        }
-        else if (v == "1")
-        {
-            inject_stall_after = std::chrono::seconds(0);
+                tmp.resize(tmp.size() - 2);
+
+            char *endp = nullptr;
+            const long n = std::strtol(tmp.c_str(), &endp, 10);
+            if (endp != nullptr && *endp == '\0' && n > 0)
+            {
+                if (is_ms)
+                    inject_stall_after = std::chrono::milliseconds(n);
+                else
+                    inject_stall_after = std::chrono::seconds(n);
+            }
+            else if (v == "1")
+            {
+                inject_stall_after = std::chrono::seconds(0);
+            }
         }
     }
-}
 
     const auto now = std::chrono::steady_clock::now();
     watchdog_last_change_ns_.store(
@@ -771,6 +848,17 @@ if (const char *env = std::getenv("WSPR_TX_INJECT_WD_STALL"))
     watchdog_thread_ = std::thread(
         [this, kPollPeriod, kStallTimeout, kHeartbeatPeriod, inject_stall_after]
         {
+            // Make the watchdog not steal time from the TX thread
+            cpu_set_t cpus;
+            CPU_ZERO(&cpus);
+            CPU_SET(watchdog_cpu_, &cpus);
+            pthread_setaffinity_np(pthread_self(), sizeof(cpus), &cpus);
+
+            // Keep watchdog non-RT so it can't compete with TX
+            sched_param sch{};
+            sch.sched_priority = 0;
+            pthread_setschedparam(pthread_self(), SCHED_OTHER, &sch);
+
             auto read_conblk = [this]() -> std::uint32_t
             {
                 // DMA channel CONBLK_AD register (bus-mapped)
@@ -785,15 +873,17 @@ if (const char *env = std::getenv("WSPR_TX_INJECT_WD_STALL"))
                     access_bus_address(DMA_BUS_BASE + 0x00));
             };
 
+            [[maybe_unused]]
             auto last_heartbeat = std::chrono::steady_clock::now();
-std::uint32_t last_heartbeat_conblk = 0;
+            [[maybe_unused]]
+            std::uint32_t last_heartbeat_conblk = 0;
 
-// Stall injection state (test-only).
-bool injected = false;
-std::optional<std::chrono::steady_clock::time_point> tx_start;
-std::uint32_t injected_conblk = 0;
+            // Stall injection state (test-only).
+            bool injected = false;
+            std::optional<std::chrono::steady_clock::time_point> tx_start;
+            std::uint32_t injected_conblk = 0;
 
-while (!watchdog_stop_.load(std::memory_order_acquire))
+            while (!watchdog_stop_.load(std::memory_order_acquire))
             {
                 if (state_.load(std::memory_order_acquire) != State::TRANSMITTING)
                 {
@@ -816,7 +906,7 @@ while (!watchdog_stop_.load(std::memory_order_acquire))
                     continue;
                 }
 
-                                const auto now_tp = std::chrono::steady_clock::now();
+                const auto now_tp = std::chrono::steady_clock::now();
                 if (!tx_start.has_value())
                     tx_start = now_tp;
 
@@ -923,8 +1013,7 @@ void WsprTransmitter::stop_watchdog()
     }
 }
 
-
-bool WsprTransmitter::waitInterruptibleFor(std::chrono::nanoseconds duration)
+bool WsprTransmitter::waitInterruptableFor(std::chrono::nanoseconds duration)
 {
     std::unique_lock<std::mutex> lk(stop_mtx_);
     const bool interrupted = stop_cv_.wait_for(
@@ -1028,7 +1117,7 @@ void WsprTransmitter::transmit()
             start_rt.tv_sec = start_rt_ns / 1000000000LL;
             start_rt.tv_nsec = static_cast<long>(start_rt_ns % 1000000000LL);
 
-            sleep_until_abs_realtime(start_rt);
+            sleep_until_abs_tight(CLOCK_REALTIME, start_rt, spin_ns_);
 
             if (debug)
             {
@@ -1045,19 +1134,29 @@ void WsprTransmitter::transmit()
         }
 
         // Fire callback as close to the first symbol as possible.
-        // TODO: Take this out to 6 decimal points
         fire_start_cb("", trans_params_.frequency);
-
-        // Anchor symbol timing to monotonic clock.
-        auto t0_chrono = std::chrono::steady_clock::now();
-        struct timespec t0_ts{};
-        clock_gettime(CLOCK_MONOTONIC, &t0_ts);
 
         const int symbol_count = static_cast<int>(trans_params_.symbols.size());
         const double symtime = trans_params_.symtime;
 
         transmit_on();
         TxOffGuard tx_guard(this);
+
+        // Anchor symbol timing to monotonic clock AFTER TX is enabled.
+        struct timespec t0_ts{};
+        clock_gettime(CLOCK_MONOTONIC, &t0_ts);
+        auto t0_chrono = std::chrono::steady_clock::now();
+
+        if (::mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
+        {
+            if (debug)
+            {
+                std::cerr << debug_tag
+                          << "mlockall failed: "
+                          << std::strerror(errno)
+                          << std::endl;
+            }
+        }
 
         for (int i = 0; i < symbol_count && !shouldStop(); ++i)
         {
@@ -1066,7 +1165,7 @@ void WsprTransmitter::transmit()
 
             timespec target = add_ns(t0_ts, offset_ns);
 
-            sleep_until_abs(target);
+            sleep_until_abs_tight(CLOCK_MONOTONIC, target, 200'000);
 
             if (debug)
             {
@@ -1109,17 +1208,15 @@ void WsprTransmitter::transmit()
                     static_cast<double>(symbol_count) * symtime * 1e9));
 
             const timespec end_target = add_ns(t0_ts, end_ns);
-            sleep_until_abs(end_target);
+            sleep_until_abs_tight(CLOCK_MONOTONIC, end_target, 200'000);
         }
 
         transmit_off();
         tx_guard.dismiss();
 
-        auto t1 = std::chrono::steady_clock::now();
-        double total = std::chrono::duration<double>(t1 - t0_chrono).count();
-        total = std::round(total * 1000.0) / 1000.0;
-
-        fire_end_cb("", total);
+        const auto t1 = std::chrono::steady_clock::now();
+        const double actual = std::chrono::duration<double>(t1 - t0_chrono).count();
+        fire_end_cb("", actual);
     }
 }
 
@@ -1188,18 +1285,29 @@ inline double WsprTransmitter::convert_mw_dbm(double mw)
 
 void WsprTransmitter::thread_entry()
 {
-    cpu_set_t cpus;
-    CPU_ZERO(&cpus);
-    CPU_SET(0, &cpus);
-    int aff_ret = pthread_setaffinity_np(pthread_self(),
-                                         sizeof(cpus),
-                                         &cpus);
-    if (aff_ret != 0)
+    const int ncpu = cpu_count();
+
+    if (ncpu > 1)
     {
-        std::cerr << debug_tag
-                  << "thread_entry(): failed to set CPU affinity: "
-                  << std::strerror(aff_ret)
-                  << std::endl;
+        cpu_set_t cpus;
+        CPU_ZERO(&cpus);
+        CPU_SET(tx_cpu_, &cpus);
+
+        const int aff_ret =
+            pthread_setaffinity_np(pthread_self(),
+                                   sizeof(cpus),
+                                   &cpus);
+
+        if (aff_ret != 0)
+        {
+            if (debug)
+            {
+                std::cerr << debug_tag
+                          << "thread_entry(): failed to set CPU affinity: "
+                          << std::strerror(aff_ret)
+                          << std::endl;
+            }
+        }
     }
 
     try
@@ -1523,7 +1631,6 @@ void WsprTransmitter::transmit_off()
     stop_watchdog();
     disable_hardware_sequence(true);
 }
-
 
 /**
  * @brief Transmits a symbol for a specified duration using DMA.
@@ -1886,28 +1993,28 @@ void WsprTransmitter::create_dma_pages(
     // Configure the PWM clock (disable, set divisor, enable)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000026; // Source = PLLD, disable
     throwIfStopRequested("waiting for hardware");
-    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    (void)waitInterruptableFor(std::chrono::milliseconds(1));
     throwIfStopRequested("waiting for hardware");
     access_bus_address(CLK_BUS_BASE + 41 * 4) = 0x5A002000; // Set PWM divider to 2 (250MHz)
     access_bus_address(CLK_BUS_BASE + 40 * 4) = 0x5A000016; // Source = PLLD, enable
     throwIfStopRequested("waiting for hardware");
-    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    (void)waitInterruptableFor(std::chrono::milliseconds(1));
     throwIfStopRequested("waiting for hardware");
 
     // Configure PWM registers
     access_bus_address(PWM_BUS_BASE + 0x0) = 0; // Disable PWM
     throwIfStopRequested("waiting for hardware");
-    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    (void)waitInterruptableFor(std::chrono::milliseconds(1));
     throwIfStopRequested("waiting for hardware");
     access_bus_address(PWM_BUS_BASE + 0x4) = -1; // Clear status errors
     throwIfStopRequested("waiting for hardware");
-    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    (void)waitInterruptableFor(std::chrono::milliseconds(1));
     throwIfStopRequested("waiting for hardware");
     access_bus_address(PWM_BUS_BASE + 0x10) = 32; // Set default range
     access_bus_address(PWM_BUS_BASE + 0x20) = 32;
     access_bus_address(PWM_BUS_BASE + 0x0) = -1; // Enable FIFO mode, repeat, serializer, and channel
     throwIfStopRequested("waiting for hardware");
-    (void)waitInterruptibleFor(std::chrono::milliseconds(1));
+    (void)waitInterruptableFor(std::chrono::milliseconds(1));
     throwIfStopRequested("waiting for hardware");
     access_bus_address(PWM_BUS_BASE + 0x8) = (1 << 31) | 0x0707; // Enable DMA
 
@@ -1996,7 +2103,7 @@ void WsprTransmitter::setup_dma()
                 { /* Swallow */
                 }
                 throwIfStopRequested("waiting to reopen mailbox");
-                (void)waitInterruptibleFor(std::chrono::milliseconds(50));
+                (void)waitInterruptableFor(std::chrono::milliseconds(50));
                 throwIfStopRequested("waiting to reopen mailbox");
                 ::mailbox.open();
 

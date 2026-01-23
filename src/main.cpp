@@ -22,8 +22,8 @@
 #include <unistd.h>  // STDIN_FILENO
 
 // Edit with your data
-static constexpr std::string_view CALLSIGN   = "AA0NT";
-static constexpr std::string_view GRID= "EM18";
+static constexpr std::string_view CALLSIGN = "AA0NT";
+static constexpr std::string_view GRID = "EM18";
 static constexpr uint8_t POWER_DBM = 20;
 
 // Frequency choices - Leave alone (see below)
@@ -121,39 +121,39 @@ AppArgs parse_args(int argc, char **argv)
         {
             args.one_shot = true;
         }
-else if (a.rfind("--inject-wd-stall", 0) == 0)
-{
-    std::string value;
-
-    // Support: --inject-wd-stall=5  or  --inject-wd-stall 5
-    const auto eq = a.find('=');
-    if (eq != std::string_view::npos)
-    {
-        value = std::string(a.substr(eq + 1));
-    }
-    else
-    {
-        if (i + 1 < argc)
+        else if (a.rfind("--inject-wd-stall", 0) == 0)
         {
-            value = argv[++i];
-        }
-        else
-        {
-            value = "1";
-        }
-    }
+            std::string value;
 
-    args.inject_wd_stall = value;
+            // Support: --inject-wd-stall=5  or  --inject-wd-stall 5
+            const auto eq = a.find('=');
+            if (eq != std::string_view::npos)
+            {
+                value = std::string(a.substr(eq + 1));
+            }
+            else
+            {
+                if (i + 1 < argc)
+                {
+                    value = argv[++i];
+                }
+                else
+                {
+                    value = "1";
+                }
+            }
 
-    // Also push into the environment so the transmitter can see it.
-    ::setenv("WSPR_TX_INJECT_WD_STALL", value.c_str(), 1);
-}
+            args.inject_wd_stall = value;
+
+            // Also push into the environment so the transmitter can see it.
+            ::setenv("WSPR_TX_INJECT_WD_STALL", value.c_str(), 1);
+        }
         else if (a == "--help" || a == "-h")
         {
             std::cout << "Options:\n"
                       << "  -n, --now        Start WSPR immediately (no window wait).\n"
                       << "  -1, --oneshot    Run exactly one WSPR transmission and exit.\n"
-                      "  --inject-wd-stall [N|Nms]  Inject a watchdog stall after N seconds or Nms.\n";
+                         "  --inject-wd-stall [N|Nms]  Inject a watchdog stall after N seconds or Nms.\n";
             std::exit(0);
         }
     }
@@ -264,8 +264,8 @@ void wait_for_space_or_signal()
     {
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET(STDIN_FILENO, &rfds);        // Watch for keyboard input
-        FD_SET(sig_pipe_fds[0], &rfds);     // Watch for signal-triggered wakeup
+        FD_SET(STDIN_FILENO, &rfds);    // Watch for keyboard input
+        FD_SET(sig_pipe_fds[0], &rfds); // Watch for signal-triggered wakeup
 
         int nf = std::max(STDIN_FILENO, sig_pipe_fds[0]) + 1;
 
@@ -273,8 +273,8 @@ void wait_for_space_or_signal()
         if (::select(nf, &rfds, nullptr, nullptr, nullptr) < 0)
         {
             if (errno == EINTR)
-                continue;  // Interrupted by signal, retry
-            break;         // Other error: exit
+                continue; // Interrupted by signal, retry
+            break;        // Other error: exit
         }
 
         if (FD_ISSET(sig_pipe_fds[0], &rfds))
@@ -328,8 +328,8 @@ bool select_wspr()
     while (!g_terminate.load())
     {
         FD_ZERO(&rfds);
-        FD_SET(STDIN_FILENO, &rfds);         // Monitor keyboard
-        FD_SET(sig_pipe_fds[0], &rfds);      // Monitor signal pipe
+        FD_SET(STDIN_FILENO, &rfds);    // Monitor keyboard
+        FD_SET(sig_pipe_fds[0], &rfds); // Monitor signal pipe
 
         int nf = std::max(STDIN_FILENO, sig_pipe_fds[0]) + 1;
 
@@ -338,7 +338,7 @@ bool select_wspr()
         {
             std::cout << std::endl;
             if (errno == EINTR)
-                continue;  // Retry after interrupt
+                continue; // Retry after interrupt
             throw std::runtime_error("select failed");
         }
 
@@ -356,9 +356,9 @@ bool select_wspr()
             {
                 std::cout << std::endl;
                 if (c == '2')
-                    return false;  // User selected TONE mode
+                    return false; // User selected TONE mode
                 else
-                    return true;   // Default or user selected WSPR
+                    return true; // Default or user selected WSPR
             }
         }
     }
@@ -452,14 +452,16 @@ void end_cb(const std::string &msg, double elapsed)
     if (!msg.empty() && elapsed != 0.0)
     {
         std::cout << "[Callback] Completed transmission (" << msg << ") "
-                  << std::setprecision(3)
+                  << std::fixed
+                  << std::setprecision(6)
                   << elapsed << " seconds."
                   << std::endl;
     }
     else if (elapsed != 0.0)
     {
         std::cout << "[Callback] Completed transmission: "
-                  << std::setprecision(3)
+                  << std::fixed
+                  << std::setprecision(6)
                   << elapsed << " seconds."
                   << std::endl;
     }

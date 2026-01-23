@@ -331,6 +331,10 @@ private:
     std::atomic<bool> watchdog_faulted_{false};
     std::atomic<std::uint32_t> watchdog_last_conblk_{0};
     std::atomic<std::chrono::steady_clock::time_point::rep> watchdog_last_change_ns_{0};
+    int tx_cpu_{0};
+    int watchdog_cpu_{1};
+    std::int64_t spin_ns_{200'000}; // 200 us
+
     /**
      * @brief Invoked just before each transmission begins.
      *
@@ -429,14 +433,13 @@ private:
      */
     bool shouldStop() const noexcept;
 
-
     /**
      * @brief Wait for the given duration unless a stop is requested.
      *
      * @param duration Duration to wait.
      * @return true if the full duration elapsed, false if interrupted.
      */
-    bool waitInterruptibleFor(std::chrono::nanoseconds duration);
+    bool waitInterruptableFor(std::chrono::nanoseconds duration);
 
     /**
      * @brief Throw if a stop has been requested.
