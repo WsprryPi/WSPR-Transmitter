@@ -3,7 +3,7 @@
  * @brief A class to encapsulate configuration and DMA‑driven transmission of
  *        WSPR signals.
  *
- * Copyright (C) 2025 Lee C. Bussy (@LBussy). All rights reserved.
+ * Copyright (C) 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,13 +24,8 @@
  * SOFTWARE.
  */
 
-#include "wspr_transmit.hpp" // Class Declarations
 
-#include "wspr_message.hpp"
-#include "mailbox.hpp"
-#include "bcm_model.hpp"
-
-// C++ Standard Library Headers
+// C++ standard library headers
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
@@ -49,12 +44,18 @@
 #include <string_view>
 #include <system_error>
 
-// POSIX & System-Specific Headers
+// POSIX and system headers
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+
+// Project headers
+#include "wspr_transmit.hpp" // Class Declarations
+#include "wspr_message.hpp"
+#include "mailbox.hpp"
+#include "bcm_model.hpp"
 
 #ifdef DEBUG_WSPR_TRANSMIT
 constexpr const bool debug = true;
@@ -491,6 +492,19 @@ void WsprTransmitter::setTransmissionCallbacks(StartCallback start_cb, EndCallba
     on_transmit_end_ = std::move(end_cb);
 }
 
+
+std::string WsprTransmitter::formatFrequencyMHz(double frequency_hz)
+{
+    const auto hz_rounded =
+        static_cast<std::int64_t>(std::llround(frequency_hz));
+
+    const double mhz = static_cast<double>(hz_rounded) / 1.0e6;
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(6) << mhz;
+    return oss.str();
+}
+
 void WsprTransmitter::configure(
     double frequency,
     int power,
@@ -516,10 +530,15 @@ void WsprTransmitter::configure(
     trans_params_.power = power;
     trans_params_.use_offset = use_offset;
 
-    if (!trans_params_.call_sign.empty() && !trans_params_.grid_square.empty() && trans_params_.power_dbm != 0)
+    if (!trans_params_.call_sign.empty()
+        && !trans_params_.grid_square.empty()
+        && trans_params_.power_dbm != 0)
     {
         trans_params_.is_tone = false;
-        WsprMessage msg(trans_params_.call_sign, trans_params_.grid_square, trans_params_.power_dbm);
+        WsprMessage msg(
+            trans_params_.call_sign,
+            trans_params_.grid_square,
+            trans_params_.power_dbm);
         std::copy_n(msg.symbols, msg.size, trans_params_.symbols.begin());
     }
     else
@@ -607,7 +626,35 @@ void WsprTransmitter::startAsync()
 
     if (immediate)
     {
-        scheduled_start_rt_ns_.store(0, std::memory_order_release);
+        // For WSPR "--now" runs, align the TX start to the next 50 ms
+        // boundary. This emulates the final timer stage used by the normal
+        // window scheduler (which sleeps to an absolute CLOCK_REALTIME
+        // boundary).
+        if (!trans_params_.is_tone &&
+            transmit_now_.load(std::memory_order_acquire))
+        {
+            struct timespec now_rt{};
+            ::clock_gettime(CLOCK_REALTIME, &now_rt);
+
+            const std::int64_t now_ns =
+                static_cast<std::int64_t>(now_rt.tv_sec) * 1000000000LL +
+                static_cast<std::int64_t>(now_rt.tv_nsec);
+
+            constexpr std::int64_t kTickNs = 50000000LL;   // 50 ms
+            constexpr std::int64_t kMinLeadNs = 5000000LL; // 5 ms
+
+            std::int64_t next_ns = ((now_ns / kTickNs) + 1) * kTickNs;
+            if (next_ns - now_ns < kMinLeadNs)
+            {
+                next_ns += kTickNs;
+            }
+
+            scheduled_start_rt_ns_.store(next_ns, std::memory_order_release);
+        }
+        else
+        {
+            scheduled_start_rt_ns_.store(0, std::memory_order_release);
+        }
 
         std::lock_guard<std::mutex> lk(tx_thread_mtx_);
         if (tx_thread_.joinable())
@@ -687,8 +734,8 @@ void WsprTransmitter::dumpParameters()
               << (trans_params_.is_tone ? "N/A" : trans_params_.grid_square) << std::endl;
 
     std::cout << "WSPR Frequency:    "
-              << std::fixed << std::setprecision(6)
-              << (trans_params_.frequency / 1.0e6) << " MHz" << std::endl;
+              << formatFrequencyMHz(trans_params_.frequency)
+              << " MHz" << std::endl;
 
     std::cout << "GPIO Power:        "
               << std::fixed << std::setprecision(1)
@@ -698,10 +745,17 @@ void WsprTransmitter::dumpParameters()
               << (trans_params_.is_tone ? "True" : "False") << std::endl;
 
     std::cout << "WSPR Symbol Time:  "
-              << (trans_params_.is_tone ? "N/A" : std::to_string(trans_params_.symtime) + " s") << std::endl;
+              << (trans_params_.is_tone ? "N/A"
+                                      : std::to_string(trans_params_.symtime)
+                                            + " s")
+              << std::endl;
 
     std::cout << "WSPR Tone Spacing: "
-              << (trans_params_.is_tone ? "N/A" : std::to_string(trans_params_.tone_spacing) + " Hz") << std::endl;
+              << (trans_params_.is_tone ? "N/A"
+                                      : std::to_string(
+                                            trans_params_.tone_spacing)
+                                            + " Hz")
+              << std::endl;
 
     std::cout << "DMA Table Size:    "
               << trans_params_.dma_table_freq.size() << std::endl;
@@ -899,7 +953,10 @@ void WsprTransmitter::start_watchdog()
                     // Not active: reset stall timer.
                     const auto ts = std::chrono::steady_clock::now();
                     watchdog_last_change_ns_.store(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(ts.time_since_epoch()).count(),
+                        std::chrono::duration_cast<
+                            std::chrono::nanoseconds>(
+                            ts.time_since_epoch())
+                            .count(),
                         std::memory_order_release);
                     watchdog_last_conblk_.store(read_conblk(), std::memory_order_release);
                     std::this_thread::sleep_for(kPollPeriod);
@@ -913,7 +970,9 @@ void WsprTransmitter::start_watchdog()
                 if (!injected && inject_stall_after.has_value())
                 {
                     const auto elapsed = now_tp - *tx_start;
-                    const auto after = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    const auto after =
+                        std::chrono::duration_cast<
+                            std::chrono::steady_clock::duration>(
                         *inject_stall_after);
                     if (elapsed >= after)
                     {
@@ -924,7 +983,10 @@ void WsprTransmitter::start_watchdog()
                         {
                             std::cerr << "[WSPR-Transmitter] DMA watchdog: injecting stall."
                                       << " after="
-                                      << std::chrono::duration_cast<std::chrono::milliseconds>(*inject_stall_after).count()
+                                      << std::chrono::duration_cast<
+                                             std::chrono::milliseconds>(
+                                             *inject_stall_after)
+                                             .count()
                                       << " ms"
                                       << std::endl;
                         }
@@ -940,14 +1002,20 @@ void WsprTransmitter::start_watchdog()
                     const auto ts = std::chrono::steady_clock::now();
                     watchdog_last_conblk_.store(conblk, std::memory_order_release);
                     watchdog_last_change_ns_.store(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(ts.time_since_epoch()).count(),
+                        std::chrono::duration_cast<
+                            std::chrono::nanoseconds>(
+                            ts.time_since_epoch())
+                            .count(),
                         std::memory_order_release);
                     std::this_thread::sleep_for(kPollPeriod);
                     continue;
                 }
 
                 const auto now_ns =
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(now_tp.time_since_epoch()).count();
+                    std::chrono::duration_cast<
+                        std::chrono::nanoseconds>(
+                        now_tp.time_since_epoch())
+                        .count();
                 const auto last_ns = watchdog_last_change_ns_.load(std::memory_order_acquire);
 
                 const auto stalled_for = std::chrono::nanoseconds(now_ns - last_ns);
@@ -964,7 +1032,10 @@ void WsprTransmitter::start_watchdog()
                             << std::dec
                             << (advancing ? " advancing" : " not-advancing")
                             << " stalled_for="
-                            << std::chrono::duration_cast<std::chrono::milliseconds>(stalled_for).count()
+                            << std::chrono::duration_cast<
+                                   std::chrono::milliseconds>(
+                                   stalled_for)
+                                   .count()
                             << " ms"
                             << std::endl;
                         last_heartbeat = now_tp;
@@ -1161,31 +1232,42 @@ void WsprTransmitter::transmit()
         for (int i = 0; i < symbol_count && !shouldStop(); ++i)
         {
             const int64_t offset_ns =
-                static_cast<int64_t>(std::llround(static_cast<double>(i) * symtime * 1e9));
+                static_cast<int64_t>(
+                    std::llround(static_cast<double>(i) * symtime * 1e9));
 
             timespec target = add_ns(t0_ts, offset_ns);
 
-            sleep_until_abs_tight(CLOCK_MONOTONIC, target, 200'000);
-
-            if (debug)
+            // For i == 0, transmit_symbol() immediately follows the TX enable
+            // and timing anchor. Skipping the initial sleep avoids reporting a
+            // spurious overrun caused by normal loop overhead.
+            if (i != 0)
             {
-                struct timespec now{};
-                clock_gettime(CLOCK_MONOTONIC, &now);
+                sleep_until_abs_tight(CLOCK_MONOTONIC, target, 200'000);
 
-                const int64_t late_ns =
-                    (now.tv_sec - target.tv_sec) * 1'000'000'000LL +
-                    (now.tv_nsec - target.tv_nsec);
-
-                if (late_ns > 1'000'000) // >1 ms late
+                if (debug)
                 {
-                    std::cerr << debug_tag
-                              << "Symbol overrun: "
-                              << late_ns / 1e6
-                              << " ms late"
-                              << std::endl;
+                    struct timespec now{};
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+
+                    const int64_t late_ns =
+                        (now.tv_sec - target.tv_sec) * 1'000'000'000LL +
+                        (now.tv_nsec - target.tv_nsec);
+
+                    if (late_ns > 1'000'000) // >1 ms late
+                    {
+                        std::cerr << debug_tag
+                                  << "Symbol overrun: "
+                                  << late_ns / 1e6
+                                  << " ms late"
+                                  << std::endl;
+                    }
                 }
             }
-
+            else if (debug)
+            {
+                // Still compute the target so debug output can reference it.
+                (void)target;
+            }
             if (shouldStop())
             {
                 break;
@@ -1211,11 +1293,16 @@ void WsprTransmitter::transmit()
             sleep_until_abs_tight(CLOCK_MONOTONIC, end_target, 200'000);
         }
 
+        // Capture the end time immediately after the symbol-period drain.
+        // transmit_off() can take non-trivial time on some platforms, and that
+        // shutdown overhead should not be counted against the on-air duration.
+        const auto t_end_chrono = std::chrono::steady_clock::now();
+
         transmit_off();
         tx_guard.dismiss();
 
-        const auto t1 = std::chrono::steady_clock::now();
-        const double actual = std::chrono::duration<double>(t1 - t0_chrono).count();
+        const double actual =
+            std::chrono::duration<double>(t_end_chrono - t0_chrono).count();
         fire_end_cb("", actual);
     }
 }
@@ -1269,7 +1356,9 @@ constexpr int WsprTransmitter::get_gpio_power_mw(int level)
 {
     if (level < 0 || level >= static_cast<int>(DRIVE_STRENGTH_TABLE.size()))
     {
-        throw std::out_of_range("WsprTransmitter::get_gpio_power_mw: Drive strength level must be between 0 and 7");
+        throw std::out_of_range(
+            "WsprTransmitter::get_gpio_power_mw: Drive strength level "
+            "must be between 0 and 7");
     }
     return DRIVE_STRENGTH_TABLE[level];
 }
@@ -1278,7 +1367,9 @@ inline double WsprTransmitter::convert_mw_dbm(double mw)
 {
     if (mw <= 0.0)
     {
-        throw std::domain_error("WsprTransmitter::convert_mw_dbm: Input power (mW) must be > 0 to compute logarithm");
+        throw std::domain_error(
+            "WsprTransmitter::convert_mw_dbm: Input power (mW) must "
+            "be > 0 to compute logarithm");
     }
     return 10.0 * std::log10(mw);
 }
@@ -1317,7 +1408,10 @@ void WsprTransmitter::thread_entry()
     catch (const std::system_error &e)
     {
         throw std::domain_error(
-            std::string("WsprTransmitter::thread_entry(): Error setting thread priority: ") + e.what());
+            std::string(
+                "WsprTransmitter::thread_entry(): Error setting thread "
+                "priority: ")
+                + e.what());
     }
     catch (const std::exception &e)
     {
@@ -1441,7 +1535,8 @@ void WsprTransmitter::get_plld()
  * When called with `numpages = 1025`, one page is reserved for constant data
  * and 1024 pages are used for building the DMA instruction chain.
  *
- * @param numpages Total number of pages to allocate (1 constant + N instruction pages).
+ * @param numpages Total number of pages to allocate (1 constant + N
+ *                 instruction pages).
  * @throws std::runtime_error if mailbox allocation, locking, or mapping fails.
  */
 void WsprTransmitter::allocate_memory_pool(unsigned numpages)
@@ -1464,7 +1559,9 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
     }
 
     // Map the locked pages into user‑space virtual memory
-    mailbox_struct_.virt_addr = mailbox.mapMem(mailbox.busToPhysical(mailbox_struct_.bus_addr), Mailbox::PAGE_SIZE * numpages);
+    mailbox_struct_.virt_addr = mailbox.mapMem(
+        mailbox.busToPhysical(mailbox_struct_.bus_addr),
+        Mailbox::PAGE_SIZE * numpages);
     if (mailbox_struct_.virt_addr == nullptr)
     {
         mailbox.memUnlock(mailbox_struct_.mem_ref);
@@ -1480,7 +1577,8 @@ void WsprTransmitter::allocate_memory_pool(unsigned numpages)
 /**
  * @brief Retrieves the next available memory page from the allocated pool.
  * @details Provides a virtual and bus address for a memory page in the pool.
- *          If no more pages are available, the function prints an error and exits.
+ *          If no more pages are available, the function prints an error
+ *          and exits.
  *
  * @param[out] vAddr Pointer to store the virtual address of the allocated page.
  * @param[out] bAddr Pointer to store the bus address of the allocated page.
@@ -1497,8 +1595,10 @@ void WsprTransmitter::get_real_mem_page_from_pool(void **vAddr, void **bAddr)
     unsigned offset = mailbox_struct_.pool_cnt * Mailbox::PAGE_SIZE;
 
     // Retrieve the virtual and bus addresses based on the offset.
-    *vAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_struct_.virt_addr) + offset);
-    *bAddr = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mailbox_struct_.bus_addr) + offset);
+    *vAddr = reinterpret_cast<void *>(
+        reinterpret_cast<uintptr_t>(mailbox_struct_.virt_addr) + offset);
+    *bAddr = reinterpret_cast<void *>(
+        reinterpret_cast<uintptr_t>(mailbox_struct_.bus_addr) + offset);
 
     // Increment the count of allocated pages.
     mailbox_struct_.pool_cnt++;
@@ -1591,8 +1691,9 @@ void WsprTransmitter::disable_clock()
 
 /**
  * @brief Enables TX by configuring GPIO4 and setting the clock source.
- * @details Configures GPIO4 to use alternate function 0 (GPCLK0), sets the drive
- *          strength, disables any active clock, and then enables the clock with PLLD.
+ * @details Configures GPIO4 to use alternate function 0 (GPCLK0), sets the
+ *          drive strength, disables any active clock, and then enables the
+ *          clock with PLLD.
  */
 void WsprTransmitter::transmit_on()
 {
@@ -1786,8 +1887,8 @@ void WsprTransmitter::transmit_symbol(
         }
 
         std::cerr
-            << " tsym=" << std::setprecision(6) << tsym
-            << " pwm_clock_init_=" << std::fixed << std::setprecision(3)
+            << " tsym=" << std::fixed << std::setprecision(6) << tsym
+            << " pwm_clock_init_=" << std::fixed << std::fixed << std::setprecision(3)
             << pwm_clock_init_ << std::defaultfloat
             << " n_pwmclk_per_sym=" << n_pwmclk_per_sym
             << " pwm_clocks_per_iter=" << pwm_clocks_per_iter
@@ -1949,11 +2050,16 @@ void WsprTransmitter::create_dma_pages(
         for (int i = 0; i < static_cast<int>(Mailbox::PAGE_SIZE / sizeof(struct CB)); i++)
         {
             // Assign virtual and bus addresses for each instruction
-            instructions_[instrCnt].v = static_cast<void *>(static_cast<char *>(instr_page_.v) + sizeof(struct CB) * i);
-            instructions_[instrCnt].b = instr_page_.b + static_cast<std::uintptr_t>(sizeof(struct CB) * i);
+            instructions_[instrCnt].v = static_cast<void *>(
+                static_cast<char *>(instr_page_.v)
+                + sizeof(struct CB) * i);
+            instructions_[instrCnt].b = instr_page_.b
+                + static_cast<std::uintptr_t>(
+                    sizeof(struct CB) * i);
 
             // Configure DMA transfer: Source = constant memory page, Destination = PWM FI
-            // On 64-bit, const_page_.b is already a uintptr_t; truncate to 32 bits for the register.
+            // On 64-bit, const_page_.b is already a uintptr_t.
+            // Truncate to 32 bits for the register.
             instr0->SOURCE_AD = static_cast<uint32_t>(const_page_.b + 2048);
             instr0->DEST_AD = PWM_BUS_BASE + 0x18; // FIFO1
             instr0->TXFR_LEN = 4;
@@ -2012,7 +2118,8 @@ void WsprTransmitter::create_dma_pages(
     throwIfStopRequested("waiting for hardware");
     access_bus_address(PWM_BUS_BASE + 0x10) = 32; // Set default range
     access_bus_address(PWM_BUS_BASE + 0x20) = 32;
-    access_bus_address(PWM_BUS_BASE + 0x0) = -1; // Enable FIFO mode, repeat, serializer, and channel
+    access_bus_address(PWM_BUS_BASE + 0x0) = -1;
+    // Enable FIFO mode, repeat, serializer, and channel.
     throwIfStopRequested("waiting for hardware");
     (void)waitInterruptableFor(std::chrono::milliseconds(1));
     throwIfStopRequested("waiting for hardware");
@@ -2045,7 +2152,8 @@ void WsprTransmitter::create_dma_pages(
  *   2. Map the peripheral base address into user space.
  *   3. Save the original clock and PWM register values for later restoration.
  *   4. Open the Broadcom mailbox interface for DMA memory allocation.
- *   5. Allocate and set up DMA control blocks for constants and instruction pages.
+ *   5. Allocate and set up DMA control blocks for constants and instruction
+ *      pages.
  *
  * @throws std::runtime_error if the PLLD clock cannot be determined.
  * @throws std::runtime_error if peripheral memory mapping fails.
@@ -2061,7 +2169,9 @@ void WsprTransmitter::setup_dma()
 
     // Map peripherals via mailbox.mapMem()
     uint32_t base = Mailbox::discoverPeripheralBase();
-    dma_config_.peripheral_base_virtual = ::mailbox.mapMem(base, Mailbox::PAGE_SIZE * NUM_PAGES /*=0x01000000*/);
+    dma_config_.peripheral_base_virtual = ::mailbox.mapMem(
+        base,
+        Mailbox::PAGE_SIZE * NUM_PAGES /*=0x01000000*/);
 
     // Snapshot regs
     dma_config_.orig_gp0ctl = access_bus_address(CM_GP0CTL_BUS);
@@ -2088,11 +2198,15 @@ void WsprTransmitter::setup_dma()
             if (e.code().value() == ETIMEDOUT)
             {
                 if (debug)
-                    std::cerr << debug_tag << "Timeout (attempt " << attempts << ") allocating memory pool, retrying.";
+                    std::cerr << debug_tag << "Timeout (attempt "
+                              << attempts
+                              << ") allocating memory pool, retrying.";
 
                 // A timeout, let's retry
                 if (++attempts >= kMaxAttempts)
-                    throw std::runtime_error("Mailbox::setup_dma() Too many mailbox timeouts, giving up");
+                    throw std::runtime_error(
+                        "Mailbox::setup_dma() Too many mailbox timeouts, "
+                        "giving up");
 
                 // Cleanly close and reopen the mailbox
                 try
@@ -2168,26 +2282,37 @@ void WsprTransmitter::setup_dma()
  * @param[in] center_freq_desired The desired center frequency in Hz.
  * @param[in] tone_spacing The spacing between frequency tones in Hz.
  * @param[in] plld_actual_freq The actual PLLD clock frequency in Hz.
- * @param[out] center_freq_actual The actual center frequency, which may be adjusted.
+ * @param[out] center_freq_actual The actual center frequency, which may
+ *                               be adjusted.
  * @param[in,out] const_page_ The PageInfo structure for storing tuning words.
  */
 void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
 {
     // Compute the divider values for the lowest and highest WSPR tones.
-    double div_lo = bit_trunc(dma_config_.plld_clock_frequency / (trans_params_.frequency - 1.5 * trans_params_.tone_spacing), -12) + std::pow(2.0, -12);
-    double div_hi = bit_trunc(dma_config_.plld_clock_frequency / (trans_params_.frequency + 1.5 * trans_params_.tone_spacing), -12);
+    double div_lo = bit_trunc(
+                        dma_config_.plld_clock_frequency
+                            / (trans_params_.frequency
+                               - 1.5 * trans_params_.tone_spacing),
+                        -12)
+                    + std::pow(2.0, -12);
+    double div_hi = bit_trunc(
+        dma_config_.plld_clock_frequency
+            / (trans_params_.frequency
+               + 1.5 * trans_params_.tone_spacing),
+        -12);
 
     // If the integer portion of dividers differ, adjust the center frequency.
     if (std::floor(div_lo) != std::floor(div_hi))
     {
-        center_freq_actual = dma_config_.plld_clock_frequency / std::floor(div_lo) - 1.6 * trans_params_.tone_spacing;
+        center_freq_actual =
+            dma_config_.plld_clock_frequency / std::floor(div_lo)
+            - 1.6 * trans_params_.tone_spacing;
         if (debug && trans_params_.frequency != 0.0)
         {
             std::stringstream temp;
-            temp << std::fixed << std::setprecision(6)
-                 << debug_tag
+            temp << debug_tag
                  << "Center frequency has been changed to "
-                 << center_freq_actual / 1e6 << " MHz";
+                 << formatFrequencyMHz(center_freq_actual) << " MHz";
             std::cerr << temp.str() << " because of hardware limitations." << std::endl;
         }
     }
@@ -2221,7 +2346,9 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
     // Program the DMA table.
     for (int i = 0; i < 1024; i++)
     {
-        trans_params_.dma_table_freq[i] = dma_config_.plld_clock_frequency / (static_cast<double>(tuning_word[i]) / std::pow(2.0, 12));
+        trans_params_.dma_table_freq[i] =
+            dma_config_.plld_clock_frequency
+            / (static_cast<double>(tuning_word[i]) / std::pow(2.0, 12));
 
         // Store values in the memory-mapped page.
         reinterpret_cast<std::uint32_t *>(const_page_.v)[i] = (0x5Au << 24) + tuning_word[i];

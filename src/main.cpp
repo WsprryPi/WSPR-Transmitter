@@ -1,9 +1,29 @@
-// Project headers
-#include "config_handler.hpp"
-#include "utils.hpp"
-#include "wspr_transmit.hpp"
+/**
+ * @file main.cpp
+ * @brief A test rig for the WSPR-Transmitter class
+ *
+ * Copyright (C) 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
-// C++ Standard Library
+// C++ standard library headers
 #include <array>              // std::array for signal list
 #include <chrono>             // std::chrono
 #include <condition_variable> // g_end_cv
@@ -17,11 +37,15 @@
 #include <optional>           // std::optional
 #include <string>             // std::string
 
-// POSIX & System-Specific Headers
+// POSIX and system headers
 #include <termios.h> // tcgetattr(), tcsetattr()
 #include <unistd.h>  // STDIN_FILENO
 
-// Edit with your data
+// Project headers
+#include "config_handler.hpp"
+#include "utils.hpp"
+#include "wspr_transmit.hpp"
+
 static constexpr std::string_view CALLSIGN = "AA0NT";
 static constexpr std::string_view GRID = "EM18";
 static constexpr uint8_t POWER_DBM = 20;
@@ -153,7 +177,8 @@ AppArgs parse_args(int argc, char **argv)
             std::cout << "Options:\n"
                       << "  -n, --now        Start WSPR immediately (no window wait).\n"
                       << "  -1, --oneshot    Run exactly one WSPR transmission and exit.\n"
-                         "  --inject-wd-stall [N|Nms]  Inject a watchdog stall after N seconds or Nms.\n";
+                         "  --inject-wd-stall [N|Nms]  Inject a watchdog stall"
+                         " after N seconds or Nms.\n";
             std::exit(0);
         }
     }
@@ -217,7 +242,8 @@ struct TermiosGuard
 };
 
 /**
- * @brief Reads a single character from standard input without waiting for Enter.
+ * @brief Reads a single character from standard input without waiting for
+ *        Enter.
  *
  * This function configures the terminal for noncanonical mode to read a single
  * character immediately. It then restores the terminal settings.
@@ -237,11 +263,13 @@ int getch()
 }
 
 /**
- * @brief Pauses execution until the user presses the spacebar or a shutdown signal is received
+ * @brief Pauses execution until the user presses the spacebar or a shutdown
+ *        signal is received
  *
  * This function blocks until either:
  * - The user presses the spacebar (detected using raw terminal input), or
- * - A signal triggers a write to the self-pipe, indicating a termination request.
+ * - A signal triggers a write to the self-pipe, indicating a termination
+ *   request.
  *
  * It uses the RAII-based TermiosGuard to temporarily set the terminal to
  * non-canonical, non-echoing mode so input can be read one character at a time.
@@ -252,8 +280,10 @@ int getch()
  * - It cleanly handles `EINTR` and uses an atomic flag `g_terminate`
  *   to check for termination requests.
  *
- * @note This function blocks indefinitely unless interrupted or input is received.
- *       It is typically used to pause before transmitting or resuming an operation.
+ * @note This function blocks indefinitely unless interrupted or input is
+ *       received.
+ *       It is typically used to pause before transmitting or resuming an
+ *       operation.
  */
 void wait_for_space_or_signal()
 {
@@ -412,6 +442,7 @@ void start_cb(const std::string &msg, double frequency)
     if (!msg.empty() && frequency != 0.0)
     {
         std::cout << "[Callback] Started transmission (" << msg << ") "
+                  << std::fixed
                   << std::setprecision(6)
                   << (frequency / 1e6) << " MHz."
                   << std::endl;
@@ -419,6 +450,7 @@ void start_cb(const std::string &msg, double frequency)
     else if (frequency != 0.0)
     {
         std::cout << "[Callback] Started transmission: "
+                  << std::fixed
                   << std::setprecision(6)
                   << (frequency / 1e6) << " MHz."
                   << std::endl;
@@ -575,7 +607,9 @@ void wait_for_completion(bool isWspr)
             // Abort early if the transmitter has detected a DMA stall.
             if (wsprTransmitter.watchdogFaulted())
             {
-                std::cout << "DMA watchdog fault detected. Aborting WSPR transmission." << std::endl;
+                std::cout
+                    << "DMA watchdog fault detected. Aborting WSPR transmission."
+                    << std::endl;
                 wsprTransmitter.requestSoftOff();
                 wsprTransmitter.requestStopTx();
                 return;
@@ -584,14 +618,18 @@ void wait_for_completion(bool isWspr)
             const auto now = std::chrono::steady_clock::now();
             if (now >= deadline)
             {
-                std::cout << "Timeout waiting for WSPR completion. Aborting transmission." << std::endl;
+                std::cout
+                    << "Timeout waiting for WSPR completion. Aborting transmission."
+                    << std::endl;
                 wsprTransmitter.requestSoftOff();
                 wsprTransmitter.requestStopTx();
                 return;
             }
 
             const auto slice = std::min(std::chrono::milliseconds(100),
-                                        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now));
+                                        std::chrono::duration_cast<
+                                            std::chrono::milliseconds>(
+                                            deadline - now));
             g_end_cv.wait_for(lk, slice);
         }
 

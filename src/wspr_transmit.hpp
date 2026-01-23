@@ -3,7 +3,7 @@
  * @brief A class to encapsulate configuration and DMA‑driven transmission of
  *        WSPR signals.
  *
- * Copyright (C) 2025 Lee C. Bussy (@LBussy). All rights reserved.
+ * Copyright (C) 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,13 +24,10 @@
  * SOFTWARE.
  */
 
-#ifndef _WSPR_TRANSMIT_HPP
-#define _WSPR_TRANSMIT_HPP
+#ifndef WSPR_TRANSMIT_HPP
+#define WSPR_TRANSMIT_HPP
 
-// Project header
-#include "wspr_message.hpp"
-
-// C++ Standard Library
+// C++ standard library headers
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -44,18 +41,23 @@
 #include <variant>
 #include <vector>
 
-// POSIX/System headers
+// POSIX and system headers
 #include <sys/time.h> // for struct timeval
+
+// Project headers
+#include "wspr_message.hpp"
 
 /**
  * @class WsprTransmitter
- * @brief Encapsulates configuration and DMA‑driven transmission of WSPR signals.
+ * @brief Encapsulates configuration and DMA-driven transmission of WSPR
+ *        signals.
  *
  * @details
  *   The WsprTransmitter class provides a full interface for setting up and
  *   executing Weak Signal Propagation Reporter (WSPR) transmissions on a
  *   Raspberry Pi. It handles:
- *     - Configuration of RF frequency, power level, PPM calibration, and message
+ *     - Configuration of RF frequency, power level, PPM calibration, and
+ *       message parameters via configure().
  *       parameters via configure().
  *     - Low‑level mailbox allocation, peripheral memory mapping, and DMA/PWM
  *       initialization for precise symbol timing.
@@ -110,11 +112,13 @@ public:
      * @brief Signature for user-provided transmission callbacks.
      *
      * This callback receives either a message string or a frequency value,
-     * allowing the user to handle both human-readable messages and numeric data.
+     * allowing the user to handle both human-readable messages and numeric
+     * data.
      *
      * @param arg A variant containing either a std::string or a double value.
      *            The string may carry a descriptive message, while the double
-     *            represents a frequency in Hz (or another unit depending on context).
+     *            represents a frequency in Hz (or another unit depending
+     *            on context).
      */
     using StartCallback = std::function<void(const std::string & /*msg*/, double /*frequency*/)>;
     using EndCallback = std::function<void(const std::string & /*msg*/, double /*elapsed_secs*/)>;
@@ -133,6 +137,19 @@ public:
     void setTransmissionCallbacks(StartCallback start_cb = {},
                                   EndCallback end_cb = {});
 
+/**
+ * @brief Format a frequency in MHz using the transmitter's display rules.
+ *
+ * @details
+ *   This helper ensures callbacks and internal logs format frequencies the
+ *   same way, so debug and release builds display identical values.
+ *
+ * @param frequency_hz Frequency in Hz.
+ * @return Frequency formatted in MHz with six digits after the decimal.
+ */
+static std::string formatFrequencyMHz(double frequency_hz);
+
+
     /**
      * @brief Configure and start a WSPR transmission.
      *
@@ -148,7 +165,8 @@ public:
      *
      * @param[in] frequency    Target RF frequency in Hz.
      * @param[in] power        Transmit power index (0‑n).
-     * @param[in] ppm          Parts‑per‑million correction to apply (e.g. +11.135).
+     * @param[in] ppm          Parts-per-million correction to apply (for
+     *                          example +11.135).
      * @param[in] callsign     Optional callsign for WSPR message.
      * @param[in] grid_square  Optional Maidenhead grid locator.
      * @param[in] power_dbm    dBm value for WSPR message (ignored if tone).
@@ -183,17 +201,20 @@ public:
     void applyPpmCorrection(double ppm_new);
 
     /**
-     * @brief Configure POSIX scheduling policy & priority for future transmissions.
+     * @brief Configure POSIX scheduling policy and priority for future
+     *        transmissions.
      *
      * @details
-     *   This must be called _before_ `startTransmission()` if you need real-time
-     *   scheduling.  The next call to `startTransmission()` will launch its thread
+     *   This must be called before `startTransmission()` if you need
+     *   real-time scheduling.
      *   under the given policy/priority.
      *
      * @param[in] policy
-     *   One of the standard POSIX policies (e.g. SCHED_FIFO, SCHED_RR, SCHED_OTHER).
+     *   One of the standard POSIX policies (for example SCHED_FIFO,
+     *   SCHED_RR, SCHED_OTHER).
      * @param[in] priority
-     *   Thread priority (1–99) for real-time policies; ignored under SCHED_OTHER.
+     *   Thread priority (1-99) for real-time policies. Ignored under
+     *   SCHED_OTHER.
      */
     void setThreadScheduling(int policy, int priority);
 
@@ -318,7 +339,8 @@ public:
      * WSPR symbols as integer values, grouped for readability.
      *
      * This function is useful for debugging and verifying that all transmission
-     * settings and symbol sequences are correctly populated before transmission.
+     * settings and symbol sequences are correctly populated before
+     * transmission.
      */
     void dumpParameters();
 
@@ -498,8 +520,8 @@ private:
     /**
      * @brief Holds the bus and virtual addresses for a physical memory page.
      *
-     * This structure is used to store the mapping between the bus address (used for DMA
-     * and peripheral accesses) and the virtual address (used by the application) of a single
+     * This structure is used to store the mapping between the bus address
+     * by the application) of a single
      * page of physical memory.
      *
      * @var PageInfo::b
@@ -516,8 +538,10 @@ private:
     /**
      * @brief Page information for the constant memory page.
      *
-     * This global variable holds the bus and virtual addresses of the constant memory page,
-     * which is used to store fixed data required for DMA operations, such as the tuning words
+     * This global variable holds the bus and virtual addresses of the
+     * constant memory page,
+     * which is used to store fixed data required for DMA operations, such
+     * as the tuning words
      * for frequency generation.
      */
     struct PageInfo const_page_;
@@ -525,8 +549,10 @@ private:
     /**
      * @brief Page information for the DMA instruction page.
      *
-     * This global variable holds the bus and virtual addresses of the DMA instruction page,
-     * where DMA control blocks (CBs) are stored. This page is used during the setup and
+     * This global variable holds the bus and virtual addresses of the DMA
+     * instruction page,
+     * where DMA control blocks (CBs) are stored. This page is used during
+     * the setup and
      * operation of DMA transfers.
      */
     struct PageInfo instr_page_;
@@ -534,8 +560,10 @@ private:
     /**
      * @brief Array of page information structures for DMA control blocks.
      *
-     * This global array contains the bus and virtual addresses for each page used in the DMA
-     * instruction chain. It holds 1024 entries, corresponding to the 1024 DMA control blocks used
+     * This global array contains the bus and virtual addresses for each
+     * page used in the DMA
+     * instruction chain. It holds 1024 entries, corresponding to the 1024
+     * DMA control blocks used
      * for managing data transfers.
      */
     struct PageInfo instructions_[1024];
@@ -544,13 +572,15 @@ private:
      * @brief Random frequency offset for standard WSPR transmissions.
      *
      * This constant defines the range, in Hertz, for random frequency offsets
-     * applied to standard WSPR transmissions. The offset is applied symmetrically
+     * applied to standard WSPR transmissions. The offset is applied
+     * symmetrically
      * around the target frequency, resulting in a random variation of ±80 Hz.
      *
      * This helps distribute transmissions within the WSPR band, reducing the
      * likelihood of overlapping signals.
      *
-     * @note This offset is applicable for standard WSPR transmissions (2-minute cycles).
+     * @note This offset is applicable for standard WSPR transmissions
+     *       (2-minute cycles).
      *
      * @see WSPR15_RAND_OFFSET
      */
@@ -802,4 +832,4 @@ private:
 
 extern WsprTransmitter wsprTransmitter;
 
-#endif // _WSPR_TRANSMIT_HPP
+#endif // WSPR_TRANSMIT_HPP
