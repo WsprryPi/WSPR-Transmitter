@@ -35,7 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdint> // for std::uint32_t, etc.
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -730,44 +730,15 @@ private:
     class TransmissionScheduler
     {
     public:
-        TransmissionScheduler(WsprTransmitter *parent)
-            : parent_{parent}
-        {
-        }
+        explicit TransmissionScheduler(WsprTransmitter *parent);
 
-        ~TransmissionScheduler()
-        {
-            stop();
-        }
+        ~TransmissionScheduler();
 
-        void start()
-        {
-            if (thread_.joinable())
-                return;
+        void start();
 
-            stop_requested_.store(false, std::memory_order_release);
-            thread_ = std::thread(&TransmissionScheduler::run, this);
-        }
+        void stop();
 
-        void stop()
-        {
-            {
-                std::lock_guard<std::mutex> lk(mtx_);
-                stop_requested_.store(true, std::memory_order_release);
-            }
-            cv_.notify_all();
-
-            if (thread_.joinable() &&
-                thread_.get_id() != std::this_thread::get_id())
-            {
-                thread_.join();
-            }
-        }
-
-        void notify() noexcept
-        {
-            cv_.notify_all();
-        }
+        void notify() noexcept;
 
     private:
         WsprTransmitter *parent_;
@@ -776,144 +747,9 @@ private:
         std::mutex mtx_;
         std::condition_variable cv_;
 
-        std::chrono::system_clock::time_point nextEvent() const
-        {
-            using namespace std::chrono;
+        std::chrono::system_clock::time_point nextEvent() const;
 
-            auto now = system_clock::now();
-            auto secs = duration_cast<seconds>(now.time_since_epoch()).count();
-
-            const int cycle = 2 * 60;
-
-            auto idx = secs / cycle;
-
-            auto base = idx * cycle;
-            seconds target_secs;
-            if (secs < base + 1)
-            {
-                target_secs = seconds{base + 1};
-            }
-            else
-            {
-                target_secs = seconds{(idx + 1) * cycle + 1};
-            }
-
-            return system_clock::time_point{target_secs};
-        }
-
-        void run()
-        {
-            while (!stop_requested_.load(std::memory_order_acquire) &&
-                   !parent_->soft_off_.load(std::memory_order_acquire))
-            {
-                if (parent_->external_stop_flag_ &&
-                    parent_->external_stop_flag_->load(std::memory_order_acquire))
-                {
-                    break;
-                }
-
-                auto when = nextEvent();
-
-                // Be conservative about late or ambiguous scheduling.
-                //
-                // WSPR frames must start exactly on the window boundary. If
-                // the computed boundary is effectively "now" or in the past
-                // (for example due to clock adjustments or coarse rounding),
-                // do not start late. Skip to the next window instead.
-                const auto now_check = std::chrono::system_clock::now();
-                constexpr auto kLateTolerance =
-                    std::chrono::milliseconds(50);
-                if (now_check + kLateTolerance >= when)
-                {
-                    when += std::chrono::seconds(2 * 60);
-                }
-
-                // Spawn the TX thread slightly before the window boundary so it
-                // can apply affinity/scheduling and then sleep until the exact
-                // boundary.
-                constexpr auto kLead = std::chrono::seconds(2);
-                const auto pre = when - kLead;
-
-                std::unique_lock<std::mutex> lk(mtx_);
-                while (!stop_requested_.load(std::memory_order_acquire) &&
-                       !parent_->soft_off_.load(std::memory_order_acquire) &&
-                       std::chrono::system_clock::now() < pre)
-                {
-                    cv_.wait_until(
-                        lk,
-                        pre,
-                        [this]
-                        {
-                            return stop_requested_.load(std::memory_order_acquire);
-                        });
-                }
-
-                if (stop_requested_.load(std::memory_order_acquire) ||
-                    parent_->soft_off_.load(std::memory_order_acquire))
-                {
-                    break;
-                }
-
-                // If we missed the boundary, skip this cycle. This prevents
-                // "starting late" when the daemon is launched too late or the
-                // system is heavily loaded.
-                const auto now = std::chrono::system_clock::now();
-                if (now > when + kLateTolerance)
-                {
-                    continue;
-                }
-
-                // If a stop was requested while we were evaluating timing,
-                // do not schedule another transmission.
-                if (stop_requested_.load(std::memory_order_acquire) ||
-                    parent_->soft_off_.load(std::memory_order_acquire))
-                {
-                    break;
-                }
-
-                const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    when.time_since_epoch())
-                                    .count();
-                parent_->scheduled_start_rt_ns_.store(ns, std::memory_order_release);
-
-                // Synchronize with stop()/shutdown() so we don't
-                // race a join/start with a shutdown request.
-                std::lock_guard<std::mutex> tx_lk(parent_->tx_thread_mtx_);
-
-                if (stop_requested_.load(std::memory_order_acquire) ||
-                    parent_->shouldStop())
-                {
-                    break;
-                }
-
-                // Join any prior TX thread before launching a new one.
-                if (parent_->tx_thread_.joinable())
-                {
-                    parent_->tx_thread_.join();
-                }
-
-                // If we waited for a prior transmission to finish and are now
-                // past the target window, do not start late. Instead, skip to
-                // the next computed window.
-                const auto now_post_join = std::chrono::system_clock::now();
-                if (now_post_join > when + kLateTolerance)
-                {
-                    continue;
-                }
-
-                // Clear the parent stop flag only immediately before launch.
-                parent_->stop_requested_.store(false, std::memory_order_release);
-
-                parent_->tx_thread_ = std::thread(
-                    &WsprTransmitter::thread_entry,
-                    parent_);
-
-                if (parent_->one_shot_.load(std::memory_order_acquire))
-                {
-                    break;
-                }
-            }
-        }
+        void run();
     };
 
     TransmissionScheduler scheduler_{this};

@@ -26,34 +26,34 @@
 
 #include "wspr_transmit.hpp" // Class Declarations
 
-#include "wspr_message.hpp" // WSPR Message Submodule
-#include "mailbox.hpp"      // Mailbox Submodule
-#include "bcm_model.hpp"    // Enumerates processor types
+#include "wspr_message.hpp"
+#include "mailbox.hpp"
+#include "bcm_model.hpp"
 
 // C++ Standard Library Headers
-#include <algorithm> // std::copy_n, std::clamp
-#include <cassert>   // assert()
+#include <algorithm> 
+#include <cassert>
 #include <cerrno>
-#include <cmath>     // std::round, std::pow, std::floor
-#include <cstdint>   // std::uintptr_t
-#include <cstring>   // std::memcpy, std::strerror
-#include <cstdlib>   // std::rand, RAND_MAX
-#include <fstream>   // std::ifstream
-#include <iomanip>   // std::setprecision, std::setw, std::setfill
-#include <iostream>  // std::cout, std::cerr
-#include <optional>  // std::optional
-#include <random>    // std::random_device, std::mt19937, std::uniform_real_distribution
-#include <sstream>   // std::stringstream
-#include <stdexcept> // std::runtime_error
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <cstdlib>
+#include <fstream> 
+#include <iomanip>
+#include <iostream>
+#include <optional>
+#include <random>
+#include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <system_error>
 
 // POSIX & System-Specific Headers
-#include <fcntl.h>    // open flags
-#include <sys/mman.h> // mmap, munmap, MAP_SHARED, PROT_READ/WRITE
-#include <sys/stat.h> // struct stat, stat()
-#include <sys/time.h> // gettimeofday(), struct timeval
-#include <unistd.h>   // usleep(), close(), unlink()
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 #ifdef DEBUG_WSPR_TRANSMIT
 constexpr const bool debug = true;
@@ -222,6 +222,189 @@ namespace
     }
 
 } // end anonymous namespace
+
+
+WsprTransmitter::TransmissionScheduler::TransmissionScheduler(
+    WsprTransmitter *parent)
+    : parent_{parent}
+{
+}
+
+WsprTransmitter::TransmissionScheduler::~TransmissionScheduler()
+{
+    stop();
+}
+
+void WsprTransmitter::TransmissionScheduler::start()
+{
+    if (thread_.joinable())
+        return;
+
+    stop_requested_.store(false, std::memory_order_release);
+    thread_ = std::thread(&TransmissionScheduler::run, this);
+}
+
+void WsprTransmitter::TransmissionScheduler::stop()
+{
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        stop_requested_.store(true, std::memory_order_release);
+    }
+    cv_.notify_all();
+
+    if (thread_.joinable() &&
+        thread_.get_id() != std::this_thread::get_id())
+    {
+        thread_.join();
+    }
+}
+
+void WsprTransmitter::TransmissionScheduler::notify() noexcept
+{
+    cv_.notify_all();
+}
+
+std::chrono::system_clock::time_point
+WsprTransmitter::TransmissionScheduler::nextEvent() const
+{
+    using namespace std::chrono;
+
+    auto now = system_clock::now();
+    auto secs = duration_cast<seconds>(now.time_since_epoch()).count();
+
+    const int cycle = 2 * 60;
+
+    auto idx = secs / cycle;
+
+    auto base = idx * cycle;
+    seconds target_secs;
+    if (secs < base + 1)
+    {
+        target_secs = seconds{base + 1};
+    }
+    else
+    {
+        target_secs = seconds{(idx + 1) * cycle + 1};
+    }
+
+    return system_clock::time_point{target_secs};
+}
+
+void WsprTransmitter::TransmissionScheduler::run()
+{
+    while (!stop_requested_.load(std::memory_order_acquire) &&
+           !parent_->soft_off_.load(std::memory_order_acquire))
+    {
+        if (parent_->external_stop_flag_ &&
+            parent_->external_stop_flag_->load(std::memory_order_acquire))
+        {
+            break;
+        }
+
+        auto when = nextEvent();
+
+        // Be conservative about late or ambiguous scheduling.
+        //
+        // WSPR frames must start exactly on the window boundary. If
+        // the computed boundary is effectively "now" or in the past
+        // (for example due to clock adjustments or coarse rounding),
+        // do not start late. Skip to the next window instead.
+        const auto now_check = std::chrono::system_clock::now();
+        constexpr auto kLateTolerance = std::chrono::milliseconds(50);
+        if (now_check + kLateTolerance >= when)
+        {
+            when += std::chrono::seconds(2 * 60);
+        }
+
+        // Spawn the TX thread slightly before the window boundary so it
+        // can apply affinity/scheduling and then sleep until the exact
+        // boundary.
+        constexpr auto kLead = std::chrono::seconds(2);
+
+        const auto pre = when - kLead;
+
+        std::unique_lock<std::mutex> lk(mtx_);
+        while (!stop_requested_.load(std::memory_order_acquire) &&
+               !parent_->soft_off_.load(std::memory_order_acquire) &&
+               std::chrono::system_clock::now() < pre)
+        {
+            cv_.wait_until(
+                lk,
+                pre,
+                [this]
+                {
+                    return stop_requested_.load(std::memory_order_acquire);
+                });
+        }
+
+        if (stop_requested_.load(std::memory_order_acquire) ||
+            parent_->soft_off_.load(std::memory_order_acquire))
+        {
+            break;
+        }
+
+        // If we missed the boundary, skip this cycle. This prevents
+        // "starting late" when the daemon is launched too late or the
+        // system is heavily loaded.
+        const auto now = std::chrono::system_clock::now();
+        if (now > when + kLateTolerance)
+        {
+            continue;
+        }
+
+        // If a stop was requested while we were evaluating timing,
+        // do not schedule another transmission.
+        if (stop_requested_.load(std::memory_order_acquire) ||
+            parent_->soft_off_.load(std::memory_order_acquire))
+        {
+            break;
+        }
+
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            when.time_since_epoch())
+                            .count();
+        parent_->scheduled_start_rt_ns_.store(
+            ns,
+            std::memory_order_release);
+
+        // Synchronize with stop()/shutdown() so we don't
+        // race a join/start with a shutdown request.
+        std::lock_guard<std::mutex> tx_lk(parent_->tx_thread_mtx_);
+
+        if (stop_requested_.load(std::memory_order_acquire) ||
+            parent_->shouldStop())
+        {
+            break;
+        }
+
+        // Join any prior TX thread before launching a new one.
+        if (parent_->tx_thread_.joinable())
+        {
+            parent_->tx_thread_.join();
+        }
+
+        // If we waited for a prior transmission to finish and are now
+        // past the target window, do not start late. Instead, skip to
+        // the next computed window.
+        const auto now_post_join = std::chrono::system_clock::now();
+        if (now_post_join > when + kLateTolerance)
+        {
+            continue;
+        }
+
+        // Clear the parent stop flag only immediately before launch.
+        parent_->stop_requested_.store(false, std::memory_order_release);
+
+        parent_->tx_thread_ = std::thread(
+            &WsprTransmitter::thread_entry,
+            parent_);
+
+        if (parent_->one_shot_.load(std::memory_order_acquire))
+        {
+            break;
+        }
+    }
+}
 
 WsprTransmitter wsprTransmitter;
 
