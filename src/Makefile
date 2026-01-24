@@ -209,11 +209,15 @@ release: build/bin/$(OUT)
 debug: build/bin/$(TEST_OUT)
 	$(Q)echo "Debug build completed successfully."
 
+# TODO: Make --now and --oneshot an env trigger
 test: debug
 	$(Q)$(SUDO) ./build/bin/$(TEST_OUT) --now --oneshot
 
+watchdog: debug
+	$(Q)$(SUDO) env WSPR_TX_INJECT_WD_STALL=5 ./build/bin/$(TEST_OUT) --now --oneshot
+
 gdb: debug
-	$(Q)$(SUDO) sudo gdb --args ./build/bin/$(TEST_OUT)
+	$(Q)$(SUDO) gdb --args ./build/bin/$(TEST_OUT)
 
 lint:
 	$(Q)command -v cppcheck >/dev/null 2>&1 || { \
@@ -232,6 +236,7 @@ help:
 	$(Q)echo "  release    Build optimized binary"
 	$(Q)echo "  debug      Build debug binary"
 	$(Q)echo "  test       Run tests"
+	$(Q)echo "  watchdog   Run tests with watchdog fail"
 	$(Q)echo "  gdb        Debug with gdb"
 	$(Q)echo "  lint       Static analysis"
 	$(Q)echo "  macros     Show macros"

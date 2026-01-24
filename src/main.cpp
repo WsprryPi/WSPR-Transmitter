@@ -1,27 +1,58 @@
-// Project headers
-#include "config_handler.hpp"
-#include "utils.hpp"
-#include "wspr_transmit.hpp"
+/**
+ * @file main.cpp
+ * @brief A test rig for the WSPR-Transmitter class
+ *
+ * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
-// C++ Standard Library
+// C++ standard library headers
 #include <array>              // std::array for signal list
 #include <chrono>             // std::chrono
 #include <condition_variable> // g_end_cv
 #include <csignal>            // sigaction, std::signal
 #include <cstring>            // strsignal()
+#include <cstdlib>            // setenv()
 #include <cstdio>             // getchar()
 #include <iomanip>            // std::ostringstream
 #include <iostream>           // std::cout, std::getline
 #include <mutex>              // g_end_mtx
+#include <optional>           // std::optional
 #include <string>             // std::string
 
-// POSIX & System-Specific Headers
+// POSIX and system headers
 #include <termios.h> // tcgetattr(), tcsetattr()
 #include <unistd.h>  // STDIN_FILENO
 
-// Edit with your data
-static constexpr std::string_view CALLSIGN   = "AA0NT";
-static constexpr std::string_view GRID= "EM18";
+// Project headers
+#include "config_handler.hpp"
+#include "utils.hpp"
+#include "wspr_transmit.hpp"
+
+#define SELFTEST
+
+static constexpr auto debug_tag_chars = make_debug_tag_chars("Test-Transmit");
+static constexpr std::string_view debug_tag = as_string_view(debug_tag_chars);
+
+static constexpr std::string_view CALLSIGN = "AA0NT";
+static constexpr std::string_view GRID = "EM18";
 static constexpr uint8_t POWER_DBM = 20;
 
 // Frequency choices - Leave alone (see below)
@@ -102,6 +133,7 @@ struct AppArgs
 {
     bool transmit_now = false;
     bool one_shot = false;
+    std::optional<std::string> inject_wd_stall; // Value for WSPR_TX_INJECT_WD_STALL
 };
 
 AppArgs parse_args(int argc, char **argv)
@@ -118,11 +150,40 @@ AppArgs parse_args(int argc, char **argv)
         {
             args.one_shot = true;
         }
+        else if (a.rfind("--inject-wd-stall", 0) == 0)
+        {
+            std::string value;
+
+            // Support: --inject-wd-stall=5  or  --inject-wd-stall 5
+            const auto eq = a.find('=');
+            if (eq != std::string_view::npos)
+            {
+                value = std::string(a.substr(eq + 1));
+            }
+            else
+            {
+                if (i + 1 < argc)
+                {
+                    value = argv[++i];
+                }
+                else
+                {
+                    value = "1";
+                }
+            }
+
+            args.inject_wd_stall = value;
+
+            // Also push into the environment so the transmitter can see it.
+            ::setenv("WSPR_TX_INJECT_WD_STALL", value.c_str(), 1);
+        }
         else if (a == "--help" || a == "-h")
         {
             std::cout << "Options:\n"
                       << "  -n, --now        Start WSPR immediately (no window wait).\n"
-                      << "  -1, --oneshot    Run exactly one WSPR transmission and exit.\n";
+                      << "  -1, --oneshot    Run exactly one WSPR transmission and exit.\n"
+                         "  --inject-wd-stall [N|Nms]  Inject a watchdog stall"
+                         " after N seconds or Nms.\n";
             std::exit(0);
         }
     }
@@ -186,7 +247,8 @@ struct TermiosGuard
 };
 
 /**
- * @brief Reads a single character from standard input without waiting for Enter.
+ * @brief Reads a single character from standard input without waiting for
+ *        Enter.
  *
  * This function configures the terminal for noncanonical mode to read a single
  * character immediately. It then restores the terminal settings.
@@ -206,11 +268,13 @@ int getch()
 }
 
 /**
- * @brief Pauses execution until the user presses the spacebar or a shutdown signal is received
+ * @brief Pauses execution until the user presses the spacebar or a shutdown
+ *        signal is received
  *
  * This function blocks until either:
  * - The user presses the spacebar (detected using raw terminal input), or
- * - A signal triggers a write to the self-pipe, indicating a termination request.
+ * - A signal triggers a write to the self-pipe, indicating a termination
+ *   request.
  *
  * It uses the RAII-based TermiosGuard to temporarily set the terminal to
  * non-canonical, non-echoing mode so input can be read one character at a time.
@@ -221,8 +285,10 @@ int getch()
  * - It cleanly handles `EINTR` and uses an atomic flag `g_terminate`
  *   to check for termination requests.
  *
- * @note This function blocks indefinitely unless interrupted or input is received.
- *       It is typically used to pause before transmitting or resuming an operation.
+ * @note This function blocks indefinitely unless interrupted or input is
+ *       received.
+ *       It is typically used to pause before transmitting or resuming an
+ *       operation.
  */
 void wait_for_space_or_signal()
 {
@@ -233,8 +299,8 @@ void wait_for_space_or_signal()
     {
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET(STDIN_FILENO, &rfds);        // Watch for keyboard input
-        FD_SET(sig_pipe_fds[0], &rfds);     // Watch for signal-triggered wakeup
+        FD_SET(STDIN_FILENO, &rfds);    // Watch for keyboard input
+        FD_SET(sig_pipe_fds[0], &rfds); // Watch for signal-triggered wakeup
 
         int nf = std::max(STDIN_FILENO, sig_pipe_fds[0]) + 1;
 
@@ -242,8 +308,8 @@ void wait_for_space_or_signal()
         if (::select(nf, &rfds, nullptr, nullptr, nullptr) < 0)
         {
             if (errno == EINTR)
-                continue;  // Interrupted by signal, retry
-            break;         // Other error: exit
+                continue; // Interrupted by signal, retry
+            break;        // Other error: exit
         }
 
         if (FD_ISSET(sig_pipe_fds[0], &rfds))
@@ -297,8 +363,8 @@ bool select_wspr()
     while (!g_terminate.load())
     {
         FD_ZERO(&rfds);
-        FD_SET(STDIN_FILENO, &rfds);         // Monitor keyboard
-        FD_SET(sig_pipe_fds[0], &rfds);      // Monitor signal pipe
+        FD_SET(STDIN_FILENO, &rfds);    // Monitor keyboard
+        FD_SET(sig_pipe_fds[0], &rfds); // Monitor signal pipe
 
         int nf = std::max(STDIN_FILENO, sig_pipe_fds[0]) + 1;
 
@@ -307,7 +373,7 @@ bool select_wspr()
         {
             std::cout << std::endl;
             if (errno == EINTR)
-                continue;  // Retry after interrupt
+                continue; // Retry after interrupt
             throw std::runtime_error("select failed");
         }
 
@@ -325,9 +391,9 @@ bool select_wspr()
             {
                 std::cout << std::endl;
                 if (c == '2')
-                    return false;  // User selected TONE mode
+                    return false; // User selected TONE mode
                 else
-                    return true;   // Default or user selected WSPR
+                    return true; // Default or user selected WSPR
             }
         }
     }
@@ -348,14 +414,14 @@ bool select_wspr()
  * @param signal The signal number that triggered the handler (unused).
  *
  * @note Only async-signal-safe functions should be called from within
- *       this handler. Ensure `wsprTransmitter.stop()` is safe, or move
- *       its logic to a safe location based on `g_terminate`.
+ *       this handler. Ensure `wsprTransmitter.stopAndJoin()` is safe, or
+ *       move its logic to a safe location based on `g_terminate`.
  */
 void sig_handler(int)
 {
     // Keep the signal handler async-signal-safe.
     // Do NOT call into the transmitter here (may deadlock on 32-bit).
-    const char msg[] = "Caught signal\nShutting down transmissions.\n";
+    const char msg[] = "\nCaught signal\nShutting down transmissions.\n";
     (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
 
     g_terminate.store(true, std::memory_order_release);
@@ -378,29 +444,38 @@ void sig_handler(int)
  */
 void start_cb(const std::string &msg, double frequency)
 {
+    // Log messages
     if (!msg.empty() && frequency != 0.0)
     {
-        std::cout << "[Callback] Started transmission (" << msg << ") "
-                  << std::setprecision(6)
-                  << (frequency / 1e6) << " MHz."
+        std::cout << debug_tag
+                  << "Started transmission ("
+                  << msg
+                  << ") "
+                  << wsprTransmitter.formatFrequencyMHz(frequency)
+                  << " MHz."
                   << std::endl;
     }
     else if (frequency != 0.0)
     {
-        std::cout << "[Callback] Started transmission: "
-                  << std::setprecision(6)
-                  << (frequency / 1e6) << " MHz."
+        std::cout << debug_tag
+                  << "Started transmission: "
+                  << wsprTransmitter.formatFrequencyMHz(frequency)
+                  << " MHz."
                   << std::endl;
     }
     else if (!msg.empty())
     {
-        std::cout << "[Callback] Started transmission ("
-                  << msg << ")."
+        std::cout << debug_tag
+                  << "Started transmission ("
+                  << msg
+                  << ")."
                   << std::endl;
     }
     else
     {
-        std::cout << "[Callback] Started transmission.\n";
+        std::cout << debug_tag
+                  << "Started transmission."
+                  << std::endl;
     }
 }
 
@@ -420,27 +495,34 @@ void end_cb(const std::string &msg, double elapsed)
 {
     if (!msg.empty() && elapsed != 0.0)
     {
-        std::cout << "[Callback] Completed transmission (" << msg << ") "
-                  << std::setprecision(3)
+        std::cout << debug_tag
+                  << "Completed transmission (" << msg << ") "
+                  << std::fixed
+                  << std::setprecision(6)
                   << elapsed << " seconds."
                   << std::endl;
     }
     else if (elapsed != 0.0)
     {
-        std::cout << "[Callback] Completed transmission: "
-                  << std::setprecision(3)
+        std::cout << debug_tag
+                  << "Completed transmission: "
+                  << std::fixed
+                  << std::setprecision(6)
                   << elapsed << " seconds."
                   << std::endl;
     }
     else if (!msg.empty())
     {
-        std::cout << "[Callback] Completed transmission ("
+        std::cout << debug_tag
+                  << "Completed transmission ("
                   << msg << ")."
                   << std::endl;
     }
     else
     {
-        std::cout << "[Callback] Completed transmission." << std::endl;
+        std::cout << debug_tag
+                  << "Completed transmission."
+                  << std::endl;
     }
 
     {
@@ -505,17 +587,17 @@ void configure_transmitter(bool isWspr)
                 end_cb(msg, elapsed_secs);
             });
 
-        wsprTransmitter.setupTransmission(
+        wsprTransmitter.configure(
             WSPR_FREQ, 0, config.ppm,
             CALLSIGN, GRID, POWER_DBM, /*use_offset=*/true);
     }
     else
     {
-        wsprTransmitter.setupTransmission(WSPR_FREQ, 0, config.ppm);
+        wsprTransmitter.configure(WSPR_FREQ, 0, config.ppm);
     }
 
 #ifdef DEBUG_WSPR_TRANSMIT
-    wsprTransmitter.printParameters();
+    wsprTransmitter.dumpParameters();
 #endif
 }
 
@@ -531,26 +613,60 @@ void wait_for_completion(bool isWspr)
 {
     if (isWspr)
     {
+        // Hard ceiling so unrecoverable DMA faults cannot hang forever.
+        const auto max_wait = std::chrono::seconds(200);
+        const auto deadline = std::chrono::steady_clock::now() + max_wait;
+
         std::unique_lock<std::mutex> lk(g_end_mtx);
         while (!g_transmission_done &&
                !g_terminate.load(std::memory_order_acquire))
         {
-            g_end_cv.wait_for(lk, std::chrono::milliseconds(100));
+            // Abort early if the transmitter has detected a DMA stall.
+            if (wsprTransmitter.watchdogFaulted())
+            {
+                std::cout
+                    << "DMA watchdog fault detected. Aborting WSPR transmission."
+                    << std::endl;
+                wsprTransmitter.requestSoftOff();
+                wsprTransmitter.requestStopTx();
+                return;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+            {
+                std::cout
+                    << "Timeout waiting for WSPR completion. Aborting transmission."
+                    << std::endl;
+                wsprTransmitter.requestSoftOff();
+                wsprTransmitter.requestStopTx();
+                return;
+            }
+
+            const auto slice = std::min(std::chrono::milliseconds(100),
+                                        std::chrono::duration_cast<
+                                            std::chrono::milliseconds>(
+                                            deadline - now));
+            g_end_cv.wait_for(lk, slice);
         }
+
         if (g_terminate.load(std::memory_order_acquire) && !g_transmission_done)
         {
-            lk.unlock();
             // Soft-off prevents any new transmissions, then we stop the
             // current transmission thread cooperatively.
             wsprTransmitter.requestSoftOff();
-            wsprTransmitter.stopTransmission();
+            wsprTransmitter.requestStopTx();
             return;
         }
 
         if (g_transmission_done)
-            std::cout << "WSPR transmission complete." << std::endl;
+            std::cout << debug_tag
+                      << "WSPR transmission complete."
+                      << std::endl;
         else
-            std::cout << "Interrupted. Aborting WSPR transmission." << std::endl;
+            std::cout << debug_tag
+                      << "Interrupted. Aborting WSPR transmission."
+                      << std::endl;
     }
     else
     {
@@ -597,7 +713,10 @@ int main(int argc, char **argv)
         if (g_terminate.load(std::memory_order_acquire))
             return 0;
 
-        std::cout << "Mode selected: " << (isWspr ? "WSPR" : "TONE") << std::endl;
+        std::cout << debug_tag
+                  << "Mode selected: "
+                  << (isWspr ? "WSPR" : "TONE")
+                  << std::endl;
 
         // Configure transmitter settings based on user selection
         configure_transmitter(isWspr);
@@ -609,9 +728,13 @@ int main(int argc, char **argv)
         {
             // WSPR mode waits for the next time slot unless --now was supplied
             if (!args.transmit_now)
-                std::cout << "Waiting for next transmission window." << std::endl;
+                std::cout << debug_tag
+                          << "Waiting for next transmission window."
+                          << std::endl;
             else
-                std::cout << "Transmit-now enabled. Starting immediately." << std::endl;
+                std::cout << debug_tag
+                          << "Transmit-now enabled. Starting immediately."
+                          << std::endl;
         }
         else
         {
@@ -620,13 +743,13 @@ int main(int argc, char **argv)
             wait_for_space_or_signal();
         }
         // Begin scheduled or immediate transmission
-        wsprTransmitter.enableTransmission();
+        wsprTransmitter.startAsync();
 
         // Wait for transmission to finish or be aborted
         wait_for_completion(isWspr);
 
         // Clean up and stop transmission
-        wsprTransmitter.stop();
+        wsprTransmitter.stopAndJoin();
         return 0;
     }
     catch (const std::exception &e)
