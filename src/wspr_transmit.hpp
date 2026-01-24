@@ -3,7 +3,7 @@
  * @brief A class to encapsulate configuration and DMA‑driven transmission of
  *        WSPR signals.
  *
- * Copyright (C) 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
+ * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -79,6 +79,10 @@ public:
      * @details
      *   This describes whether the transmitter is available to run, idle, or
      *   actively emitting RF.
+     *
+     * Invariants:
+     * - requestStopTx() never transitions to DISABLED.
+     * - Stopping TX preserves hardware readiness.
      */
     enum class State
     {
