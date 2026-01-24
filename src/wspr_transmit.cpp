@@ -1285,7 +1285,6 @@ void WsprTransmitter::transmit()
             {
                 struct timespec now_rt{};
                 clock_gettime(CLOCK_REALTIME, &now_rt);
-
                 std::tm tm_rt{};
                 gmtime_r(&now_rt.tv_sec, &tm_rt);
 
