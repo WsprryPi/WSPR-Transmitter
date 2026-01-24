@@ -46,6 +46,11 @@
 #include "utils.hpp"
 #include "wspr_transmit.hpp"
 
+#define SELFTEST
+
+static constexpr auto debug_tag_chars = make_debug_tag_chars("Test-Transmit");
+static constexpr std::string_view debug_tag = as_string_view(debug_tag_chars);
+
 static constexpr std::string_view CALLSIGN = "AA0NT";
 static constexpr std::string_view GRID = "EM18";
 static constexpr uint8_t POWER_DBM = 20;
@@ -416,7 +421,7 @@ void sig_handler(int)
 {
     // Keep the signal handler async-signal-safe.
     // Do NOT call into the transmitter here (may deadlock on 32-bit).
-    const char msg[] = "Caught signal\nShutting down transmissions.\n";
+    const char msg[] = "\nCaught signal\nShutting down transmissions.\n";
     (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
 
     g_terminate.store(true, std::memory_order_release);
@@ -439,29 +444,38 @@ void sig_handler(int)
  */
 void start_cb(const std::string &msg, double frequency)
 {
+    // Log messages
     if (!msg.empty() && frequency != 0.0)
     {
-        std::cout << "[Callback] Started transmission (" << msg << ") "
+        std::cout << debug_tag
+                  << "Started transmission ("
+                  << msg
+                  << ") "
                   << wsprTransmitter.formatFrequencyMHz(frequency)
                   << " MHz."
                   << std::endl;
     }
     else if (frequency != 0.0)
     {
-        std::cout << "[Callback] Started transmission: "
+        std::cout << debug_tag
+                  << "Started transmission: "
                   << wsprTransmitter.formatFrequencyMHz(frequency)
                   << " MHz."
                   << std::endl;
     }
     else if (!msg.empty())
     {
-        std::cout << "[Callback] Started transmission ("
-                  << msg << ")."
+        std::cout << debug_tag
+                  << "Started transmission ("
+                  << msg
+                  << ")."
                   << std::endl;
     }
     else
     {
-        std::cout << "[Callback] Started transmission.\n";
+        std::cout << debug_tag
+                  << "Started transmission."
+                  << std::endl;
     }
 }
 
@@ -481,7 +495,8 @@ void end_cb(const std::string &msg, double elapsed)
 {
     if (!msg.empty() && elapsed != 0.0)
     {
-        std::cout << "[Callback] Completed transmission (" << msg << ") "
+        std::cout << debug_tag
+                  << "Completed transmission (" << msg << ") "
                   << std::fixed
                   << std::setprecision(6)
                   << elapsed << " seconds."
@@ -489,7 +504,8 @@ void end_cb(const std::string &msg, double elapsed)
     }
     else if (elapsed != 0.0)
     {
-        std::cout << "[Callback] Completed transmission: "
+        std::cout << debug_tag
+                  << "Completed transmission: "
                   << std::fixed
                   << std::setprecision(6)
                   << elapsed << " seconds."
@@ -497,13 +513,16 @@ void end_cb(const std::string &msg, double elapsed)
     }
     else if (!msg.empty())
     {
-        std::cout << "[Callback] Completed transmission ("
+        std::cout << debug_tag
+                  << "Completed transmission ("
                   << msg << ")."
                   << std::endl;
     }
     else
     {
-        std::cout << "[Callback] Completed transmission." << std::endl;
+        std::cout << debug_tag
+                  << "Completed transmission."
+                  << std::endl;
     }
 
     {
@@ -641,9 +660,13 @@ void wait_for_completion(bool isWspr)
         }
 
         if (g_transmission_done)
-            std::cout << "WSPR transmission complete." << std::endl;
+            std::cout << debug_tag
+                      << "WSPR transmission complete."
+                      << std::endl;
         else
-            std::cout << "Interrupted. Aborting WSPR transmission." << std::endl;
+            std::cout << debug_tag
+                      << "Interrupted. Aborting WSPR transmission."
+                      << std::endl;
     }
     else
     {
@@ -690,7 +713,10 @@ int main(int argc, char **argv)
         if (g_terminate.load(std::memory_order_acquire))
             return 0;
 
-        std::cout << "Mode selected: " << (isWspr ? "WSPR" : "TONE") << std::endl;
+        std::cout << debug_tag
+                  << "Mode selected: "
+                  << (isWspr ? "WSPR" : "TONE")
+                  << std::endl;
 
         // Configure transmitter settings based on user selection
         configure_transmitter(isWspr);
@@ -702,9 +728,13 @@ int main(int argc, char **argv)
         {
             // WSPR mode waits for the next time slot unless --now was supplied
             if (!args.transmit_now)
-                std::cout << "Waiting for next transmission window." << std::endl;
+                std::cout << debug_tag
+                          << "Waiting for next transmission window."
+                          << std::endl;
             else
-                std::cout << "Transmit-now enabled. Starting immediately." << std::endl;
+                std::cout << debug_tag
+                          << "Transmit-now enabled. Starting immediately."
+                          << std::endl;
         }
         else
         {

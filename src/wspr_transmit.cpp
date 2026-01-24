@@ -61,7 +61,14 @@ constexpr const bool debug = true;
 #else
 constexpr const bool debug = false;
 #endif
-inline constexpr std::string_view debug_tag{"[WSPR-Transmitter] "};
+
+#ifdef SELFTEST
+#include "utils"
+static constexpr auto debug_tag_chars = make_debug_tag_chars("Utils");
+static constexpr std::string_view debug_tag = as_string_view(debug_tag_chars);
+#else
+static constexpr std::string_view debug_tag{"[WSPR-Transmitter] "};
+#endif
 
 // Helper classes and functions in anonymous namespace
 namespace
@@ -512,6 +519,13 @@ void WsprTransmitter::configure(
     int power_dbm,
     bool use_offset)
 {
+    // Reconfiguration is only safe when the transmit thread is not actively
+    // feeding DMA. If a transmission is in progress, stop it first.
+    if (state_.load(std::memory_order_acquire) == State::TRANSMITTING)
+    {
+        requestStopTx();
+    }
+
     if (dma_setup_done_)
     {
         shutdown();
@@ -1166,7 +1180,6 @@ bool WsprTransmitter::sleepUntilAbsTightInterruptible(
     return !(shouldStop() || soft_off_.load(std::memory_order_acquire));
 }
 
-
 void WsprTransmitter::throwIfStopRequested(const char *context)
 {
     if (!shouldStop() && !soft_off_.load(std::memory_order_acquire))
@@ -1272,13 +1285,22 @@ void WsprTransmitter::transmit()
             {
                 struct timespec now_rt{};
                 clock_gettime(CLOCK_REALTIME, &now_rt);
-                std::cerr << debug_tag
-                          << "TX start realtime = "
-                          << now_rt.tv_sec
-                          << "."
-                          << std::setw(9) << std::setfill('0') << now_rt.tv_nsec
-                          << std::setfill(' ')
-                          << std::endl;
+
+                std::tm tm_rt{};
+                gmtime_r(&now_rt.tv_sec, &tm_rt);
+
+                const long usec = now_rt.tv_nsec / 1000;
+
+                std::cerr
+                    << debug_tag
+                    << "TX start realtime = "
+                    << std::setw(2) << std::setfill('0') << tm_rt.tm_hour << ":"
+                    << std::setw(2) << std::setfill('0') << tm_rt.tm_min << ":"
+                    << std::setw(2) << std::setfill('0') << tm_rt.tm_sec << "."
+                    << std::setw(6) << std::setfill('0') << usec
+                    << std::setfill(' ')
+                    << "Z"
+                    << std::endl;
             }
         }
 
@@ -1307,7 +1329,8 @@ void WsprTransmitter::transmit()
             }
         }
 
-        for (int i = 0; i < symbol_count && !shouldStop(); ++i)
+        int i = 0;
+        for (i = 0; i < symbol_count && !shouldStop(); ++i)
         {
             const int64_t offset_ns =
                 static_cast<int64_t>(
@@ -1361,10 +1384,12 @@ void WsprTransmitter::transmit()
                 i);
         }
 
+        const bool canceled = shouldStop() && (i < symbol_count);
+
         // Allow the final symbol's queued DMA work to drain before turning off
         // the clock. Without this, we can cut the last symbol short by roughly
         // one symbol period.
-        if (!shouldStop())
+        if (!canceled)
         {
             const int64_t end_ns =
                 static_cast<int64_t>(std::llround(
@@ -1384,7 +1409,7 @@ void WsprTransmitter::transmit()
 
         const double actual =
             std::chrono::duration<double>(t_end_chrono - t0_chrono).count();
-        fire_end_cb("", actual);
+        fire_end_cb(canceled ? "canceled" : "", actual);
     }
 }
 
@@ -1959,7 +1984,7 @@ void WsprTransmitter::transmit_symbol(
         if (symbol_index >= 0)
         {
             std::cerr
-                << (symbol_index + 1)
+                << std::setw(3) << std::setfill('0') << (symbol_index + 1)
                 << "/" << total_symbols;
         }
         else
