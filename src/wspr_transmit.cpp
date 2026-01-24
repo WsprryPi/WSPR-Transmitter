@@ -24,7 +24,6 @@
  * SOFTWARE.
  */
 
-
 // C++ standard library headers
 #include <algorithm>
 #include <cassert>
@@ -492,7 +491,6 @@ void WsprTransmitter::setTransmissionCallbacks(StartCallback start_cb, EndCallba
     on_transmit_end_ = std::move(end_cb);
 }
 
-
 std::string WsprTransmitter::formatFrequencyMHz(double frequency_hz)
 {
     const auto hz_rounded =
@@ -530,9 +528,7 @@ void WsprTransmitter::configure(
     trans_params_.power = power;
     trans_params_.use_offset = use_offset;
 
-    if (!trans_params_.call_sign.empty()
-        && !trans_params_.grid_square.empty()
-        && trans_params_.power_dbm != 0)
+    if (!trans_params_.call_sign.empty() && !trans_params_.grid_square.empty() && trans_params_.power_dbm != 0)
     {
         trans_params_.is_tone = false;
         WsprMessage msg(
@@ -575,6 +571,13 @@ void WsprTransmitter::configure(
 
 void WsprTransmitter::applyPpmCorrection(double ppm_new)
 {
+    // Reconfiguration is only safe when the transmit thread is not actively
+    // feeding DMA. If a transmission is in progress, stop it first.
+    if (state_.load(std::memory_order_acquire) == State::TRANSMITTING)
+    {
+        requestStopTx();
+    }
+
     dma_config_.plld_clock_frequency =
         dma_config_.plld_nominal_freq * (1.0 - ppm_new / 1e6);
 
@@ -700,8 +703,19 @@ void WsprTransmitter::shutdown()
 
 void WsprTransmitter::requestStopTx()
 {
-    stop_requested_.store(true);
+    stop_requested_.store(true, std::memory_order_release);
     stop_cv_.notify_all();
+
+    // Synchronize with the scheduler so it cannot race a join/start while
+    // we are waiting for the transmit thread to unwind.
+    {
+        std::lock_guard<std::mutex> lk(tx_thread_mtx_);
+        if (tx_thread_.joinable() &&
+            tx_thread_.get_id() != std::this_thread::get_id())
+        {
+            tx_thread_.join();
+        }
+    }
 }
 
 bool WsprTransmitter::watchdogFaulted() const noexcept
@@ -746,15 +760,14 @@ void WsprTransmitter::dumpParameters()
 
     std::cout << "WSPR Symbol Time:  "
               << (trans_params_.is_tone ? "N/A"
-                                      : std::to_string(trans_params_.symtime)
-                                            + " s")
+                                        : std::to_string(trans_params_.symtime) + " s")
               << std::endl;
 
     std::cout << "WSPR Tone Spacing: "
               << (trans_params_.is_tone ? "N/A"
-                                      : std::to_string(
-                                            trans_params_.tone_spacing)
-                                            + " Hz")
+                                        : std::to_string(
+                                              trans_params_.tone_spacing) +
+                                              " Hz")
               << std::endl;
 
     std::cout << "DMA Table Size:    "
@@ -973,7 +986,7 @@ void WsprTransmitter::start_watchdog()
                     const auto after =
                         std::chrono::duration_cast<
                             std::chrono::steady_clock::duration>(
-                        *inject_stall_after);
+                            *inject_stall_after);
                     if (elapsed >= after)
                     {
                         injected = true;
@@ -1098,6 +1111,62 @@ bool WsprTransmitter::waitInterruptableFor(std::chrono::nanoseconds duration)
     return !interrupted;
 }
 
+bool WsprTransmitter::sleepUntilAbsTightInterruptible(
+    clockid_t clk_id,
+    const timespec &ts_target,
+    int64_t spin_ns)
+{
+    if (spin_ns < 0)
+    {
+        spin_ns = 0;
+    }
+
+    for (;;)
+    {
+        if (shouldStop() || soft_off_.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+
+        timespec now{};
+        ::clock_gettime(clk_id, &now);
+
+        const int64_t remaining_ns = diff_ns(ts_target, now);
+        if (remaining_ns <= 0)
+        {
+            break;
+        }
+
+        if (remaining_ns > spin_ns)
+        {
+            const auto sleep_ns =
+                std::chrono::nanoseconds{remaining_ns - spin_ns};
+
+            // Use an interruptible condition-variable wait for the bulk
+            // of the sleep so requestStopTx() can wake us promptly.
+            if (!waitInterruptableFor(sleep_ns))
+            {
+                return false;
+            }
+            continue;
+        }
+
+        // Final precision tail: busy-wait until the exact deadline.
+        while (!shouldStop())
+        {
+            ::clock_gettime(clk_id, &now);
+            if (diff_ns(now, ts_target) >= 0)
+            {
+                break;
+            }
+        }
+        break;
+    }
+
+    return !(shouldStop() || soft_off_.load(std::memory_order_acquire));
+}
+
+
 void WsprTransmitter::throwIfStopRequested(const char *context)
 {
     if (!shouldStop() && !soft_off_.load(std::memory_order_acquire))
@@ -1188,7 +1257,16 @@ void WsprTransmitter::transmit()
             start_rt.tv_sec = start_rt_ns / 1000000000LL;
             start_rt.tv_nsec = static_cast<long>(start_rt_ns % 1000000000LL);
 
-            sleep_until_abs_tight(CLOCK_REALTIME, start_rt, spin_ns_);
+            if (!sleepUntilAbsTightInterruptible(CLOCK_REALTIME, start_rt, spin_ns_))
+            {
+                if (debug)
+                {
+                    std::cerr << debug_tag
+                              << "TX start aborted before window boundary."
+                              << std::endl;
+                }
+                return;
+            }
 
             if (debug)
             {
@@ -1242,7 +1320,10 @@ void WsprTransmitter::transmit()
             // spurious overrun caused by normal loop overhead.
             if (i != 0)
             {
-                sleep_until_abs_tight(CLOCK_MONOTONIC, target, 200'000);
+                if (!sleepUntilAbsTightInterruptible(CLOCK_MONOTONIC, target, 200'000))
+                {
+                    break;
+                }
 
                 if (debug)
                 {
@@ -1290,7 +1371,7 @@ void WsprTransmitter::transmit()
                     static_cast<double>(symbol_count) * symtime * 1e9));
 
             const timespec end_target = add_ns(t0_ts, end_ns);
-            sleep_until_abs_tight(CLOCK_MONOTONIC, end_target, 200'000);
+            (void)sleepUntilAbsTightInterruptible(CLOCK_MONOTONIC, end_target, 200'000);
         }
 
         // Capture the end time immediately after the symbol-period drain.
@@ -1410,8 +1491,8 @@ void WsprTransmitter::thread_entry()
         throw std::domain_error(
             std::string(
                 "WsprTransmitter::thread_entry(): Error setting thread "
-                "priority: ")
-                + e.what());
+                "priority: ") +
+            e.what());
     }
     catch (const std::exception &e)
     {
@@ -2051,11 +2132,9 @@ void WsprTransmitter::create_dma_pages(
         {
             // Assign virtual and bus addresses for each instruction
             instructions_[instrCnt].v = static_cast<void *>(
-                static_cast<char *>(instr_page_.v)
-                + sizeof(struct CB) * i);
-            instructions_[instrCnt].b = instr_page_.b
-                + static_cast<std::uintptr_t>(
-                    sizeof(struct CB) * i);
+                static_cast<char *>(instr_page_.v) + sizeof(struct CB) * i);
+            instructions_[instrCnt].b = instr_page_.b + static_cast<std::uintptr_t>(
+                                                            sizeof(struct CB) * i);
 
             // Configure DMA transfer: Source = constant memory page, Destination = PWM FI
             // On 64-bit, const_page_.b is already a uintptr_t.
@@ -2290,23 +2369,18 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
 {
     // Compute the divider values for the lowest and highest WSPR tones.
     double div_lo = bit_trunc(
-                        dma_config_.plld_clock_frequency
-                            / (trans_params_.frequency
-                               - 1.5 * trans_params_.tone_spacing),
-                        -12)
-                    + std::pow(2.0, -12);
+                        dma_config_.plld_clock_frequency / (trans_params_.frequency - 1.5 * trans_params_.tone_spacing),
+                        -12) +
+                    std::pow(2.0, -12);
     double div_hi = bit_trunc(
-        dma_config_.plld_clock_frequency
-            / (trans_params_.frequency
-               + 1.5 * trans_params_.tone_spacing),
+        dma_config_.plld_clock_frequency / (trans_params_.frequency + 1.5 * trans_params_.tone_spacing),
         -12);
 
     // If the integer portion of dividers differ, adjust the center frequency.
     if (std::floor(div_lo) != std::floor(div_hi))
     {
         center_freq_actual =
-            dma_config_.plld_clock_frequency / std::floor(div_lo)
-            - 1.6 * trans_params_.tone_spacing;
+            dma_config_.plld_clock_frequency / std::floor(div_lo) - 1.6 * trans_params_.tone_spacing;
         if (debug && trans_params_.frequency != 0.0)
         {
             std::stringstream temp;
@@ -2347,8 +2421,7 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
     for (int i = 0; i < 1024; i++)
     {
         trans_params_.dma_table_freq[i] =
-            dma_config_.plld_clock_frequency
-            / (static_cast<double>(tuning_word[i]) / std::pow(2.0, 12));
+            dma_config_.plld_clock_frequency / (static_cast<double>(tuning_word[i]) / std::pow(2.0, 12));
 
         // Store values in the memory-mapped page.
         reinterpret_cast<std::uint32_t *>(const_page_.v)[i] = (0x5Au << 24) + tuning_word[i];

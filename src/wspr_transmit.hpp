@@ -137,18 +137,17 @@ public:
     void setTransmissionCallbacks(StartCallback start_cb = {},
                                   EndCallback end_cb = {});
 
-/**
- * @brief Format a frequency in MHz using the transmitter's display rules.
- *
- * @details
- *   This helper ensures callbacks and internal logs format frequencies the
- *   same way, so debug and release builds display identical values.
- *
- * @param frequency_hz Frequency in Hz.
- * @return Frequency formatted in MHz with six digits after the decimal.
- */
-static std::string formatFrequencyMHz(double frequency_hz);
-
+    /**
+     * @brief Format a frequency in MHz using the transmitter's display rules.
+     *
+     * @details
+     *   This helper ensures callbacks and internal logs format frequencies the
+     *   same way, so debug and release builds display identical values.
+     *
+     * @param frequency_hz Frequency in Hz.
+     * @return Frequency formatted in MHz with six digits after the decimal.
+     */
+    static std::string formatFrequencyMHz(double frequency_hz);
 
     /**
      * @brief Configure and start a WSPR transmission.
@@ -298,8 +297,10 @@ static std::string formatFrequencyMHz(double frequency_hz);
      * @brief Request an in-flight transmission to stop.
      *
      * @details
-     *   Sets the internal stop flag so that ongoing loops in the transmit
-     *   thread can exit promptly.
+     *   Sets the internal stop flag, wakes any interruptible waits, and
+     *   waits for the transmit thread to exit. After this returns, it is
+     *   safe to call configure() or applyPpmCorrection() and then restart
+     *   with startAsync().
      */
     void requestStopTx();
 
@@ -462,6 +463,19 @@ private:
      * @return true if the full duration elapsed, false if interrupted.
      */
     bool waitInterruptableFor(std::chrono::nanoseconds duration);
+
+    /**
+     * @brief Sleep to an absolute clock deadline unless a stop is requested.
+     *
+     * @param clk_id Clock used for the absolute deadline.
+     * @param ts_target Absolute deadline for the sleep.
+     * @param spin_ns Busy-wait tail in nanoseconds.
+     * @return true if the deadline was reached, false if interrupted.
+     */
+    bool sleepUntilAbsTightInterruptible(
+        clockid_t clk_id,
+        const timespec &ts_target,
+        int64_t spin_ns);
 
     /**
      * @brief Throw if a stop has been requested.

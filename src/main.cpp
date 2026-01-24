@@ -442,17 +442,15 @@ void start_cb(const std::string &msg, double frequency)
     if (!msg.empty() && frequency != 0.0)
     {
         std::cout << "[Callback] Started transmission (" << msg << ") "
-                  << std::fixed
-                  << std::setprecision(6)
-                  << (frequency / 1e6) << " MHz."
+                  << wsprTransmitter.formatFrequencyMHz(frequency)
+                  << " MHz."
                   << std::endl;
     }
     else if (frequency != 0.0)
     {
         std::cout << "[Callback] Started transmission: "
-                  << std::fixed
-                  << std::setprecision(6)
-                  << (frequency / 1e6) << " MHz."
+                  << wsprTransmitter.formatFrequencyMHz(frequency)
+                  << " MHz."
                   << std::endl;
     }
     else if (!msg.empty())
