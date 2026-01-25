@@ -1,7 +1,7 @@
 The MIT License (MIT)
 =====================
 
-Copyright (c) 2025 Lee Bussy
+Copyright © 2025 Lee Bussy
 
 Permission is hereby granted, free of charge, to any person
 obtaining a copy of this software and associated documentation

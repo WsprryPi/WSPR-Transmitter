@@ -1,9 +1,9 @@
 /**
- * @file wspr_transmit.cpp
+ * @file wspr_transmit.hpp
  * @brief A class to encapsulate configuration and DMA‑driven transmission of
  *        WSPR signals.
  *
- * Copyright (C) 2025 Lee C. Bussy (@LBussy). All rights reserved.
+ * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,18 +24,15 @@
  * SOFTWARE.
  */
 
-#ifndef _WSPR_TRANSMIT_HPP
-#define _WSPR_TRANSMIT_HPP
+#ifndef WSPR_TRANSMIT_HPP
+#define WSPR_TRANSMIT_HPP
 
-// Project header
-#include "wspr_message.hpp"
-
-// C++ Standard Library
+// C++ standard library headers
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <cstdint> // for std::uint32_t, etc.
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -44,23 +41,27 @@
 #include <variant>
 #include <vector>
 
-// POSIX/System headers
+// POSIX and system headers
 #include <sys/time.h> // for struct timeval
+
+// Project headers
+#include "wspr_message.hpp"
 
 /**
  * @class WsprTransmitter
- * @brief Encapsulates configuration and DMA‑driven transmission of WSPR signals.
+ * @brief Encapsulates configuration and DMA-driven transmission of WSPR
+ *        signals.
  *
  * @details
  *   The WsprTransmitter class provides a full interface for setting up and
  *   executing Weak Signal Propagation Reporter (WSPR) transmissions on a
  *   Raspberry Pi. It handles:
- *     - Configuration of RF frequency, power level, PPM calibration, and message
- *       parameters via setupTransmission().
+ *     - Configuration of RF frequency, power level, PPM calibration, and
+ *       message parameters via configure().
+ *       parameters via configure().
  *     - Low‑level mailbox allocation, peripheral memory mapping, and DMA/PWM
  *       initialization for precise symbol timing.
- *     - Start/stop of transmission loops (tone mode or symbol mode) with
- *       gettimeofday() scheduling.
+ *     - Start/stop of transmission loops (tone mode or symbol mode).
  *     - Dynamic updates of PPM correction and DMA frequency tables.
  *     - Safe teardown of DMA, PWM, and mailbox resources (idempotent).
  *
@@ -72,10 +73,53 @@ class WsprTransmitter
 {
 public:
     /**
+     * @enum State
+     * @brief High-level transmission state for the transmitter.
+     *
+     * @details
+     *   This describes whether the transmitter is available to run, idle, or
+     *   actively emitting RF.
+     *
+     * Invariants:
+     * - requestStopTx() never transitions to DISABLED.
+     * - Stopping TX preserves hardware readiness.
+     */
+    enum class State
+    {
+        /** @brief Not enabled to transmit. */
+        DISABLED,
+
+        /** @brief Enabled to transmit and idle. */
+        ENABLED,
+
+        /** @brief Actively transmitting. */
+        TRANSMITTING,
+
+        /** @brief Reserved for future fault handling. */
+        HUNG
+    };
+
+    /**
+     * @brief Convert a State to a constant string.
+     *
+     * @param state State value to convert.
+     * @return A constant C string describing the state.
+     */
+    static constexpr const char *stateToString(State state) noexcept;
+
+    /**
+     * @brief Convert a State to a lowercase std::string.
+     *
+     * @param state State value to convert.
+     * @return Lowercase string describing the state.
+     */
+    std::string stateToStringLower(State state);
+
+    /**
      * @brief Constructs a WSPR transmitter with default settings.
      *
      * This is for global constructions, parameters are set via
-     * setupTransmission().
+     * configure().
      */
     WsprTransmitter();
 
@@ -87,21 +131,54 @@ public:
      */
     ~WsprTransmitter();
 
-    // non‐copyable, non‐movable
+    /**
+     * @brief Deleted copy constructor.
+     *
+     * @details
+     *   Copying a WsprTransmitter instance is disallowed to prevent multiple
+     *   objects from owning the same hardware, DMA resources, or background
+     *   threads.
+     */
     WsprTransmitter(WsprTransmitter const &) = delete;
+
+    /**
+     * @brief Deleted copy assignment operator.
+     *
+     * @details
+     *   Assignment is disabled to avoid transferring ownership of active
+     *   hardware mappings or thread state between instances.
+     */
     WsprTransmitter &operator=(WsprTransmitter const &) = delete;
+
+    /**
+     * @brief Deleted move constructor.
+     *
+     * @details
+     *   Moving is disallowed to ensure the transmitter remains at a stable
+     *   address for DMA structures, callbacks, and global references.
+     */
     WsprTransmitter(WsprTransmitter &&) = delete;
+
+    /**
+     * @brief Deleted move assignment operator.
+     *
+     * @details
+     *   Move assignment is disabled to prevent partial transfer of ownership
+     *   of hardware resources and internal synchronization primitives.
+     */
     WsprTransmitter &operator=(WsprTransmitter &&) = delete;
 
     /**
      * @brief Signature for user-provided transmission callbacks.
      *
      * This callback receives either a message string or a frequency value,
-     * allowing the user to handle both human-readable messages and numeric data.
+     * allowing the user to handle both human-readable messages and numeric
+     * data.
      *
      * @param arg A variant containing either a std::string or a double value.
      *            The string may carry a descriptive message, while the double
-     *            represents a frequency in Hz (or another unit depending on context).
+     *            represents a frequency in Hz (or another unit depending
+     *            on context).
      */
     using StartCallback = std::function<void(const std::string & /*msg*/, double /*frequency*/)>;
     using EndCallback = std::function<void(const std::string & /*msg*/, double /*elapsed_secs*/)>;
@@ -121,7 +198,23 @@ public:
                                   EndCallback end_cb = {});
 
     /**
-     * @brief Configure and start a WSPR transmission.
+     * @brief Format a frequency in MHz using the transmitter's display rules.
+     *
+     * @details
+     *   This helper ensures callbacks and internal logs format frequencies the
+     *   same way, so debug and release builds display identical values.
+     *
+     * @param frequency_hz Frequency in Hz.
+     * @return Frequency formatted in MHz with six digits after the decimal.
+     */
+    static std::string formatFrequencyMHz(double frequency_hz);
+
+    /**
+     * @brief Configure transmitter parameters.
+     *
+     * @details
+     *   Sets frequency, power level, PPM calibration, and message parameters.
+     *   This does not start the scheduler or begin transmitting.
      *
      * @details Performs the following sequence:
      *   1. Set the desired RF frequency and power level.
@@ -135,22 +228,22 @@ public:
      *
      * @param[in] frequency    Target RF frequency in Hz.
      * @param[in] power        Transmit power index (0‑n).
-     * @param[in] ppm          Parts‑per‑million correction to apply (e.g. +11.135).
+     * @param[in] ppm          Parts-per-million correction to apply (for
+     *                          example +11.135).
      * @param[in] callsign     Optional callsign for WSPR message.
      * @param[in] grid_square  Optional Maidenhead grid locator.
      * @param[in] power_dbm    dBm value for WSPR message (ignored if tone).
      * @param[in] use_offset   True to apply a small random offset within band.
-     *
-     * @throws std::runtime_error if DMA setup or mailbox operations fail.
      */
-    void setupTransmission(
+    void configure(
+
         double frequency,
         int power,
         double ppm,
-        std::string_view call_sign   = {},
+        std::string_view call_sign = {},
         std::string_view grid_square = {},
-        int power_dbm                = 0,
-        bool use_offset              = false);
+        int power_dbm = 0,
+        bool use_offset = false);
 
     /**
      * @brief Rebuild the DMA tuning‐word table with a fresh PPM correction.
@@ -158,22 +251,55 @@ public:
      * @param ppm_new The new parts‑per‑million offset (e.g. +11.135).
      * @throws std::runtime_error if peripherals aren’t mapped.
      */
-    void updateDMAForPPM(double ppm_new);
+    void applyPpmCorrection(double ppm_new);
 
     /**
-     * @brief Configure POSIX scheduling policy & priority for future transmissions.
+     * @brief Configure POSIX scheduling policy and priority for future
+     *        transmissions.
      *
      * @details
-     *   This must be called _before_ `startTransmission()` if you need real-time
-     *   scheduling.  The next call to `startTransmission()` will launch its thread
+     *   This must be called before `startTransmission()` if you need
+     *   real-time scheduling.
      *   under the given policy/priority.
      *
      * @param[in] policy
-     *   One of the standard POSIX policies (e.g. SCHED_FIFO, SCHED_RR, SCHED_OTHER).
+     *   One of the standard POSIX policies (for example SCHED_FIFO,
+     *   SCHED_RR, SCHED_OTHER).
      * @param[in] priority
-     *   Thread priority (1–99) for real-time policies; ignored under SCHED_OTHER.
+     *   Thread priority (1-99) for real-time policies. Ignored under
+     *   SCHED_OTHER.
      */
     void setThreadScheduling(int policy, int priority);
+
+    /**
+     * @brief Enable or disable one-shot scheduling for WSPR mode.
+     *
+     * When enabled, the scheduler will launch exactly one WSPR transmission
+     * and then stop without scheduling further windows.
+     */
+    void setOneShot(bool enable) noexcept;
+
+    /**
+     * @brief Enable or disable immediate transmission for WSPR mode.
+     *
+     * When enabled, WSPR mode bypasses the next-window scheduler and starts
+     * immediately (useful for testing).
+     */
+    void setTransmitNow(bool enable) noexcept;
+
+    /**
+     * @brief Request a "soft off".
+     *
+     * Prevents any new WSPR transmissions from being scheduled while allowing
+     * any currently running transmission to continue or be stopped cleanly by
+     * requestStopTx()/stopAndJoin().
+     */
+    void requestSoftOff() noexcept;
+
+    /**
+     * @brief Clear a previously requested "soft off".
+     */
+    void clearSoftOff() noexcept;
 
     /**
      * @brief Start transmission, either immediately or via the scheduler.
@@ -188,44 +314,56 @@ public:
      *       after spawning the thread; in WSPR mode it returns immediately
      *       after starting the scheduler thread.
      */
-    void enableTransmission();
+    void startAsync();
 
     /**
-     * @brief Cancels the scheduler (and any running transmission).
+     * @brief Stop scheduler and transmission and release hardware.
      *
-     * Waits for the scheduler thread to stop, and forces any in‐flight
-     * transmission to end.
+     * @details
+     *   Cancels the scheduler (if running), requests any in-flight
+     *   transmission to stop, waits for threads to exit, and performs
+     *   hardware shutdown (DMA/PWM/clocks).
      */
-    void disableTransmission();
+    void shutdown();
 
     /**
-     * @brief Request an in‑flight transmission to stop.
+     * @brief Request an in-flight transmission to stop.
      *
-     * @details Sets the internal stop flag so that ongoing loops in the transmit
-     *          thread will exit at the next interruption point. Notifies any
-     *          condition_variable waits to unblock the thread promptly.
+     * @details
+     *   Sets the internal stop flag, wakes any interruptible waits, and
+     *   waits for the transmit thread to exit. After this returns, it is
+     *   safe to call configure() or applyPpmCorrection() and then restart
+     *   with startAsync().
      */
-    void stopTransmission();
+    void requestStopTx();
 
     /**
-     * @brief Gracefully stops and waits for the transmission thread.
+     * @brief Stop and wait for the scheduler/transmit threads.
      *
-     * @details Combines stopTransmission() to signal the worker thread to
-     *          exit, and join_transmission() to block until that thread has
-     *          fully terminated. After this call returns, no transmission
-     *          thread remains running.
+     * @details
+     *   Requests stop and joins threads as needed.
      */
-    void stop();
+    void stopAndJoin();
 
     /**
-     * @brief Check if the GPIO is bound to the clock.
+     * @brief Returns true if the DMA watchdog detected a stalled DMA engine.
+     */
+    bool watchdogFaulted() const noexcept;
+
+    /**
+     * @brief Clears the DMA watchdog fault latch.
+     */
+    void clearWatchdogFault() noexcept;
+
+    /**
+     * @brief Get the current transmission state.
      *
      * @details Returns a value indicating if the system is transmitting
-     * in any way,
+     * in any way.
      *
-     * @return `true` if clock is engaged, `false` otherwise.
+     * @return The current transmitter state.
      */
-    bool isTransmitting() const noexcept;
+    State getState() const noexcept;
 
     /**
      * @brief Prints current transmission parameters and encoded WSPR symbols.
@@ -235,11 +373,105 @@ public:
      * WSPR symbols as integer values, grouped for readability.
      *
      * This function is useful for debugging and verifying that all transmission
-     * settings and symbol sequences are correctly populated before transmission.
+     * settings and symbol sequences are correctly populated before
+     * transmission.
      */
-    void printParameters();
+    void dumpParameters();
 
 private:
+    /**
+     * @brief Start the DMA watchdog thread.
+     *
+     * @details
+     *   Launches the background watchdog that monitors DMA progress and
+     *   detects stalled or non-advancing control blocks during transmission.
+     *   This function is idempotent if the watchdog is already running.
+     */
+    void start_watchdog();
+
+    /**
+     * @brief Stop the DMA watchdog thread.
+     *
+     * @details
+     *   Requests the watchdog thread to stop and waits for it to exit
+     *   cleanly before returning.
+     */
+    void stop_watchdog();
+
+    /**
+     * @brief Background thread used to monitor DMA progress.
+     *
+     * @details
+     *   This thread periodically checks the active DMA control block address
+     *   to detect stalls or lack of forward progress during transmission.
+     */
+    std::thread watchdog_thread_{};
+
+    /**
+     * @brief Stop flag for the watchdog thread.
+     *
+     * @details
+     *   When set to true, the watchdog thread will exit its monitoring loop
+     *   and terminate cleanly.
+     */
+    std::atomic<bool> watchdog_stop_{true};
+
+    /**
+     * @brief Latched watchdog fault indicator.
+     *
+     * @details
+     *   Set when the watchdog detects that the DMA engine has stopped making
+     *   forward progress. This flag remains set until cleared explicitly.
+     */
+    std::atomic<bool> watchdog_faulted_{false};
+
+    /**
+     * @brief Last observed DMA control block address.
+     *
+     * @details
+     *   Used by the watchdog to determine whether the DMA engine is advancing
+     *   through the control block ring.
+     */
+    std::atomic<std::uint32_t> watchdog_last_conblk_{0};
+
+    /**
+     * @brief Timestamp of the last DMA control block change.
+     *
+     * @details
+     *   Stored as a steady-clock tick count representing when the watchdog
+     *   last observed progress in the DMA control block pointer.
+     */
+    std::atomic<std::chrono::steady_clock::time_point::rep>
+        watchdog_last_change_ns_{0};
+
+    /**
+     * @brief CPU core affinity for the transmit thread.
+     *
+     * @details
+     *   Used to bind the transmit thread to a specific CPU core in order to
+     *   reduce scheduling jitter during tight timing loops.
+     */
+    int tx_cpu_{0};
+
+    /**
+     * @brief CPU core affinity for the watchdog thread.
+     *
+     * @details
+     *   Separating the watchdog from the transmit core reduces interference
+     *   with real-time transmission timing.
+     */
+    int watchdog_cpu_{1};
+
+    /**
+     * @brief Busy-wait tail duration in nanoseconds.
+     *
+     * @details
+     *   During tight absolute sleeps, the thread will switch to a spin-wait
+     *   for the final portion of the delay to reduce wake-up latency and
+     *   improve symbol boundary accuracy.
+     */
+    std::int64_t spin_ns_{200'000};
+
     /**
      * @brief Invoked just before each transmission begins.
      *
@@ -269,6 +501,17 @@ private:
     std::thread tx_thread_;
 
     /**
+     * @brief Guards tx_thread_ lifecycle against stop/scheduler races.
+     *
+     * @details The scheduler thread can finish a transmission and quickly
+     * attempt to start the next. The owning thread may call stopAndJoin()
+     * right after the end callback fires. This mutex ensures that joining
+     * and launching tx_thread_ cannot interleave in a way that creates an
+     * extra transmission or a stuck join.
+     */
+    std::mutex tx_thread_mtx_;
+
+    /**
      * @brief POSIX scheduling policy for the transmission thread.
      *
      * One of SCHED_FIFO, SCHED_RR, or SCHED_OTHER.
@@ -292,20 +535,103 @@ private:
     std::atomic<bool> stop_requested_{false};
 
     /**
+     * @brief Flag indicating that new transmissions must not be scheduled.
+     *
+     * When set, the scheduler loop will stop launching new transmissions.
+     * This does not stop any currently running transmit thread.
+     */
+    std::atomic<bool> soft_off_{false};
+
+    /**
+     * @brief Flag indicating that the scheduler should run exactly one
+     *        transmission and then stop.
+     */
+    std::atomic<bool> one_shot_{false};
+
+    /**
+     * @brief Flag indicating that the next transmission should start
+     *        immediately.
+     */
+    std::atomic<bool> transmit_now_{false};
+
+    /**
+     * @brief Optional external stop flag.
+     *
+     * When set to a non-null pointer, shouldStop() will also consider the
+     * external flag value.
+     */
+    const std::atomic<bool> *external_stop_flag_{nullptr};
+
+    /**
+     * @brief Aggregate internal and external stop requests.
+     *
+     * @return true if either stop_requested_ or the external termination
+     *         flag (if provided) is set.
+     */
+    bool shouldStop() const noexcept;
+
+    /**
+     * @brief Wait for the given duration unless a stop is requested.
+     *
+     * @param duration Duration to wait.
+     * @return true if the full duration elapsed, false if interrupted.
+     */
+    bool waitInterruptableFor(std::chrono::nanoseconds duration);
+
+    /**
+     * @brief Sleep to an absolute clock deadline unless a stop is requested.
+     *
+     * @param clk_id Clock used for the absolute deadline.
+     * @param ts_target Absolute deadline for the sleep.
+     * @param spin_ns Busy-wait tail in nanoseconds.
+     * @return true if the deadline was reached, false if interrupted.
+     */
+    bool sleepUntilAbsTightInterruptible(
+        clockid_t clk_id,
+        const timespec &ts_target,
+        int64_t spin_ns);
+
+    /**
+     * @brief Throw if a stop has been requested.
+     *
+     * @param context Short context string for diagnostics.
+     */
+    void throwIfStopRequested(const char *context);
+
+    /**
      * @brief Condition variable used to wake the transmission thread.
      *
-     * stopTransmission() calls notify_all() on this to unblock
+     * requestStopTx() calls notify_all() on this to unblock
      * any waits so the thread can observe stop_requested_.
      */
     std::condition_variable stop_cv_;
 
     /**
-     * @brief Bool used to store transmission state.
+     * @brief Mutex paired with stop_cv_.
+     *
+     * Used to implement interruptible waits that can be woken immediately
+     * when requestStopTx() is called.
+     */
+    mutable std::mutex stop_mtx_;
+
+    /**
+     * @brief Stores the current transmission state.
      *
      * True when transmit_on() is called, false when transmit_off() or
      * disable_clock() is called.
      */
-    std::atomic<bool> transmit_on_{false};
+    std::atomic<State> state_{State::DISABLED};
+
+    /**
+     * @brief Scheduled wall-clock start time for windowed WSPR transmissions.
+     *
+     * @details
+     *   Stored as nanoseconds since the Unix epoch using CLOCK_REALTIME. The
+     *   scheduler sets this just before spawning the TX thread so the TX thread
+     *   can align the first symbol to the exact WSPR window boundary. A value
+     *   of 0 means "start immediately".
+     */
+    std::atomic<std::int64_t> scheduled_start_rt_ns_{0};
 
     /**
      * @brief Mutex accompanying stop_cv_ for coordinated waits.
@@ -322,8 +648,8 @@ private:
     /**
      * @brief Holds the bus and virtual addresses for a physical memory page.
      *
-     * This structure is used to store the mapping between the bus address (used for DMA
-     * and peripheral accesses) and the virtual address (used by the application) of a single
+     * This structure is used to store the mapping between the bus address
+     * by the application) of a single
      * page of physical memory.
      *
      * @var PageInfo::b
@@ -340,8 +666,10 @@ private:
     /**
      * @brief Page information for the constant memory page.
      *
-     * This global variable holds the bus and virtual addresses of the constant memory page,
-     * which is used to store fixed data required for DMA operations, such as the tuning words
+     * This global variable holds the bus and virtual addresses of the
+     * constant memory page,
+     * which is used to store fixed data required for DMA operations, such
+     * as the tuning words
      * for frequency generation.
      */
     struct PageInfo const_page_;
@@ -349,8 +677,10 @@ private:
     /**
      * @brief Page information for the DMA instruction page.
      *
-     * This global variable holds the bus and virtual addresses of the DMA instruction page,
-     * where DMA control blocks (CBs) are stored. This page is used during the setup and
+     * This global variable holds the bus and virtual addresses of the DMA
+     * instruction page,
+     * where DMA control blocks (CBs) are stored. This page is used during
+     * the setup and
      * operation of DMA transfers.
      */
     struct PageInfo instr_page_;
@@ -358,8 +688,10 @@ private:
     /**
      * @brief Array of page information structures for DMA control blocks.
      *
-     * This global array contains the bus and virtual addresses for each page used in the DMA
-     * instruction chain. It holds 1024 entries, corresponding to the 1024 DMA control blocks used
+     * This global array contains the bus and virtual addresses for each
+     * page used in the DMA
+     * instruction chain. It holds 1024 entries, corresponding to the 1024
+     * DMA control blocks used
      * for managing data transfers.
      */
     struct PageInfo instructions_[1024];
@@ -368,13 +700,15 @@ private:
      * @brief Random frequency offset for standard WSPR transmissions.
      *
      * This constant defines the range, in Hertz, for random frequency offsets
-     * applied to standard WSPR transmissions. The offset is applied symmetrically
+     * applied to standard WSPR transmissions. The offset is applied
+     * symmetrically
      * around the target frequency, resulting in a random variation of ±80 Hz.
      *
      * This helps distribute transmissions within the WSPR band, reducing the
      * likelihood of overlapping signals.
      *
-     * @note This offset is applicable for standard WSPR transmissions (2-minute cycles).
+     * @note This offset is applicable for standard WSPR transmissions
+     *       (2-minute cycles).
      *
      * @see WSPR15_RAND_OFFSET
      */
@@ -410,125 +744,202 @@ private:
     double pwm_clock_init_{0};
 
     /**
-     * @brief Base bus address for the General-Purpose Input/Output (GPIO)
-     * registers.
+     * @brief Bus base address for GPIO peripheral registers.
      *
-     * The GPIO peripheral bus base address is used to access GPIO-related
-     * registers for pin configuration and control.
+     * @details
+     *   Base bus address used to access GPIO function select, set, clear,
+     *   and level registers through the peripheral mapping.
      */
     static constexpr uint32_t GPIO_BUS_BASE = 0x7E200000;
 
     /**
-     * @brief Bus address for the General-Purpose Clock 0 Control Register.
+     * @brief Bus address of the GPCLK0 control register.
      *
-     * This register controls the clock settings for General-Purpose Clock 0 (GP0).
+     * @details
+     *   Used to enable, disable, and configure the GPCLK0 clock source
+     *   driving the PWM hardware.
      */
     static constexpr uint32_t CM_GP0CTL_BUS = 0x7E101070;
 
     /**
-     * @brief Bus address for the General-Purpose Clock 0 Divider Register.
+     * @brief Bus address of the GPCLK0 divider register.
      *
-     * This register sets the frequency division for General-Purpose Clock 0.
+     * @details
+     *   Holds the integer and fractional divider controlling the effective
+     *   GPCLK0 output frequency.
      */
     static constexpr uint32_t CM_GP0DIV_BUS = 0x7E101074;
 
     /**
-     * @brief Bus address for the GPIO pads control register (GPIO 0-27).
+     * @brief Bus address of the GPIO pads control register (GPIO 0-27).
      *
-     * This register configures drive strength, pull-up, and pull-down settings
-     * for GPIO pins 0 through 27.
+     * @details
+     *   Controls drive strength, slew rate, and hysteresis for GPIO pins
+     *   used by the transmitter.
      */
     static constexpr uint32_t PADS_GPIO_0_27_BUS = 0x7E10002C;
 
     /**
-     * @brief Base bus address for the clock management registers.
+     * @brief Bus base address for clock manager registers.
      *
-     * The clock management unit controls various clock sources and divisors
-     * for different peripherals on the Raspberry Pi.
+     * @details
+     *   Base address for the clock control and divider registers used to
+     *   configure GPCLK and other peripheral clocks.
      */
     static constexpr uint32_t CLK_BUS_BASE = 0x7E101000;
 
     /**
-     * @brief Base bus address for the Direct Memory Access (DMA) controller.
+     * @brief Bus base address for DMA controller registers.
      *
-     * The DMA controller allows high-speed data transfer between peripherals
-     * and memory without CPU intervention.
+     * @details
+     *   Used to configure and control the DMA engine responsible for
+     *   feeding PWM data during transmission.
      */
     static constexpr uint32_t DMA_BUS_BASE = 0x7E007000;
 
     /**
-     * @brief Base bus address for the Pulse Width Modulation (PWM) controller.
+     * @brief Bus base address for PWM controller registers.
      *
-     * The PWM controller is responsible for generating PWM signals used in
-     * applications like audio output, LED dimming, and motor control.
+     * @details
+     *   Used to configure PWM channels, FIFOs, and ranges for
+     *   DMA-driven RF output.
      */
     static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
 
-    /**
-     * @brief The nominal number of PWM clock cycles per iteration.
-     *
-     * This constant defines the expected number of PWM clock cycles required for
-     * a single iteration of the waveform generation process. It serves as a reference
-     * value to maintain precise timing in signal generation.
-     */
+//
+// This constant controls how many PWM "clocks" worth of work we try
+// to cover per inner-loop iteration in transmit_symbol().
+//
+// On 32-bit builds, the per-iteration overhead of updating DMA control
+// blocks is much higher, and a small nominal value can stretch a
+// 110-second WSPR frame into multiple minutes. Use a larger chunk size
+// on 32-bit to keep runtime bounded.
+//
+// The symbol timing math is still driven by n_pwmclk_per_sym, so this
+// only changes how frequently we patch the DMA ring.
+#if INTPTR_MAX == INT32_MAX
+    static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 50000;
+#else
     static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
+#endif
 
     /**
-     * @brief Drive strength lookup table for GPIO output levels.
+     * @brief Validate the nominal PWM clocks per iteration.
      *
-     * @details Maps drive strength levels 0 through 7 to their corresponding
-     * electrical output current in milliamps (mA). This table is indexed using
-     * a numeric strength level and returns the standard BCM283x drive strength
-     * setting for GPIO pins.
+     * @details
+     *   Ensures at compile time that the configured nominal number of PWM
+     *   clocks per transmit iteration is valid and non-zero.
+     */
+    static_assert(
+        PWM_CLOCKS_PER_ITER_NOMINAL > 0,
+        "PWM_CLOCKS_PER_ITER_NOMINAL must be non-zero.");
+
+    /**
+     * @brief GPIO drive strength lookup table.
      *
-     * The values are:
-     *   - 0 →  2 mA
-     *   - 1 →  4 mA
-     *   - 2 →  6 mA
-     *   - 3 →  8 mA
-     *   - 4 → 10 mA
-     *   - 5 → 12 mA
-     *   - 6 → 14 mA
-     *   - 7 → 16 mA
-     *
-     * @note This table is used internally by get_gpio_power_mw() and is not exposed
-     *       in the public interface unless declared in a header.
+     * @details
+     *   Maps a drive-strength index to the corresponding GPIO drive current
+     *   in milliamps. The index is written into the pads control register
+     *   to select the desired drive capability.
      */
     static inline constexpr std::array<int, 8> DRIVE_STRENGTH_TABLE = {
         2, 4, 6, 8, 10, 12, 14, 16};
 
     /**
-     * @brief Structure containing parameters for a WSPR transmission.
+     * @struct WsprTransmissionParams
+     * @brief Aggregate of parameters used for a single transmission run.
      *
-     * This structure encapsulates all the necessary parameters required to configure
-     * and execute a WSPR transmission, including the message, transmission frequency,
-     * symbol time, tone spacing, and the DMA frequency lookup table.
+     * @details
+     *   Holds all derived and user-supplied parameters required to perform
+     *   either a tone transmission or an encoded WSPR message transmission.
+     *   The contents of this structure are populated by configure() and are
+     *   treated as read-only during an active transmission.
      */
     struct WsprTransmissionParams
     {
+        /**
+         * @brief Number of symbols in a WSPR message.
+         */
         static const std::size_t symbol_count = MSG_SIZE;
-        std::array<uint8_t, symbol_count> symbols;
-
-        std::string call_sign;              ///< Callsign of operator
-        std::string grid_square;            ///< Maidenhead grid square of origination
-        int power_dbm;                      ///< Reported transmission power in dBm
-        double frequency;                   ///< Transmission frequency in Hz.
-        double ppm;                         ///< Current system PPM adjustment
-        bool is_tone;                       ///< Is test tone
-        int power;                          ///< GPIO power level 0-7
-        double symtime;                     ///< Duration of each symbol in seconds.
-        double tone_spacing;                ///< Frequency spacing between adjacent tones in Hz.
-        std::vector<double> dma_table_freq; ///< DMA frequency lookup table.
-        bool use_offset;                    ///< Use random offset on transmissions
 
         /**
-         * @brief Default constructor for WsprTransmissionParams.
+         * @brief Encoded WSPR symbol values.
          *
-         * Initializes the transmission parameters with default values.
+         * @details
+         *   Each entry represents a symbol index used to select the
+         *   corresponding frequency from the DMA tuning table.
+         */
+        std::array<uint8_t, symbol_count> symbols;
+
+        /**
+         * @brief Callsign used for WSPR message encoding.
+         */
+        std::string call_sign;
+
+        /**
+         * @brief Maidenhead grid square used for WSPR message encoding.
+         */
+        std::string grid_square;
+
+        /**
+         * @brief Transmit power in dBm for WSPR message encoding.
+         */
+        int power_dbm;
+
+        /**
+         * @brief Center RF frequency in Hz.
+         */
+        double frequency;
+
+        /**
+         * @brief Parts-per-million correction applied to the clock.
+         */
+        double ppm;
+
+        /**
+         * @brief True when operating in tone (unmodulated) mode.
+         */
+        bool is_tone;
+
+        /**
+         * @brief Output power level index.
+         */
+        int power;
+
+        /**
+         * @brief Symbol duration in seconds.
+         */
+        double symtime;
+
+        /**
+         * @brief Tone spacing in Hz between adjacent WSPR symbols.
+         */
+        double tone_spacing;
+
+        /**
+         * @brief DMA tuning table frequencies in Hz.
+         *
+         * @details
+         *   This table is populated during configuration and used by the
+         *   transmit loop to drive frequency changes with precise timing.
+         */
+        std::vector<double> dma_table_freq;
+
+        /**
+         * @brief Enable randomized in-band frequency offset.
+         */
+        bool use_offset;
+
+        /**
+         * @brief Construct parameters with safe defaults.
          */
         WsprTransmissionParams()
             : symbols{},
+              call_sign{},
+              grid_square{},
+              power_dbm(0),
               frequency(0.0),
+              ppm(0.0),
               is_tone(false),
               power(0),
               symtime(0.0),
@@ -540,42 +951,92 @@ private:
     };
 
     /**
-     * @brief Global instance of transmission parameters for WSPR.
+     * @brief Active transmission parameter set.
      *
-     * This global variable holds the current settings used for a WSPR transmission,
-     * including the WSPR message, transmission frequency, symbol time, tone spacing,
-     * and the DMA frequency lookup table.
+     * @details
+     *   This instance holds the currently configured transmission parameters
+     *   used by the scheduler and transmit thread.
      */
-    struct WsprTransmissionParams trans_params_;
-
+    WsprTransmissionParams trans_params_;
     /**
-     * @brief DMA configuration and saved state for transmission setup/cleanup.
+     * @struct DMAConfig
+     * @brief Holds DMA and clock configuration state.
      *
-     * @details Stores both the nominal and (PPM‑corrected) PLLD clock frequencies,
-     *          mailbox memory flags, the virtual base address for peripheral access,
-     *          and the original register values that must be restored when
-     *          tearing down DMA/PWM configuration.
+     * @details
+     *   This structure stores derived clock frequencies and snapshots of
+     *   hardware register state that must be preserved and restored when
+     *   enabling or disabling DMA-driven transmission.
      */
     struct DMAConfig
     {
-        double plld_nominal_freq;                  ///< PLLD clock frequency in Hz before any PPM correction.
-        double plld_clock_frequency;               ///< PLLD clock frequency in Hz after PPM correction.
-        volatile uint8_t *peripheral_base_virtual; ///< Virtual base pointer for /dev/mem mapping of peripherals.
-        uint32_t orig_gp0ctl;                      ///< Saved GP0CTL register (clock control).
-        uint32_t orig_gp0div;                      ///< Saved GP0DIV register (clock divider).
-        uint32_t orig_pwm_ctl;                     ///< Saved PWM control register.
-        uint32_t orig_pwm_sta;                     ///< Saved PWM status register.
-        uint32_t orig_pwm_rng1;                    ///< Saved PWM range register 1.
-        uint32_t orig_pwm_rng2;                    ///< Saved PWM range register 2.
-        uint32_t orig_pwm_fifocfg;                 ///< Saved PWM FIFO configuration register.
+        /**
+         * @brief Nominal PLLD frequency in Hz.
+         *
+         * @details
+         *   Base PLLD frequency before any runtime correction or divisor
+         *   adjustments are applied.
+         */
+        double plld_nominal_freq;
 
         /**
-         * @brief Construct a new DMAConfig with default (nominal) settings.
+         * @brief Effective PLLD clock frequency in Hz.
          *
-         * @details Initializes:
-         *   - `plld_nominal_freq` to 500 MHz with the built‑in 2.5 ppm correction.
-         *   - `plld_clock_frequency` equal to `plld_nominal_freq`.
-         *   - All pointers and saved‑register fields to zero or nullptr.
+         * @details
+         *   Actual PLLD frequency after applying PPM correction and divider
+         *   configuration.
+         */
+        double plld_clock_frequency;
+
+        /**
+         * @brief Virtual base pointer for mapped peripheral registers.
+         *
+         * @details
+         *   Points to the memory-mapped peripheral region used to access
+         *   GPIO, PWM, DMA, and clock registers.
+         */
+        volatile uint8_t *peripheral_base_virtual;
+
+        /**
+         * @brief Saved GPCLK0 control register value.
+         */
+        uint32_t orig_gp0ctl;
+
+        /**
+         * @brief Saved GPCLK0 divider register value.
+         */
+        uint32_t orig_gp0div;
+
+        /**
+         * @brief Saved PWM control register value.
+         */
+        uint32_t orig_pwm_ctl;
+
+        /**
+         * @brief Saved PWM status register value.
+         */
+        uint32_t orig_pwm_sta;
+
+        /**
+         * @brief Saved PWM range register for channel 1.
+         */
+        uint32_t orig_pwm_rng1;
+
+        /**
+         * @brief Saved PWM range register for channel 2.
+         */
+        uint32_t orig_pwm_rng2;
+
+        /**
+         * @brief Saved PWM FIFO configuration register value.
+         */
+        uint32_t orig_pwm_fifocfg;
+
+        /**
+         * @brief Construct with default nominal values.
+         *
+         * @details
+         *   Initializes the nominal PLLD frequency and clears all saved
+         *   register snapshots.
          */
         DMAConfig()
             : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
@@ -593,537 +1054,563 @@ private:
     };
 
     /**
-     * @brief Global configuration object.
+     * @brief DMA and clock configuration instance.
      *
-     * This DMAConfig instance holds the transmission functionality global objects.
+     * @details
+     *   Holds the active DMA and clock configuration for the current
+     *   transmitter instance.
      */
-    struct DMAConfig dma_config_;
+    DMAConfig dma_config_;
 
+    /**
+     * @struct MailboxStruct
+     * @brief Tracks mailbox-managed memory pool state.
+     *
+     * @details
+     *   This structure records the handle and addressing information for
+     *   memory allocated through the Raspberry Pi mailbox interface. The
+     *   memory pool is used to back DMA control blocks and constant data
+     *   required during transmission.
+     */
     struct MailboxStruct
     {
-        uint32_t mem_ref = 0;                  ///< memAlloc()
-        std::uintptr_t bus_addr = 0;           ///< memLock()
-        volatile uint8_t *virt_addr = nullptr; ///< mapMem()
-        unsigned pool_size = 0;                ///< total DMA pages
-        unsigned pool_cnt = 0;                 ///< pages handed out
+        /**
+         * @brief Mailbox allocation handle.
+         *
+         * @details
+         *   Identifier returned by the mailbox interface when allocating
+         *   contiguous GPU memory.
+         */
+        uint32_t mem_ref = 0;
+
+        /**
+         * @brief Bus address of the allocated memory pool.
+         */
+        std::uintptr_t bus_addr = 0;
+
+        /**
+         * @brief Virtual address of the mapped memory pool.
+         *
+         * @details
+         *   Used by the application to access mailbox-allocated memory.
+         */
+        volatile uint8_t *virt_addr = nullptr;
+
+        /**
+         * @brief Total size of the allocated memory pool in bytes.
+         */
+        unsigned pool_size = 0;
+
+        /**
+         * @brief Number of pages allocated in the pool.
+         */
+        unsigned pool_cnt = 0;
     };
 
     /**
-     * @brief MailboxStruct state for DMA memory management.
+     * @brief Mailbox memory pool instance.
      *
-     * This member holds the memory reference ID (from memAlloc()), the bus
-     * address (from memLock()), the virtual address pointer (from mapMem()),
-     * and the pool parameters for page allocation.
+     * @details
+     *   Holds the active mailbox allocation used by the transmitter.
      */
     MailboxStruct mailbox_struct_;
 
     /**
-     * @brief Control Block (CB) structure for DMA engine commands.
+     * @struct CB
+     * @brief DMA control block structure.
      *
-     * This struct defines the fields the DMA engine reads to perform a
-     * transfer: control bits, source/destination addresses, transfer length,
-     * optional 2D stride, and chaining to the next block. Reserved fields
-     * must be zero.
+     * @details
+     *   Represents a single DMA control block as consumed by the BCM DMA
+     *   engine. Fields correspond directly to the hardware-defined control
+     *   block layout and must not be reordered.
      */
     struct CB
     {
-        volatile unsigned int TI;        ///< Transfer Information field for DMA control.
-        volatile unsigned int SOURCE_AD; ///< Source bus address for the DMA transfer.
-        volatile unsigned int DEST_AD;   ///< Destination bus address for the DMA transfer.
-        volatile unsigned int TXFR_LEN;  ///< Length (in bytes) of the transfer.
-        volatile unsigned int STRIDE;    ///< 2D stride value (unused if single block).
-        volatile unsigned int NEXTCONBK; ///< Bus address of the next CB in the chain.
-        volatile unsigned int RES1;      ///< Reserved, must be zero.
-        volatile unsigned int RES2;      ///< Reserved, must be zero.
+        /** @brief Transfer information flags. */
+        volatile unsigned int TI;
+
+        /** @brief Source bus address. */
+        volatile unsigned int SOURCE_AD;
+
+        /** @brief Destination bus address. */
+        volatile unsigned int DEST_AD;
+
+        /** @brief Transfer length and 2D stride control. */
+        volatile unsigned int TXFR_LEN;
+
+        /** @brief 2D stride configuration. */
+        volatile unsigned int STRIDE;
+
+        /** @brief Bus address of the next control block. */
+        volatile unsigned int NEXTCONBK;
+
+        /** @brief Reserved field, must be zero. */
+        volatile unsigned int RES1;
+
+        /** @brief Reserved field, must be zero. */
+        volatile unsigned int RES2;
     };
 
     /**
-     * @brief Control structure for the clock generator.
+     * @struct GPCTL
+     * @brief GPCLK control register bitfield layout.
      *
-     * This structure is used to configure the clock generator on the Raspberry Pi,
-     * which is essential for transmitting radio signals by manipulating the PLLD clock
-     * and routing the output to a GPIO pin.
-     *
-     * The bit-fields in this structure allow you to set the clock source, enable or disable
-     * the clock, force the clock off (kill), check the busy status, flip the output phase,
-     * set the MASH filter (which affects clock stability), and provide the required password
-     * to modify the control registers.
-     *
-     * Bit-field breakdown:
-     * - **SRC (4 bits):** Clock source selection.
-     * - **ENAB (1 bit):** Enable bit. Set to 1 to enable the clock.
-     * - **KILL (1 bit):** Kill bit. Set to 1 to force the clock off.
-     * - **(1 bit reserved):** Unused.
-     * - **BUSY (1 bit):** Busy status. Indicates if the clock generator is active.
-     * - **FLIP (1 bit):** Flip bit. May be used for phase inversion.
-     * - **MASH (2 bits):** MASH filter setting for noise shaping.
-     * - **(13 bits reserved):** Unused/reserved.
-     * - **PASSWD (8 bits):** Password field required to modify the clock control registers.
+     * @details
+     *   Maps directly onto the GPCLK control register. Bit widths and
+     *   ordering must match the hardware specification exactly.
      */
     struct GPCTL
     {
-        uint32_t SRC : 4;    ///< Clock source selection.
-        uint32_t ENAB : 1;   ///< Enable bit.
-        uint32_t KILL : 1;   ///< Kill bit.
-        uint32_t : 1;        ///< Reserved.
-        uint32_t BUSY : 1;   ///< Busy flag.
-        uint32_t FLIP : 1;   ///< Phase inversion flag.
-        uint32_t MASH : 2;   ///< MASH filter.
-        uint32_t : 13;       ///< Reserved.
-        uint32_t PASSWD : 8; ///< Password field.
+        /** @brief Clock source selection. */
+        uint32_t SRC : 4;
+
+        /** @brief Clock enable. */
+        uint32_t ENAB : 1;
+
+        /** @brief Kill clock output. */
+        uint32_t KILL : 1;
+
+        /** @brief Reserved bit. */
+        uint32_t : 1;
+
+        /** @brief Clock busy status. */
+        uint32_t BUSY : 1;
+
+        /** @brief Output invert control. */
+        uint32_t FLIP : 1;
+
+        /** @brief Clock MASH filter setting. */
+        uint32_t MASH : 2;
+
+        /** @brief Reserved bits. */
+        uint32_t : 13;
+
+        /** @brief Write password field. */
+        uint32_t PASSWD : 8;
     };
-    static_assert(sizeof(GPCTL) == 4, "GPCTL must be exactly 32 bits.");
 
     /**
-     * @brief DMA Engine Status Registers.
+     * @brief Compile-time validation of GPCTL layout size.
      *
-     * This structure represents the status and control registers for the DMA engine.
-     * It is used to monitor and control DMA operations such as data transfers between
-     * memory and peripherals. These registers are critical when setting up and debugging
-     * DMA transfers, such as those involved in transmitting radio signals by manipulating
-     * the PLLD and routing output to GPIO.
+     * @details
+     *   Ensures the GPCTL bitfield maps to a single 32-bit register.
+     */
+    static_assert(
+        sizeof(GPCTL) == 4,
+        "GPCTL must be exactly 32 bits.");
+
+    /**
+     * @struct DMAregs
+     * @brief DMA channel register layout.
      *
-     * @var DMAregs::CS
-     *      Control/Status register: Holds flags for starting, resetting, and error states.
-     * @var DMAregs::CONBLK_AD
-     *      Current control block address: Points to the next DMA control block in the chain.
-     * @var DMAregs::TI
-     *      Transfer Information register: Contains configuration flags and settings for the current transfer.
-     * @var DMAregs::SOURCE_AD
-     *      Source Address register: Specifies the memory address to read data from.
-     * @var DMAregs::DEST_AD
-     *      Destination Address register: Specifies the memory address to write data to.
-     * @var DMAregs::TXFR_LEN
-     *      Transfer Length register: Indicates the number of bytes to transfer.
-     * @var DMAregs::STRIDE
-     *      Stride register: Determines the address increment between consecutive transfers.
-     * @var DMAregs::NEXTCONBK
-     *      Next Control Block register: Contains the address of the next control block, enabling chained transfers.
-     * @var DMAregs::DEBUG
-     *      Debug register: Provides information useful for debugging DMA operations.
+     * @details
+     *   Represents the memory-mapped registers for a single DMA channel.
+     *   Used to control and monitor DMA engine operation.
      */
     struct DMAregs
     {
-        volatile unsigned int CS;        ///< Control/Status register.
-        volatile unsigned int CONBLK_AD; ///< Address of the current control block.
-        volatile unsigned int TI;        ///< Transfer Information register.
-        volatile unsigned int SOURCE_AD; ///< Source address for data transfer.
-        volatile unsigned int DEST_AD;   ///< Destination address for data transfer.
-        volatile unsigned int TXFR_LEN;  ///< Transfer length (in bytes).
-        volatile unsigned int STRIDE;    ///< Stride for address increment.
-        volatile unsigned int NEXTCONBK; ///< Address of the next control block.
-        volatile unsigned int DEBUG;     ///< Debug register for diagnostics.
+        /** @brief Control and status register. */
+        volatile unsigned int CS;
+
+        /** @brief Current control block address register. */
+        volatile unsigned int CONBLK_AD;
+
+        /** @brief Transfer information mirror register. */
+        volatile unsigned int TI;
+
+        /** @brief Source address mirror register. */
+        volatile unsigned int SOURCE_AD;
+
+        /** @brief Destination address mirror register. */
+        volatile unsigned int DEST_AD;
+
+        /** @brief Transfer length mirror register. */
+        volatile unsigned int TXFR_LEN;
+
+        /** @brief 2D stride mirror register. */
+        volatile unsigned int STRIDE;
+
+        /** @brief Next control block address mirror register. */
+        volatile unsigned int NEXTCONBK;
+
+        /** @brief Debug register. */
+        volatile unsigned int DEBUG;
     };
 
     /**
-     * @brief Safely invoke the user’s start‐transmission callback.
+     * @brief Invoke the configured transmission start callback.
      *
-     * @details Checks whether a start callback has been set, and if so,
-     *          calls it with an empty message string to satisfy the
-     *          `StartCallback` signature.
+     * @details
+     *   Calls the user-provided start callback, if one is installed, passing
+     *   a descriptive message and the active transmit frequency.
      *
-     * @param frequency  A double frequency to pass into the callback.
+     * @param msg Message string describing the transmission.
+     * @param frequency Transmit frequency in Hz.
      */
     void fire_start_cb(const std::string &msg, double frequency);
 
     /**
-     * @brief Safely invoke the user’s end‐transmission callback with a message.
+     * @brief Invoke the configured transmission end callback.
      *
-     * @details Checks whether an end callback has been set, and if so,
-     *          calls it with the provided message and transission duration
-     *.         value. Useful for reporting completion status or diagnostics.
+     * @details
+     *   Calls the user-provided end callback, if one is installed, passing
+     *   a descriptive message and the elapsed transmit time.
      *
-     * @param msg      A string message to pass into the callback.
-     * @param elapsed  A double indicating transmission length to pass into
-     *                 the callback.
+     * @param msg Message string describing the transmission.
+     * @param elapsed Elapsed transmission time in seconds.
      */
     void fire_end_cb(const std::string &msg, double elapsed);
 
     /**
-     * @brief Perform DMA-driven RF transmission.
+     * @brief Execute the transmission loop.
      *
      * @details
-     *   1. Records the start time as a reference for symbol scheduling.
-     *   2. Enables the PWM clock and DMA engine for transmission.
-     *   3. If in tone mode, continuously transmits a fixed‑frequency test tone.
-     *   4. Otherwise, transmits each WSPR symbol in sequence, using gettimeofday()
-     *      and `timeval_subtract()` to schedule precise symbol timing.
-     *   5. Disables transmission when complete.
-     *
-     * @note In tone mode (`trans_params_.is_tone == true`), this function only
-     *       returns via SIGINT.
+     *   Drives DMA and PWM hardware to emit either a continuous tone or a
+     *   full WSPR symbol sequence. This function runs on the transmit
+     *   worker thread.
      */
     void transmit();
 
     /**
-     * @brief Waits for the background transmission thread to finish.
+     * @brief Join the active transmission thread.
      *
-     * @details If the transmission thread was launched via
-     *          startTransmission(), this call will block until
-     *          that thread has completed and joined. After returning,
-     *          tx_thread_ is no longer joinable.
+     * @details
+     *   Waits for the transmit thread to exit if it is currently running.
+     *   Safe to call multiple times.
      */
     void join_transmission();
 
     /**
-     * @brief Clean up DMA and mailbox resources.
+     * @brief Clean up DMA-related resources.
      *
-     * @details Performs teardown in the following order:
-     *   1. Prevent multiple invocations.
-     *   2. Stop any ongoing DMA transfers and disable the PWM clock.
-     *   3. Restore saved clock and PWM register values.
-     *   4. Reset the DMA controller.
-     *   5. Unmap the peripheral base address region.
-     *   6. Deallocate mailbox memory pages.
-     *   7. Close the mailbox.
-     *   8. Remove the local device file.
-     *   9. Reset all configuration data to defaults.
-     *
-     * @note This function is idempotent; subsequent calls are no‑ops.
+     * @details
+     *   Tears down DMA state, restores hardware registers, and releases
+     *   mailbox-allocated memory used during transmission.
      */
     void dma_cleanup();
 
     /**
-     * @brief Get the GPIO drive strength in milliamps.
+     * @brief Convert a GPIO power level index to milliwatts.
      *
-     * Maps a drive strength level (0–7) to its corresponding current drive
-     * capability in milliamps (mA).
+     * @details
+     *   Maps a logical power level index to an approximate output power in
+     *   milliwatts based on the configured GPIO drive characteristics.
      *
-     * @param level Drive strength level (0–7).
-     * @return int   Drive strength in mA.
-     * @throws std::out_of_range if level is outside the [0,7] range.
+     * @param level Power level index.
+     * @return Output power in milliwatts.
      */
     constexpr int get_gpio_power_mw(int level);
 
     /**
-     * @brief Convert power in milliwatts to decibels referenced to 1 mW (dBm).
+     * @brief Convert milliwatts to dBm.
      *
-     * @param mw  Power in milliwatts. Must be greater than 0.
-     * @return    Power in dBm.
-     * @throws    std::domain_error if mw is not positive.
+     * @param mw Power in milliwatts.
+     * @return Equivalent power in dBm.
      */
     inline double convert_mw_dbm(double mw);
 
     /**
-     * @brief Calculates the virtual address for a given bus address.
+     * @brief Access a memory-mapped peripheral register by bus address.
      *
-     * This function calculates the appropriate virtual address for accessing the
-     * given bus address in the peripheral space. It does so by subtracting 0x7e000000
-     * from the supplied bus address to obtain the offset into the peripheral address space,
-     * then adds that offset to the virtual base address of the peripherals.
+     * @details
+     *   Translates a bus address into a reference within the mapped peripheral
+     *   region for direct register access.
      *
-     * @param bus_addr The bus address from which to calculate the corresponding virtual address.
-     * @return A reference to a volatile int located at the computed virtual address.
+     * @param bus_addr Bus address of the register.
+     * @return Reference to the mapped register value.
      */
     inline volatile int &access_bus_address(std::uintptr_t bus_addr);
 
     /**
-     * @brief Sets a specified bit at a bus address in the peripheral address space.
+     * @brief Set a bit in a peripheral register.
      *
-     * This function accesses the virtual address corresponding to the given bus address using
-     * the `access_bus_address()` function and sets the bit at the provided position.
-     *
-     * @param base The bus address in the peripheral address space.
-     * @param bit The bit number to set (0-indexed).
+     * @param base Bus base address of the register.
+     * @param bit Bit index to set.
      */
     inline void set_bit_bus_address(std::uintptr_t base, unsigned int bit);
 
     /**
-     * @brief Clears a specified bit at a bus address in the peripheral address space.
+     * @brief Clear a bit in a peripheral register.
      *
-     * This function accesses the virtual address corresponding to the given bus address using
-     * the `access_bus_address()` function and clears the bit at the provided position.
-     *
-     * @param base The bus address in the peripheral address space.
-     * @param bit The bit number to clear (0-indexed).
+     * @param base Bus base address of the register.
+     * @param bit Bit index to clear.
      */
     inline void clear_bit_bus_address(std::uintptr_t base, unsigned int bit);
 
     /**
-     * @brief Computes the difference between two time values.
-     * @details Calculates `t2 - t1` and stores the result in `result`. If `t2 < t1`,
-     *          the function returns `1`, otherwise, it returns `0`.
-     *
-     * @param[out] result Pointer to `timeval` struct to store the difference.
-     * @param[in] t2 Pointer to the later `timeval` structure.
-     * @param[in] t1 Pointer to the earlier `timeval` structure.
-     * @return Returns `1` if the difference is negative (t2 < t1), otherwise `0`.
-     */
-    int symbol_timeval_subtract(struct timeval *result, const struct timeval *t2, const struct timeval *t1);
-
-    /**
-     * @brief Initialize DMAConfig PLLD frequencies
+     * @brief Read PLLD configuration and derive clock parameters.
      *
      * @details
-     *   1. Reads the Raspberry Pi hardware revision from `/proc/cpuinfo` (cached
-     *      after first read).
-     *   2. Determines the processor ID (BCM2835, BCM2836/37, or BCM2711).
-     *   3. Sets `dma_config_.plld_nominal_freq` to the board’s true PLLD base
-     *      frequency (500 MHz for Pi 1/2/3, 750 MHz for Pi 4).
-     *   4. Initializes `dma_config_.plld_clock_frequency` equal to
-     *      `plld_nominal_freq` (zero PPM correction).
-     *
-     * @throws std::runtime_error if the processor ID is unrecognized.
+     *   Queries the hardware PLLD configuration and populates internal
+     *   frequency values used for PWM and DMA timing calculations.
      */
     void get_plld();
 
     /**
-     * @brief Allocate a pool of DMA‑capable memory pages.
+     * @brief Allocate a mailbox-managed memory pool.
      *
-     * @details Uses the Broadcom mailbox interface to:
-     *   1. Allocate a contiguous block of physical pages.
-     *   2. Lock the block and retrieve its bus address.
-     *   3. Map the block into user space for CPU access.
-     *   4. Track the pool size and reset the per‑page allocation counter.
+     * @details
+     *   Requests contiguous physical memory via the mailbox interface for
+     *   use by DMA control blocks and constant data pages.
      *
-     * When called with `numpages = 1025`, one page is reserved for constant data
-     * and 1024 pages are used for building the DMA instruction chain.
-     *
-     * @param numpages Total number of pages to allocate (1 constant + N instruction pages).
-     * @throws std::runtime_error if mailbox allocation, locking, or mapping fails.
+     * @param numpages Number of memory pages to allocate.
      */
     void allocate_memory_pool(unsigned numpages);
 
     /**
-     * @brief Retrieves the next available memory page from the allocated pool.
-     * @details Provides a virtual and bus address for a memory page in the pool.
-     *          If no more pages are available, the function prints an error and exits.
+     * @brief Acquire a physical memory page from the pool.
      *
-     * @param[out] vAddr Pointer to store the virtual address of the allocated page.
-     * @param[out] bAddr Pointer to store the bus address of the allocated page.
+     * @details
+     *   Retrieves one page of memory from the mailbox pool and returns both
+     *   its virtual and bus addresses.
+     *
+     * @param vAddr Output pointer to receive the virtual address.
+     * @param bAddr Output pointer to receive the bus address.
      */
     void get_real_mem_page_from_pool(void **vAddr, void **bAddr);
 
     /**
-     * @brief Deallocates the memory pool.
-     * @details Releases the allocated memory by unmapping virtual memory,
-     *          unlocking, and freeing the memory via the mailbox interface.
+     * @brief Release the mailbox-managed memory pool.
+     *
+     * @details
+     *   Frees all memory previously allocated via the mailbox interface and
+     *   clears associated tracking state.
      */
     void deallocate_memory_pool();
 
     /**
-     * @brief Disables the PWM clock.
-     * @details Clears the enable bit in the clock control register and waits
-     *          until the clock is no longer busy. Ensures proper synchronization.
+     * @brief Disable transmitter hardware in a controlled sequence.
+     *
+     * @details
+     *   Shuts down DMA, PWM, and clock outputs while restoring any modified
+     *   register state. The sequence ensures hardware is left in a safe
+     *   state.
+     *
+     * @param verbose True to emit additional diagnostic output.
+     */
+    void disable_hardware_sequence(bool verbose);
+
+    /**
+     * @brief Disable the output clock driving the PWM hardware.
+     *
+     * @details
+     *   Stops the GPCLK source used for RF generation.
      */
     void disable_clock();
 
     /**
-     * @brief Enables TX by configuring GPIO4 and setting the clock source.
-     * @details Configures GPIO4 to use alternate function 0 (GPCLK0), sets the drive
-     *          strength, disables any active clock, and then enables the clock with PLLD.
+     * @brief Enable RF output for transmission.
+     *
+     * @details
+     *   Activates clocks and GPIO routing required to begin emitting RF.
      */
     void transmit_on();
 
     /**
-     * @brief Disables the transmitter.
-     * @details Turns off the transmission by disabling the clock source.
+     * @brief Disable RF output after transmission.
+     *
+     * @details
+     *   Turns off clocks and GPIO routing to stop RF emission cleanly.
      */
     void transmit_off();
 
     /**
-     * @brief Transmits a symbol for a specified duration using DMA.
-     * @details Configures the DMA to transmit a symbol (tone) for the specified
-     *          time interval (`tsym`). Uses PWM clocks and adjusts frequency
-     *          dynamically based on the desired tone spacing.
+     * @brief Transmit work corresponding to a single WSPR symbol.
      *
-     * @param[in] sym_num The symbol number to transmit.
-     * @param[in] tsym The duration (seconds) for which the symbol is transmitted.
-     * @param[in,out] bufPtr The buffer pointer index for DMA instruction handling.
+     * @details
+     *   Advances the DMA control block ring to emit the waveform segment
+     *   associated with one symbol interval. Frequency changes are applied
+     *   by updating DMA control blocks in-place while maintaining precise
+     *   symbol timing.
+     *
+     * @param sym_num Sequential symbol number within the transmission.
+     * @param tsym Symbol duration in seconds.
+     * @param bufPtr Current DMA buffer pointer, updated as blocks advance.
+     * @param symbol_index Optional symbol index override.
      */
     void transmit_symbol(
-        const int &sym_num,
+        const std::uint32_t &sym_num,
         const double &tsym,
-        int &bufPtr);
+        std::uint32_t &bufPtr,
+        int symbol_index = -1);
 
     /**
-     * @brief Disables and resets the DMA engine.
-     * @details Ensures that the DMA controller is properly reset before exiting.
-     *          If the peripheral memory mapping is not set up, the function returns early.
-     */
-    void clear_dma_setup();
-
-    /**
-     * @brief Truncates a floating-point number at a specified bit position.
-     * @details Sets all bits less significant than the given LSB to zero.
+     * @brief Truncate a floating-point value to a given number of LSBs.
      *
-     * @param d The input floating-point number to be truncated.
-     * @param lsb The least significant bit position to retain.
-     * @return The truncated value with lower bits set to zero.
+     * @details
+     *   Used to limit fractional precision when computing tuning words or
+     *   divisors to match hardware resolution.
+     *
+     * @param d Input value.
+     * @param lsb Number of least-significant bits to retain.
+     * @return Truncated value.
      */
     double bit_trunc(const double &d, const int &lsb);
 
     /**
-     * @brief Configures and initializes DMA for PWM signal generation.
-     * @details Allocates memory pages, creates DMA control blocks, sets up a
-     *          circular inked list of DMA instructions, and configures the
-     *          PWM clock and registers.
+     * @brief Create DMA pages and instruction ring.
      *
-     * @param[out] const_page_ PageInfo structure for storing constant data.
-     * @param[out] instr_page_ PageInfo structure for the initial DMA instruction
-     *                       page.
-     * @param[out] instructions_ Array of PageInfo structures for DMA instructions.
+     * @details
+     *   Initializes the constant data page, instruction page, and DMA
+     *   control block ring used for DMA-driven PWM output.
+     *
+     * @param const_page Reference to the constant data page mapping.
+     * @param instr_page Reference to the instruction page mapping.
+     * @param instructions Array of instruction page mappings.
      */
     void create_dma_pages(
-        struct PageInfo &const_page_,
-        struct PageInfo &instr_page_,
-        struct PageInfo instructions_[]);
+        PageInfo &const_page,
+        PageInfo &instr_page,
+        PageInfo instructions[]);
 
     /**
-     * @brief Configure and initialize the DMA system for WSPR transmission.
+     * @brief Initialize DMA and related hardware.
      *
-     * @details Performs the following steps in order:
-     *   1. Retrieve and configure the PLLD clock frequency.
-     *   2. Map the peripheral base address into user space.
-     *   3. Save the original clock and PWM register values for later restoration.
-     *   4. Open the Broadcom mailbox interface for DMA memory allocation.
-     *   5. Allocate and set up DMA control blocks for constants and instruction pages.
-     *
-     * @throws std::runtime_error if the PLLD clock cannot be determined.
-     * @throws std::runtime_error if peripheral memory mapping fails.
-     * @throws std::runtime_error if mailbox opening fails.
+     * @details
+     *   Configures DMA channels, control blocks, PWM, and clock routing
+     *   required for DMA-driven RF generation.
      */
     void setup_dma();
 
     /**
-     * @brief Configures the DMA frequency table for signal generation.
-     * @details Generates a tuning word table based on the desired center frequency
-     *          and tone spacing, adjusting for hardware limitations if necessary.
+     * @brief Build the DMA frequency table.
      *
-     * @param[in] center_freq_desired The desired center frequency in Hz.
-     * @param[in] tone_spacing The spacing between frequency tones in Hz.
-     * @param[in] plld_actual_freq The actual PLLD clock frequency in Hz.
-     * @param[out] center_freq_actual The actual center frequency, which may be adjusted.
-     * @param[in,out] const_page_ The PageInfo structure for storing tuning words.
+     * @details
+     *   Populates the tuning-word frequency table based on the configured
+     *   center frequency and PPM correction. The realized center frequency
+     *   after hardware quantization is returned to the caller.
+     *
+     * @param center_freq_actual Output value for the realized center
+     *        frequency in Hz.
      */
     void setup_dma_freq_table(double &center_freq_actual);
 
     /**
-     * @brief Entry point for the background transmission thread.
+     * @brief Entry point for the transmit worker thread.
      *
-     * @details Applies the configured POSIX scheduling policy and priority
-     *          (via set_thread_priority()), then invokes transmit() to carry
-     *          out the actual transmission work. This method runs inside the
-     *          new thread and returns only when transmit() completes or a
-     *          stop request is observed.
+     * @details
+     *   Applies thread scheduling, fires start callbacks, executes the
+     *   transmission loop, and performs post-transmit cleanup.
      */
     void thread_entry();
 
     /**
-     * @brief Applies the configured scheduling policy and priority to this thread.
+     * @brief Apply configured scheduling policy and priority to the thread.
      *
-     * @details Builds a sched_param struct using thread_priority_ and invokes
-     *          pthread_setschedparam() with thread_policy_ on the current thread.
-     *          If the call fails, writes a warning to stderr with the error message.
+     * @details
+     *   Uses the previously configured POSIX scheduling parameters to
+     *   adjust the priority of the calling thread.
      */
     void set_thread_priority();
 
+    /**
+     * @class TransmissionScheduler
+     * @brief Schedules WSPR message transmissions on time-aligned windows.
+     *
+     * @details
+     *   Runs in a background thread and waits for the next valid WSPR
+     *   transmission window. When triggered, it launches the transmit
+     *   worker thread on the parent WsprTransmitter instance.
+     *
+     *   The scheduler supports one-shot operation, immediate transmission,
+     *   and soft-off behavior.
+     */
     class TransmissionScheduler
     {
     public:
-        TransmissionScheduler(WsprTransmitter *parent)
-            : parent_{parent}
-        {
-        }
+        /**
+         * @brief Construct a scheduler bound to a transmitter instance.
+         *
+         * @param parent Pointer to the owning WsprTransmitter.
+         */
+        explicit TransmissionScheduler(WsprTransmitter *parent);
 
-        ~TransmissionScheduler()
-        {
-            stop();
-        }
+        /**
+         * @brief Destroy the scheduler.
+         *
+         * @details
+         *   Requests the scheduler thread to stop and waits for it to exit.
+         */
+        ~TransmissionScheduler();
 
-        /// Start the scheduler thread
-        void start()
-        {
-            // don’t spawn a second scheduler if one is already running
-            if (thread_.joinable())
-                return;
+        /**
+         * @brief Start the scheduler thread.
+         */
+        void start();
 
-            stop_requested_.store(false, std::memory_order_release);
-            thread_ = std::thread(&TransmissionScheduler::run, this);
-        }
+        /**
+         * @brief Stop the scheduler thread.
+         *
+         * @details
+         *   Requests termination and wakes the scheduler if it is sleeping.
+         */
+        void stop();
 
-        /// Signal the scheduler to exit, join the thread
-        void stop()
-        {
-            stop_requested_.store(true, std::memory_order_release);
-            cv_.notify_all();
-
-            // Only join if it's a different thread than the one calling stop()
-            if (thread_.joinable() &&
-                thread_.get_id() != std::this_thread::get_id())
-            {
-                thread_.join();
-            }
-        }
+        /**
+         * @brief Wake the scheduler from a wait.
+         *
+         * @details
+         *   Used to interrupt the scheduler when configuration or control
+         *   state changes.
+         */
+        void notify() noexcept;
 
     private:
+        /**
+         * @brief Parent transmitter instance.
+         */
         WsprTransmitter *parent_;
+
+        /**
+         * @brief Scheduler worker thread.
+         */
         std::thread thread_;
+
+        /**
+         * @brief Stop flag for the scheduler thread.
+         */
         std::atomic<bool> stop_requested_{false};
+
+        /**
+         * @brief Mutex protecting scheduler wait state.
+         */
         std::mutex mtx_;
+
+        /**
+         * @brief Condition variable used for scheduler waits.
+         */
         std::condition_variable cv_;
 
-        /// Compute “1 s past next even‐minute or quarter‐hour”
-        std::chrono::system_clock::time_point nextEvent() const
-        {
-            using namespace std::chrono;
+        /**
+         * @brief Compute the next WSPR transmission window.
+         *
+         * @return Time point of the next scheduler event.
+         */
+        std::chrono::system_clock::time_point nextEvent() const;
 
-            // “now” and its epoch‐seconds
-            auto now = system_clock::now();
-            auto secs = duration_cast<seconds>(now.time_since_epoch()).count();
-
-            // Choose cycle length: 2 min = 120 s
-            const int cycle = 2 * 60;
-
-            // Integer‐divide to find current cycle index
-            auto idx = secs / cycle;
-
-            // If we’re already within the first second of this window, fire now+1s,
-            // otherwise bump to the next cycle:
-            auto base = idx * cycle;
-            seconds target_secs;
-            if (secs < base + 1)
-            {
-                // still before “:XX:01” of this cycle
-                target_secs = seconds{base + 1};
-            }
-            else
-            {
-                // past “:XX:01”, schedule at next cycle’s +1s
-                target_secs = seconds{(idx + 1) * cycle + 1};
-            }
-
-            return system_clock::time_point{target_secs};
-        }
-
-        /// The scheduler loop
-        void run()
-        {
-            while (!stop_requested_.load(std::memory_order_acquire))
-            {
-                auto when = nextEvent();
-                std::unique_lock<std::mutex> lk(mtx_);
-                cv_.wait_until(lk, when, [this]
-                               { return stop_requested_.load(std::memory_order_acquire); });
-                if (stop_requested_.load(std::memory_order_acquire))
-                    break;
-
-                parent_->stop_requested_.store(false, std::memory_order_release);
-
-                // If there is an existing transmit thread, wait for it to finish:
-                if (parent_->tx_thread_.joinable())
-                {
-                    parent_->tx_thread_.join();
-                }
-                // Now it's safe to start a new transmit
-                parent_->tx_thread_ = std::thread(&WsprTransmitter::thread_entry, parent_);
-            }
-        }
+        /**
+         * @brief Scheduler main loop.
+         */
+        void run();
     };
 
+    /**
+     * @brief Scheduler instance for this transmitter.
+     *
+     * @details
+     *   Manages window-based transmission timing for message mode.
+     */
     TransmissionScheduler scheduler_{this};
 };
 
+/**
+ * @brief Global WSPR transmitter instance.
+ *
+ * @details
+ *   Declares the project-wide WsprTransmitter object used to configure
+ *   and control RF transmission. The instance is defined in a corresponding
+ *   translation unit and is intended to be shared across modules.
+ */
 extern WsprTransmitter wsprTransmitter;
 
-#endif // _WSPR_TRANSMIT_HPP
+#endif // WSPR_TRANSMIT_HPP
