@@ -4,7 +4,7 @@
 #include <array>
 #include <string_view>
 
-constexpr std::array<char, 19> make_debug_tag_chars(std::string_view name)
+constexpr std::array<char, 19> make_log_tag_chars(std::string_view name)
 {
     std::array<char, 19> out{};
 

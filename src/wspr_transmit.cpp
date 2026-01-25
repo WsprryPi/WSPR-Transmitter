@@ -64,10 +64,10 @@ constexpr const bool debug = false;
 
 #ifdef SELFTEST
 #include "utils"
-static constexpr auto debug_tag_chars = make_debug_tag_chars("Utils");
-static constexpr std::string_view debug_tag = as_string_view(debug_tag_chars);
+static constexpr auto log_tag_chars = make_log_tag_chars("Utils");
+static constexpr std::string_view log_tag = as_string_view(log_tag_chars);
 #else
-static constexpr std::string_view debug_tag{"[WSPR-Transmitter] "};
+static constexpr std::string_view log_tag{"[WSPR-Transmitter] "};
 #endif
 
 // Helper classes and functions in anonymous namespace
@@ -484,18 +484,31 @@ WsprTransmitter::WsprTransmitter()
     {
         spin_ns_ = 0; // or 50'000 if you want a tiny spin
     }
+    // Start the recovery worker thread so watchdog faults can be handled
+    // without blocking the watchdog thread.
+    recovery_stop_.store(false, std::memory_order_release);
+    recovery_pending_.store(false, std::memory_order_release);
+    recovery_thread_ = std::thread(&WsprTransmitter::recovery_worker, this);
 }
 
 WsprTransmitter::~WsprTransmitter()
 {
+    // Stop and join the recovery worker first so it cannot race shutdown.
+    recovery_stop_.store(true, std::memory_order_release);
+    recovery_cv_.notify_all();
+    if (recovery_thread_.joinable() &&
+        recovery_thread_.get_id() != std::this_thread::get_id())
+    {
+        recovery_thread_.join();
+    }
+
     shutdown();
     dma_cleanup();
 }
 
-void WsprTransmitter::setTransmissionCallbacks(StartCallback start_cb, EndCallback end_cb)
+void WsprTransmitter::setTransmissionCallbacks(TransmissionCallback cb)
 {
-    on_transmit_start_ = std::move(start_cb);
-    on_transmit_end_ = std::move(end_cb);
+    on_transmit_cb_ = std::move(cb);
 }
 
 std::string WsprTransmitter::formatFrequencyMHz(double frequency_hz)
@@ -638,6 +651,19 @@ void WsprTransmitter::startAsync()
         return;
     }
 
+    // The application may poll getState() immediately after startAsync().
+    // Transition to ENABLED here so callers do not misinterpret the initial
+    // DISABLED state as an early abort before the TX thread has a chance to
+    // run and advance the state machine.
+    {
+        const State prior = state_.load(std::memory_order_acquire);
+        if (prior == State::DISABLED || prior == State::COMPLETE)
+        {
+            state_.store(State::ENABLED, std::memory_order_release);
+        }
+    }
+
+
     const bool immediate = trans_params_.is_tone ||
                            transmit_now_.load(std::memory_order_acquire);
 
@@ -713,6 +739,17 @@ void WsprTransmitter::shutdown()
     }
 
     stop_watchdog();
+
+    // Return to DISABLED when the transmitter is shut down, unless a
+    // watchdog recovery is in progress or the transmitter is latched HUNG.
+    if (!recovery_in_progress_.load(std::memory_order_acquire))
+    {
+        const State prior = state_.load(std::memory_order_acquire);
+        if (prior != State::HUNG && prior != State::RECOVERING)
+        {
+            state_.store(State::DISABLED, std::memory_order_release);
+        }
+    }
 }
 
 void WsprTransmitter::requestStopTx()
@@ -740,6 +777,223 @@ bool WsprTransmitter::watchdogFaulted() const noexcept
 void WsprTransmitter::clearWatchdogFault() noexcept
 {
     watchdog_faulted_.store(false, std::memory_order_release);
+}
+
+void WsprTransmitter::setWatchdogAutoRecover(bool enable) noexcept
+{
+    watchdog_auto_recover_.store(enable, std::memory_order_release);
+}
+
+bool WsprTransmitter::watchdogAutoRecoverEnabled() const noexcept
+{
+    return watchdog_auto_recover_.load(std::memory_order_acquire);
+}
+
+bool WsprTransmitter::recoverFromWatchdogFault()
+{
+    std::lock_guard<std::mutex> lk(recovery_mtx_);
+    return recover_from_watchdog_fault_locked();
+}
+
+void WsprTransmitter::request_watchdog_recovery() noexcept
+{
+    // If the worker is stopping, do not queue new work.
+    if (recovery_stop_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    recovery_pending_.store(true, std::memory_order_release);
+    recovery_cv_.notify_all();
+}
+
+void WsprTransmitter::recovery_worker()
+{
+    for (;;)
+    {
+        std::unique_lock<std::mutex> lk(recovery_wait_mtx_);
+
+        const auto wake_pred =
+            [&]()
+            {
+                if (recovery_stop_.load(std::memory_order_acquire))
+                {
+                    return true;
+                }
+
+                if (recovery_pending_.load(std::memory_order_acquire))
+                {
+                    return true;
+                }
+
+                // If the transmitter is HUNG, a fault is latched, and auto
+                // recovery is enabled, allow the worker to wake itself once
+                // the rate limiter permits another attempt.
+                if (watchdog_auto_recover_.load(std::memory_order_acquire) &&
+                    watchdog_faulted_.load(std::memory_order_acquire) &&
+                    (state_.load(std::memory_order_acquire) == State::HUNG))
+                {
+                    std::lock_guard<std::mutex> rlk(recovery_rate_mtx_);
+                    const auto now_tp = std::chrono::steady_clock::now();
+                    return (recovery_defer_until_ == std::chrono::steady_clock::time_point{}) ||
+                           (now_tp >= recovery_defer_until_);
+                }
+
+                return false;
+            };
+
+        // If a deferred recovery is pending, wait until the next allowed time.
+        if (!recovery_stop_.load(std::memory_order_acquire) &&
+            !recovery_pending_.load(std::memory_order_acquire))
+        {
+            std::chrono::steady_clock::time_point defer_tp{};
+            {
+                std::lock_guard<std::mutex> rlk(recovery_rate_mtx_);
+                defer_tp = recovery_defer_until_;
+            }
+
+            if (defer_tp != std::chrono::steady_clock::time_point{})
+            {
+                recovery_cv_.wait_until(lk, defer_tp, wake_pred);
+            }
+            else
+            {
+                recovery_cv_.wait(lk, wake_pred);
+            }
+        }
+        else
+        {
+            recovery_cv_.wait(lk, wake_pred);
+        }
+
+        if (recovery_stop_.load(std::memory_order_acquire))
+        {
+            break;
+        }
+
+        // Either the watchdog asked for recovery, or the defer timer expired.
+        recovery_pending_.store(false, std::memory_order_release);
+        lk.unlock();
+
+        // Serialize recovery with any synchronous calls from the application.
+        std::lock_guard<std::mutex> rlk(recovery_mtx_);
+        (void)recover_from_watchdog_fault_locked();
+    }
+}
+
+bool WsprTransmitter::recover_from_watchdog_fault_locked()
+{
+    if (!watchdog_faulted_.load(std::memory_order_acquire))
+    {
+        return false;
+    }
+
+// Enforce a simple recovery rate limit so persistent faults do not cause
+// repeated teardown/re-init cycles.
+const auto now_tp = std::chrono::steady_clock::now();
+{
+    std::lock_guard<std::mutex> rlk(recovery_rate_mtx_);
+
+    while (!recovery_attempts_.empty() &&
+           (now_tp - recovery_attempts_.front()) > kRecoveryWindow)
+    {
+        recovery_attempts_.pop_front();
+    }
+
+    std::chrono::steady_clock::time_point defer_tp{};
+
+    if (!recovery_attempts_.empty() &&
+        (now_tp - recovery_attempts_.back()) < kMinRecoveryInterval)
+    {
+        defer_tp = recovery_attempts_.back() + kMinRecoveryInterval;
+    }
+    else if (recovery_attempts_.size() >= kMaxRecoveriesInWindow)
+    {
+        defer_tp = recovery_attempts_.front() + kRecoveryWindow;
+    }
+
+    if (defer_tp != std::chrono::steady_clock::time_point{})
+    {
+        recovery_defer_until_ = defer_tp;
+        const auto defer_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                defer_tp - now_tp).count();
+
+        std::cerr
+            << "[WSPR-Transmitter] Watchdog recovery deferred (rate limited), "
+            << "retry in " << defer_ms << " ms."
+            << std::endl;
+
+        state_.store(State::HUNG, std::memory_order_release);
+        return false;
+    }
+
+    // Clear any prior deferral so the worker does not sleep unnecessarily.
+    recovery_defer_until_ = std::chrono::steady_clock::time_point{};
+
+    recovery_attempts_.push_back(now_tp);
+}
+
+// Record the state we should restore after recovery. If we were
+// transmitting, recovery will always stop transmission.
+const State prior_state = state_.load(std::memory_order_acquire);
+if (prior_state == State::DISABLED)
+{
+    post_recovery_state_ = State::DISABLED;
+}
+else if (prior_state == State::COMPLETE)
+{
+    post_recovery_state_ = State::COMPLETE;
+}
+else
+{
+    post_recovery_state_ = State::ENABLED;
+}
+
+
+recovery_in_progress_.store(true, std::memory_order_release);
+state_.store(State::RECOVERING, std::memory_order_release);
+
+
+    // Snapshot the last configured parameters before teardown.
+    const double frequency = trans_params_.frequency;
+    const int power = trans_params_.power;
+    const double ppm = trans_params_.ppm;
+    const std::string call_sign = trans_params_.call_sign;
+    const std::string grid_square = trans_params_.grid_square;
+    const int power_dbm = trans_params_.power_dbm;
+    const bool use_offset = trans_params_.use_offset;
+
+    std::cerr << "[WSPR-Transmitter] Attempting watchdog recovery."
+              << std::endl;
+
+    // Stop threads first, then tear down hardware state.
+    shutdown();
+    dma_cleanup();
+
+    try
+    {
+        configure(frequency, power, ppm, call_sign, grid_square, power_dbm,
+                  use_offset);
+
+        clearWatchdogFault();
+        state_.store(post_recovery_state_, std::memory_order_release);
+        recovery_in_progress_.store(false, std::memory_order_release);
+        startAsync();
+    }
+    catch (const std::exception &e)
+    {
+        recovery_in_progress_.store(false, std::memory_order_release);
+        state_.store(State::HUNG, std::memory_order_release);
+        std::cerr << "[WSPR-Transmitter] Watchdog recovery failed: "
+                  << e.what()
+                  << std::endl;
+        return false;
+    }
+
+    std::cerr << "[WSPR-Transmitter] Watchdog recovery complete."
+              << std::endl;
+    return true;
 }
 
 void WsprTransmitter::stopAndJoin()
@@ -815,25 +1069,19 @@ void WsprTransmitter::dumpParameters()
 
 /* Private Methods */
 
-inline void WsprTransmitter::fire_start_cb(const std::string &msg, const double frequency)
+inline void WsprTransmitter::fire_transmit_cb(
+    TransmissionCallbackEvent event,
+    const std::string &msg,
+    double value)
 {
-    if (on_transmit_start_)
+    if (on_transmit_cb_)
     {
-        std::thread([cb = on_transmit_start_, msg, frequency]()
-                    { cb(msg, frequency); })
+        std::thread([cb = on_transmit_cb_, event, msg, value]()
+                    { cb(event, msg, value); })
             .detach();
     }
 }
 
-inline void WsprTransmitter::fire_end_cb(const std::string &msg, double elapsed)
-{
-    if (on_transmit_end_)
-    {
-        std::thread([cb = on_transmit_end_, msg, elapsed]()
-                    { cb(msg, elapsed); })
-            .detach();
-    }
-}
 
 bool WsprTransmitter::shouldStop() const noexcept
 {
@@ -854,7 +1102,7 @@ void WsprTransmitter::start_watchdog()
     if (ncpu <= 1)
     {
         if (debug)
-            std::cerr << debug_tag
+            std::cerr << log_tag
                       << "Watchdog disabled (single CPU system)."
                       << std::endl;
         return;
@@ -923,7 +1171,7 @@ void WsprTransmitter::start_watchdog()
 
     if (debug)
     {
-        std::cerr << debug_tag << "DMA watchdog started." << std::endl;
+        std::cerr << log_tag << "DMA watchdog started." << std::endl;
     }
 
     watchdog_thread_ = std::thread(
@@ -1074,6 +1322,7 @@ void WsprTransmitter::start_watchdog()
                 if (stalled_for >= kStallTimeout)
                 {
                     watchdog_faulted_.store(true, std::memory_order_release);
+                    state_.store(State::HUNG, std::memory_order_release);
 
                     std::cerr << "[WSPR-Transmitter] DMA watchdog detected a stall."
                               << " CS=0x" << std::hex << cs
@@ -1083,6 +1332,9 @@ void WsprTransmitter::start_watchdog()
 
                     // Request a cooperative stop so the transmit thread can unwind.
                     requestStopTx();
+
+                    // Optionally perform an automatic recovery cycle.
+                    request_watchdog_recovery();
                     return;
                 }
 
@@ -1107,7 +1359,7 @@ void WsprTransmitter::stop_watchdog()
 
     if (debug)
     {
-        std::cerr << debug_tag << "DMA watchdog stopped." << std::endl;
+        std::cerr << log_tag << "DMA watchdog stopped." << std::endl;
     }
 }
 
@@ -1200,17 +1452,29 @@ void WsprTransmitter::transmit()
 {
     if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
     {
-        fire_end_cb("Skipping transmission (frequency = 0.0).", 0.0);
-        return;
+        fire_transmit_cb(TransmissionCallbackEvent::COMPLETE, "Skipping transmission (frequency = 0.0).", 0.0);
+
+        if (one_shot_.load(std::memory_order_acquire))
+        {
+            state_.store(State::COMPLETE, std::memory_order_release);
+        }
+
+return;
     }
 
     if (shouldStop())
     {
         if (debug)
         {
-            std::cerr << debug_tag << "transmit() aborted before start." << std::endl;
+            std::cerr << log_tag << "transmit() aborted before start." << std::endl;
         }
-        return;
+
+        if (one_shot_.load(std::memory_order_acquire))
+        {
+            state_.store(State::COMPLETE, std::memory_order_release);
+        }
+
+return;
     }
 
     // RAII guard that guarantees TX is turned off no matter how we exit.
@@ -1256,6 +1520,8 @@ void WsprTransmitter::transmit()
 
         transmit_off();
         tx_guard.dismiss();
+
+        state_.store(State::COMPLETE, std::memory_order_release);
     }
     else
     {
@@ -1274,11 +1540,17 @@ void WsprTransmitter::transmit()
             {
                 if (debug)
                 {
-                    std::cerr << debug_tag
+                    std::cerr << log_tag
                               << "TX start aborted before window boundary."
                               << std::endl;
                 }
-                return;
+
+                if (one_shot_.load(std::memory_order_acquire))
+                {
+                    state_.store(State::COMPLETE, std::memory_order_release);
+                }
+
+return;
             }
 
             if (debug)
@@ -1291,7 +1563,7 @@ void WsprTransmitter::transmit()
                 const long usec = now_rt.tv_nsec / 1000;
 
                 std::cerr
-                    << debug_tag
+                    << log_tag
                     << "TX start realtime = "
                     << std::setw(2) << std::setfill('0') << tm_rt.tm_hour << ":"
                     << std::setw(2) << std::setfill('0') << tm_rt.tm_min << ":"
@@ -1304,7 +1576,7 @@ void WsprTransmitter::transmit()
         }
 
         // Fire callback as close to the first symbol as possible.
-        fire_start_cb("", trans_params_.frequency);
+        fire_transmit_cb(TransmissionCallbackEvent::STARTING, "", trans_params_.frequency);
 
         const int symbol_count = static_cast<int>(trans_params_.symbols.size());
         const double symtime = trans_params_.symtime;
@@ -1321,7 +1593,7 @@ void WsprTransmitter::transmit()
         {
             if (debug)
             {
-                std::cerr << debug_tag
+                std::cerr << log_tag
                           << "mlockall failed: "
                           << std::strerror(errno)
                           << std::endl;
@@ -1358,7 +1630,7 @@ void WsprTransmitter::transmit()
 
                     if (late_ns > 1'000'000) // >1 ms late
                     {
-                        std::cerr << debug_tag
+                        std::cerr << log_tag
                                   << "Symbol overrun: "
                                   << late_ns / 1e6
                                   << " ms late"
@@ -1406,9 +1678,11 @@ void WsprTransmitter::transmit()
         transmit_off();
         tx_guard.dismiss();
 
+        state_.store(State::COMPLETE, std::memory_order_release);
+
         const double actual =
             std::chrono::duration<double>(t_end_chrono - t0_chrono).count();
-        fire_end_cb(canceled ? "canceled" : "", actual);
+        fire_transmit_cb(TransmissionCallbackEvent::COMPLETE, canceled ? "canceled" : "", actual);
     }
 }
 
@@ -1498,7 +1772,7 @@ void WsprTransmitter::thread_entry()
         {
             if (debug)
             {
-                std::cerr << debug_tag
+                std::cerr << log_tag
                           << "thread_entry(): failed to set CPU affinity: "
                           << std::strerror(aff_ret)
                           << std::endl;
@@ -1752,7 +2026,7 @@ void WsprTransmitter::disable_hardware_sequence(bool verbose)
         const std::uint32_t cs =
             static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x00));
 
-        std::cerr << debug_tag
+        std::cerr << log_tag
                   << "DMA before off: CS=0x"
                   << std::hex << cs
                   << " CONBLK_AD=0x" << conblk
@@ -1762,7 +2036,10 @@ void WsprTransmitter::disable_hardware_sequence(bool verbose)
 
     if (dma_config_.peripheral_base_virtual == nullptr)
     {
-        state_.store(State::ENABLED, std::memory_order_release);
+        if (!recovery_in_progress_.load(std::memory_order_acquire))
+        {
+            state_.store(State::ENABLED, std::memory_order_release);
+        }
         return;
     }
 
@@ -1786,7 +2063,10 @@ void WsprTransmitter::disable_hardware_sequence(bool verbose)
  */
 void WsprTransmitter::disable_clock()
 {
-    state_.store(State::ENABLED, std::memory_order_release);
+    if (!recovery_in_progress_.load(std::memory_order_acquire))
+    {
+        state_.store(State::ENABLED, std::memory_order_release);
+    }
 
     if (dma_config_.peripheral_base_virtual == nullptr)
         return;
@@ -1890,7 +2170,7 @@ void WsprTransmitter::transmit_symbol(
             {
                 if (debug)
                 {
-                    std::cerr << debug_tag
+                    std::cerr << log_tag
                               << "DMA appears stuck at CONBLK_AD=0x"
                               << std::hex << cur << std::dec
                               << ", forcing stop to avoid deadlock."
@@ -1976,7 +2256,7 @@ void WsprTransmitter::transmit_symbol(
             static_cast<int>(trans_params_.symbols.size());
 
         std::cerr
-            << debug_tag
+            << log_tag
             << "sym=" << sym_num
             << " idx=";
 
@@ -2301,7 +2581,7 @@ void WsprTransmitter::setup_dma()
             if (e.code().value() == ETIMEDOUT)
             {
                 if (debug)
-                    std::cerr << debug_tag << "Timeout (attempt "
+                    std::cerr << log_tag << "Timeout (attempt "
                               << attempts
                               << ") allocating memory pool, retrying.";
 
@@ -2360,7 +2640,7 @@ void WsprTransmitter::setup_dma()
     }
 
     if (debug)
-        std::cerr << debug_tag
+        std::cerr << log_tag
                   << "PWM div reg=0x" << std::hex << div_reg << std::dec
                   << " divisor=" << divisor
                   << " pwm_clock_init_=" << std::fixed << std::setprecision(3)
@@ -2369,7 +2649,7 @@ void WsprTransmitter::setup_dma()
 
     if (debug)
         std::cerr
-            << debug_tag
+            << log_tag
             << "Actual PWM clock = "
             << std::fixed << std::setprecision(0)
             << pwm_clock_init_
@@ -2408,7 +2688,7 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
         if (debug && trans_params_.frequency != 0.0)
         {
             std::stringstream temp;
-            temp << debug_tag
+            temp << log_tag
                  << "Center frequency has been changed to "
                  << formatFrequencyMHz(center_freq_actual) << " MHz";
             std::cerr << temp.str() << " because of hardware limitations." << std::endl;
@@ -2455,23 +2735,6 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
         {
             assert((tuning_word[i] & (~0xFFFu)) == (tuning_word[i + 1] & (~0xFFFu)));
         }
-    }
-}
-
-constexpr const char *WsprTransmitter::stateToString(State state) noexcept
-{
-    switch (state)
-    {
-    case State::DISABLED:
-        return "DISABLED";
-    case State::ENABLED:
-        return "ENABLED";
-    case State::TRANSMITTING:
-        return "TRANSMITTING";
-    case State::HUNG:
-        return "HUNG";
-    default:
-        return "UNKNOWN";
     }
 }
 

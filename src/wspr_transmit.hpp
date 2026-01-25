@@ -32,6 +32,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -95,6 +96,12 @@ public:
         /** @brief Actively transmitting. */
         TRANSMITTING,
 
+        /** @brief Recovering from a watchdog stall. */
+        RECOVERING,
+
+        /** @brief Transmission finished (one-shot or tone). */
+        COMPLETE,
+
         /** @brief Reserved for future fault handling. */
         HUNG
     };
@@ -105,7 +112,26 @@ public:
      * @param state State value to convert.
      * @return A constant C string describing the state.
      */
-    static constexpr const char *stateToString(State state) noexcept;
+    constexpr const char *stateToString(State state) noexcept
+    {
+        switch (state)
+        {
+        case State::DISABLED:
+            return "DISABLED";
+        case State::ENABLED:
+            return "ENABLED";
+        case State::TRANSMITTING:
+            return "TRANSMITTING";
+        case State::RECOVERING:
+            return "RECOVERING";
+        case State::COMPLETE:
+            return "COMPLETE";
+        case State::HUNG:
+            return "HUNG";
+        default:
+            return "UNKNOWN";
+        }
+    }
 
     /**
      * @brief Convert a State to a lowercase std::string.
@@ -180,22 +206,39 @@ public:
      *            represents a frequency in Hz (or another unit depending
      *            on context).
      */
-    using StartCallback = std::function<void(const std::string & /*msg*/, double /*frequency*/)>;
-    using EndCallback = std::function<void(const std::string & /*msg*/, double /*elapsed_secs*/)>;
+    /**
+     * @brief Identifies whether a transmission callback is being fired for
+     *        the start or completion of a transmission.
+     */
+    enum class TransmissionCallbackEvent
+    {
+        STARTING,
+        COMPLETE
+    };
 
     /**
-     * @brief Install optional callbacks for transmission start/end.
+     * @brief Signature for user-provided transmission callback.
      *
-     * @param[in] start_cb
-     *   Called on the transmit thread immediately before the first symbol
-     *   (or tone) is emitted.  If null, no start notification is made.
-     * @param[in] end_cb
-     *   Called on the transmit thread immediately after the last WSPR
-     *   symbol is sent (but before DMA/PWM are torn down).  If null,
-     *   no completion notification is made.
+     * @param event Indicates whether the callback is for transmission start
+     *              or completion.
+     * @param msg   Descriptor string for the transmission; may be empty.
+     * @param value For STARTING, the active transmit frequency in Hz.
+     *              For COMPLETE, the elapsed transmission time in seconds.
      */
-    void setTransmissionCallbacks(StartCallback start_cb = {},
-                                  EndCallback end_cb = {});
+    using TransmissionCallback =
+        std::function<void(TransmissionCallbackEvent event,
+                           const std::string &msg,
+                           double value)>;
+
+     /**
+      * @brief Install an optional callback for transmission start/completion.
+      *
+      * @param[in] cb
+      *   Called asynchronously when a transmission starts and when it
+      *   completes. The first argument identifies which event is being
+      *   reported. If null, no notifications are made.
+      */
+    void setTransmissionCallbacks(TransmissionCallback cb = {});
 
     /**
      * @brief Format a frequency in MHz using the transmitter's display rules.
@@ -356,6 +399,38 @@ public:
     void clearWatchdogFault() noexcept;
 
     /**
+     * @brief Enable or disable automatic recovery after a DMA watchdog stall.
+     *
+     * @details
+     *   When enabled, the watchdog thread will request a full hardware reset
+     *   (DMA/PWM/clock teardown and re-init) and will restart the scheduler
+     *   using the last configured parameters.
+     *
+     *   Recovery runs on a dedicated internal worker thread so the watchdog
+     *   can exit promptly without risking deadlocks.
+     *
+     * @param enable True to enable automatic recovery.
+     */
+    void setWatchdogAutoRecover(bool enable) noexcept;
+
+    /**
+     * @brief Returns true if watchdog auto-recovery is enabled.
+     */
+    bool watchdogAutoRecoverEnabled() const noexcept;
+
+    /**
+     * @brief Attempt to recover from a latched watchdog fault immediately.
+     *
+     * @details
+     *   This is a synchronous recovery helper. It stops the scheduler and
+     *   transmit thread, resets DMA/PWM/clock state, reinitializes DMA state
+     *   with the last configured parameters, clears the watchdog fault latch,
+     *   and restarts scheduling via startAsync().
+     *
+     * @return True if recovery succeeded, false otherwise.
+     */
+    bool recoverFromWatchdogFault();
+    /**
      * @brief Get the current transmission state.
      *
      * @details Returns a value indicating if the system is transmitting
@@ -399,6 +474,25 @@ private:
     void stop_watchdog();
 
     /**
+     * @brief Request a recovery cycle after a watchdog fault.
+     *
+     * @details
+     *   Safe to call from the watchdog thread. This only signals the recovery
+     *   worker and returns immediately.
+     */
+    void request_watchdog_recovery() noexcept;
+
+    /**
+     * @brief Internal recovery worker loop.
+     */
+    void recovery_worker();
+
+    /**
+     * @brief Core recovery implementation guarded by recovery_mtx_.
+     */
+    bool recover_from_watchdog_fault_locked();
+
+    /**
      * @brief Background thread used to monitor DMA progress.
      *
      * @details
@@ -424,6 +518,79 @@ private:
      *   forward progress. This flag remains set until cleared explicitly.
      */
     std::atomic<bool> watchdog_faulted_{false};
+
+    /**
+     * @brief Enable automatic watchdog recovery.
+     */
+    std::atomic<bool> watchdog_auto_recover_{true};
+
+    /**
+     * @brief Stop flag for the recovery worker thread.
+     */
+    std::atomic<bool> recovery_stop_{false};
+
+    /**
+     * @brief Indicates a recovery cycle has been requested.
+     */
+    std::atomic<bool> recovery_pending_{false};
+
+    /**
+     * @brief True while a recovery cycle is actively running.
+     */
+    std::atomic<bool> recovery_in_progress_{false};
+
+    /**
+     * @brief Rate limiting window for watchdog recovery.
+     */
+    static constexpr auto kRecoveryWindow =
+        std::chrono::minutes(10);
+
+    /**
+     * @brief Maximum number of recoveries permitted within the window.
+     */
+    static constexpr std::size_t kMaxRecoveriesInWindow = 3;
+
+    /**
+     * @brief Minimum time between recovery attempts.
+     */
+    static constexpr auto kMinRecoveryInterval =
+        std::chrono::seconds(30);
+
+    /**
+     * @brief Mutex guarding recovery rate limit state.
+     */
+    mutable std::mutex recovery_rate_mtx_{};
+
+    /**
+     * @brief Timestamps of recent recovery attempts.
+     */
+    std::deque<std::chrono::steady_clock::time_point> recovery_attempts_{};
+
+    /**
+     * @brief Next time a rate-limited recovery attempt may run.
+     */
+    std::chrono::steady_clock::time_point recovery_defer_until_{};
+
+    /**
+     * @brief State to restore after successful recovery.
+     */
+    State post_recovery_state_{State::ENABLED};
+
+    /**
+     * @brief Worker thread that performs DMA/PWM/clock recovery.
+     */
+    std::thread recovery_thread_{};
+
+    /**
+     * @brief Synchronization for the recovery worker wait loop.
+     */
+    std::mutex recovery_wait_mtx_;
+    std::condition_variable recovery_cv_;
+
+    /**
+     * @brief Guards the core recovery sequence against concurrent callers.
+     */
+    std::mutex recovery_mtx_;
 
     /**
      * @brief Last observed DMA control block address.
@@ -473,24 +640,14 @@ private:
     std::int64_t spin_ns_{200'000};
 
     /**
-     * @brief Invoked just before each transmission begins.
+     * @brief Invoked when a transmission starts or completes.
      *
-     * This callback is fired on the transmit thread immediately before
-     * starting either a continuous tone or a WSPR symbol sequence.
+     * This callback is fired asynchronously from the transmit thread to
+     * notify the user that a transmission has started or completed.
      * Users can assign a function via `setTransmissionCallbacks()` to
-     * perform any setup or logging when transmission is about to start.
+     * perform setup, logging, or cleanup work tied to these events.
      */
-    StartCallback on_transmit_start_{};
-
-    /**
-     * @brief Invoked immediately after all WSPR symbols have been sent.
-     *
-     * This callback is fired on the transmit thread right after the last
-     * WSPR symbol is transmitted and before the hardware is torn down.
-     * Users can assign a function via `setTransmissionCallbacks()` to
-     * perform any cleanup or notification when a WSPR transmission completes.
-     */
-    EndCallback on_transmit_end_{};
+    TransmissionCallback on_transmit_cb_{};
 
     /**
      * @brief Background thread for carrying out the transmission.
@@ -1238,28 +1395,22 @@ private:
     };
 
     /**
-     * @brief Invoke the configured transmission start callback.
+     * @brief Invoke the configured transmission callback.
      *
      * @details
-     *   Calls the user-provided start callback, if one is installed, passing
-     *   a descriptive message and the active transmit frequency.
+     *   Calls the user-provided callback, if one is installed, passing
+     *   the event type, an optional descriptive message, and an associated
+     *   value.
      *
-     * @param msg Message string describing the transmission.
-     * @param frequency Transmit frequency in Hz.
+     * @param event Identifies whether this is a start or completion
+     *              notification.
+     * @param msg   Message string describing the transmission.
+     * @param value For STARTING, the transmit frequency in Hz.
+     *              For COMPLETE, the elapsed transmission time in seconds.
      */
-    void fire_start_cb(const std::string &msg, double frequency);
-
-    /**
-     * @brief Invoke the configured transmission end callback.
-     *
-     * @details
-     *   Calls the user-provided end callback, if one is installed, passing
-     *   a descriptive message and the elapsed transmit time.
-     *
-     * @param msg Message string describing the transmission.
-     * @param elapsed Elapsed transmission time in seconds.
-     */
-    void fire_end_cb(const std::string &msg, double elapsed);
+    void fire_transmit_cb(TransmissionCallbackEvent event,
+                          const std::string &msg,
+                          double value);
 
     /**
      * @brief Execute the transmission loop.
