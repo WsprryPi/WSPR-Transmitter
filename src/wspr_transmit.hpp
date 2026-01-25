@@ -224,13 +224,13 @@ public:
      *            on context).
      */
     /**
-     * @brief Identifies whether a transmission callback is being fired for
-     *        the start or completion of a transmission.
+     * @brief Identifies which transmission callback event is being reported.
      */
     enum class TransmissionCallbackEvent
     {
         STARTING,
-        COMPLETE
+        COMPLETE,
+        LOGGING
     };
 
     /**
@@ -242,6 +242,7 @@ public:
      * @param msg   Descriptor string for the transmission; may be empty.
      * @param value For STARTING, the active transmit frequency in Hz.
      *              For COMPLETE, the elapsed transmission time in seconds.
+     *              For LOGGING, this value is ignored.
      */
     using TransmissionCallback =
         std::function<void(TransmissionCallbackEvent event,
@@ -250,7 +251,7 @@ public:
                            double value)>;
 
      /**
-      * @brief Install an optional callback for transmission start/completion.
+      * @brief Install an optional callback for transmission notifications.
       *
       * @param[in] cb
       *   Called asynchronously when a transmission starts and when it

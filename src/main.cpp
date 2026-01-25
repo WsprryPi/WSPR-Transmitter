@@ -33,16 +33,17 @@
 #include <cstdio>             // getchar()
 #include <iomanip>            // std::ostringstream
 #include <iostream>           // std::cout, std::getline
+#include <syncstream>         // std::osyncstream
 #include <mutex>              // g_end_mtx
 #include <optional>           // std::optional
 #include <string>             // std::string
 
 // POSIX and system headers
-#include <errno.h>   // errno
+#include <errno.h>      // errno
 #include <sys/select.h> // select(), fd_set, FD_* macros
 #include <sys/time.h>   // struct timeval
-#include <termios.h> // tcgetattr(), tcsetattr()
-#include <unistd.h>  // STDIN_FILENO
+#include <termios.h>    // tcgetattr(), tcsetattr()
+#include <unistd.h>     // STDIN_FILENO
 
 // Project headers
 #include "config_handler.hpp"
@@ -451,101 +452,122 @@ void transmitter_cb(
     const std::string &msg,
     double value)
 {
-    (void)level;
 
     switch (event)
     {
-        case WsprTransmitter::TransmissionCallbackEvent::STARTING:
-        {
-            const double frequency = value;
+    case WsprTransmitter::TransmissionCallbackEvent::STARTING:
+    {
+        const double frequency = value;
 
-            if (!msg.empty() && frequency != 0.0)
-            {
-                std::cout << log_tag
-                          << "Started transmission ("
-                          << msg
-                          << ") "
-                          << wsprTransmitter.formatFrequencyMHz(frequency)
-                          << " MHz."
-                          << std::endl;
-            }
-            else if (frequency != 0.0)
-            {
-                std::cout << log_tag
-                          << "Started transmission: "
-                          << wsprTransmitter.formatFrequencyMHz(frequency)
-                          << " MHz."
-                          << std::endl;
-            }
-            else if (!msg.empty())
-            {
-                std::cout << log_tag
-                          << "Started transmission ("
-                          << msg
-                          << ")."
-                          << std::endl;
-            }
-            else
-            {
-                std::cout << log_tag
-                          << "Started transmission."
-                          << std::endl;
-            }
+        if (!msg.empty() && frequency != 0.0)
+        {
+            std::cout << log_tag
+                      << "Started transmission ("
+                      << msg
+                      << ") "
+                      << wsprTransmitter.formatFrequencyMHz(frequency)
+                      << " MHz."
+                      << std::endl;
+        }
+        else if (frequency != 0.0)
+        {
+            std::cout << log_tag
+                      << "Started transmission: "
+                      << wsprTransmitter.formatFrequencyMHz(frequency)
+                      << " MHz."
+                      << std::endl;
+        }
+        else if (!msg.empty())
+        {
+            std::cout << log_tag
+                      << "Started transmission ("
+                      << msg
+                      << ")."
+                      << std::endl;
+        }
+        else
+        {
+            std::cout << log_tag
+                      << "Started transmission."
+                      << std::endl;
+        }
+        break;
+    }
+    case WsprTransmitter::TransmissionCallbackEvent::COMPLETE:
+    {
+        const double elapsed = value;
+
+        if (!msg.empty() && elapsed != 0.0)
+        {
+            std::cout << log_tag
+                      << "Completed transmission ("
+                      << msg
+                      << ") "
+                      << std::fixed
+                      << std::setprecision(6)
+                      << elapsed
+                      << " seconds."
+                      << std::endl;
+        }
+        else if (elapsed != 0.0)
+        {
+            std::cout << log_tag
+                      << "Completed transmission: "
+                      << std::fixed
+                      << std::setprecision(6)
+                      << elapsed
+                      << " seconds."
+                      << std::endl;
+        }
+        else if (!msg.empty())
+        {
+            std::cout << log_tag
+                      << "Completed transmission ("
+                      << msg
+                      << ")."
+                      << std::endl;
+        }
+        else
+        {
+            std::cout << log_tag
+                      << "Completed transmission."
+                      << std::endl;
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(g_end_mtx);
+            g_transmission_done = true;
+        }
+        g_end_cv.notify_one();
+        break;
+    }
+    case WsprTransmitter::TransmissionCallbackEvent::LOGGING:
+    {
+        std::ostream &base =
+            (level == WsprTransmitter::LogLevel::ERROR)
+                ? static_cast<std::ostream &>(std::cerr)
+                : static_cast<std::ostream &>(std::cout);
+
+        std::osyncstream os(base);
+
+        if (msg.empty())
+        {
+            os << '\n';
             break;
         }
-        case WsprTransmitter::TransmissionCallbackEvent::COMPLETE:
-        {
-            const double elapsed = value;
 
-            if (!msg.empty() && elapsed != 0.0)
-            {
-                std::cout << log_tag
-                          << "Completed transmission ("
-                          << msg
-                          << ") "
-                          << std::fixed
-                          << std::setprecision(6)
-                          << elapsed
-                          << " seconds."
-                          << std::endl;
-            }
-            else if (elapsed != 0.0)
-            {
-                std::cout << log_tag
-                          << "Completed transmission: "
-                          << std::fixed
-                          << std::setprecision(6)
-                          << elapsed
-                          << " seconds."
-                          << std::endl;
-            }
-            else if (!msg.empty())
-            {
-                std::cout << log_tag
-                          << "Completed transmission ("
-                          << msg
-                          << ")."
-                          << std::endl;
-            }
-            else
-            {
-                std::cout << log_tag
-                          << "Completed transmission."
-                          << std::endl;
-            }
+        os << log_tag << msg;
 
-            {
-                std::lock_guard<std::mutex> lk(g_end_mtx);
-                g_transmission_done = true;
-            }
-            g_end_cv.notify_one();
-            break;
-        }
-        default:
-            break;
+        if (msg.back() != '\n')
+            os << '\n';
+
+        break;
+    }
+
+    default:
+        break;
     }
 }
-
 
 /**
  * @brief Callback invoked when a transmission finishes.
@@ -603,17 +625,18 @@ void configure_transmitter(bool isWspr)
 
     wsprTransmitter.setThreadScheduling(SCHED_FIFO, 50);
 
+    wsprTransmitter.setTransmissionCallbacks(
+        [](WsprTransmitter::TransmissionCallbackEvent event,
+           WsprTransmitter::LogLevel level,
+           const std::string &msg,
+           double value)
+        {
+            transmitter_cb(event, level, msg, value);
+        });
+
     if (isWspr)
     {
-        wsprTransmitter.setTransmissionCallbacks(
-            [](WsprTransmitter::TransmissionCallbackEvent event,
-               WsprTransmitter::LogLevel level,
-               const std::string &msg,
-               double value)
-            {
-                transmitter_cb(event, level, msg, value);
-            });
-wsprTransmitter.configure(
+        wsprTransmitter.configure(
             WSPR_FREQ, 0, config.ppm,
             CALLSIGN, GRID, POWER_DBM, /*use_offset=*/true);
     }
@@ -729,12 +752,6 @@ static void wait_for_completion(bool isWspr)
                 if (::read(STDIN_FILENO, &c, 1) == 1 && c == ' ')
                 {
                     stop_requested = true;
-                    std::cout
-                        << log_tag
-                        << (isWspr
-                                ? "Stopping WSPR transmission."
-                                : "Stopping test tone.")
-                        << std::endl;
                     wsprTransmitter.requestStopTx();
                 }
             }
@@ -745,7 +762,6 @@ static void wait_for_completion(bool isWspr)
         std::this_thread::sleep_for(100ms);
     }
 }
-
 
 /**
  * @brief Main entry point for the transmitter application

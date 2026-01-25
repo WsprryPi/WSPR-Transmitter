@@ -1,7 +1,7 @@
 <!-- omit in toc -->
 # WsprTransmitter
 
-A self-contained C++17 class for **DMA-driven WSPR (Weak Signal Propagation
+A self-contained C++20 class for **DMA-driven WSPR (Weak Signal Propagation
 Reporter)** transmission on Raspberry Pi–class systems. The transmitter uses
 the Broadcom mailbox, DMA, and PWM hardware to generate precisely timed RF with
 sub-millHertz stability when properly calibrated.

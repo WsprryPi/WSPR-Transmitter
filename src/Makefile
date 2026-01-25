@@ -3,7 +3,7 @@
 # Debug flag
 DEBUG := -DDEBUG_WSPR_TRANSMIT
 # C++ Version
-CXXVER := 17
+CXXVER := 20
 # Prefix for executing tests, "sudo" if required
 SUDO := sudo
 # Add any required submodules by their src path
