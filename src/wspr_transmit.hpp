@@ -147,7 +147,8 @@ public:
         DEBUG,
         INFO,
         WARN,
-        ERROR
+        ERROR,
+        FATAL
     };
 
     /**
