@@ -150,8 +150,6 @@ public:
         ERROR
     };
 
-
-
     /**
      * @brief Convert a State to a lowercase std::string.
      *
