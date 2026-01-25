@@ -102,6 +102,9 @@ public:
         /** @brief Transmission finished (one-shot or tone). */
         COMPLETE,
 
+        /** @brief Transmission was cancelled by request. */
+        CANCELLED,
+
         /** @brief Reserved for future fault handling. */
         HUNG
     };
@@ -126,6 +129,8 @@ public:
             return "RECOVERING";
         case State::COMPLETE:
             return "COMPLETE";
+        case State::CANCELLED:
+            return "CANCELLED";
         case State::HUNG:
             return "HUNG";
         default:

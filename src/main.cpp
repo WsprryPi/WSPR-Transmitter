@@ -651,10 +651,12 @@ static void wait_for_completion(bool isWspr)
     {
         const auto state = wsprTransmitter.getState();
 
-        if (state == WsprTransmitter::State::COMPLETE)
+        if (state == WsprTransmitter::State::COMPLETE ||
+            state == WsprTransmitter::State::CANCELLED)
         {
             std::cout
-                << "[WSPR-Transmitter] Transmission in "
+                << log_tag
+                << "Transmission in "
                 << wsprTransmitter.stateToString(state)
                 << " state."
                 << std::endl;
@@ -664,7 +666,8 @@ static void wait_for_completion(bool isWspr)
         if (state == WsprTransmitter::State::HUNG)
         {
             std::cerr
-                << "[WSPR-Transmitter] Transmission entered "
+                << log_tag
+                << "Transmission entered "
                 << wsprTransmitter.stateToString(state)
                 << " state."
                 << std::endl;
@@ -674,7 +677,8 @@ static void wait_for_completion(bool isWspr)
         if (state == WsprTransmitter::State::RECOVERING)
         {
             std::cerr
-                << "[WSPR-Transmitter] Transmission entered "
+                << log_tag
+                << "Transmission entered "
                 << wsprTransmitter.stateToString(state)
                 << " state."
                 << std::endl;
@@ -684,7 +688,8 @@ static void wait_for_completion(bool isWspr)
         if (state == WsprTransmitter::State::DISABLED)
         {
             std::cerr
-                << "[WSPR-Transmitter] Transmission entered "
+                << log_tag
+                << "Transmission entered "
                 << wsprTransmitter.stateToString(state)
                 << " state."
                 << std::endl;
@@ -725,6 +730,7 @@ static void wait_for_completion(bool isWspr)
                 {
                     stop_requested = true;
                     std::cout
+                        << log_tag
                         << (isWspr
                                 ? "Stopping WSPR transmission."
                                 : "Stopping test tone.")

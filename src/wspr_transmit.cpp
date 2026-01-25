@@ -657,7 +657,8 @@ void WsprTransmitter::startAsync()
     // run and advance the state machine.
     {
         const State prior = state_.load(std::memory_order_acquire);
-        if (prior == State::DISABLED || prior == State::COMPLETE)
+        if (prior == State::DISABLED || prior == State::COMPLETE ||
+            prior == State::CANCELLED)
         {
             state_.store(State::ENABLED, std::memory_order_release);
         }
@@ -941,9 +942,10 @@ if (prior_state == State::DISABLED)
 {
     post_recovery_state_ = State::DISABLED;
 }
-else if (prior_state == State::COMPLETE)
+else if (prior_state == State::COMPLETE ||
+         prior_state == State::CANCELLED)
 {
-    post_recovery_state_ = State::COMPLETE;
+    post_recovery_state_ = prior_state;
 }
 else
 {
@@ -1457,8 +1459,11 @@ void WsprTransmitter::transmit()
         
         if (one_shot_.load(std::memory_order_acquire))
         {
-            state_.store(State::COMPLETE, std::memory_order_release);
-        }
+            const bool canceled = shouldStop();
+
+        state_.store(canceled ? State::CANCELLED : State::COMPLETE,
+                     std::memory_order_release);
+    }
 
 return;
     }
@@ -1522,7 +1527,10 @@ return;
         transmit_off();
         tx_guard.dismiss();
 
-        state_.store(State::COMPLETE, std::memory_order_release);
+        const bool canceled = shouldStop();
+
+        state_.store(canceled ? State::CANCELLED : State::COMPLETE,
+                     std::memory_order_release);
     }
     else
     {
@@ -1679,7 +1687,8 @@ return;
         transmit_off();
         tx_guard.dismiss();
 
-        state_.store(State::COMPLETE, std::memory_order_release);
+        state_.store(canceled ? State::CANCELLED : State::COMPLETE,
+                     std::memory_order_release);
 
         const double actual =
             std::chrono::duration<double>(t_end_chrono - t0_chrono).count();
