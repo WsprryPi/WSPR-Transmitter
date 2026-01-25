@@ -134,6 +134,20 @@ public:
     }
 
     /**
+     * @enum LogLevel
+     * @brief Log level for callback messages.
+     */
+    enum class LogLevel
+    {
+        DEBUG,
+        INFO,
+        WARN,
+        ERROR
+    };
+
+
+
+    /**
      * @brief Convert a State to a lowercase std::string.
      *
      * @param state State value to convert.
@@ -221,12 +235,14 @@ public:
      *
      * @param event Indicates whether the callback is for transmission start
      *              or completion.
+     * @param level Log level for the message.
      * @param msg   Descriptor string for the transmission; may be empty.
      * @param value For STARTING, the active transmit frequency in Hz.
      *              For COMPLETE, the elapsed transmission time in seconds.
      */
     using TransmissionCallback =
         std::function<void(TransmissionCallbackEvent event,
+                           LogLevel level,
                            const std::string &msg,
                            double value)>;
 
@@ -1409,10 +1425,11 @@ private:
      *              For COMPLETE, the elapsed transmission time in seconds.
      */
     void fire_transmit_cb(TransmissionCallbackEvent event,
+                          LogLevel level,
                           const std::string &msg,
                           double value);
 
-    /**
+/**
      * @brief Execute the transmission loop.
      *
      * @details

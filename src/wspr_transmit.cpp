@@ -1071,13 +1071,14 @@ void WsprTransmitter::dumpParameters()
 
 inline void WsprTransmitter::fire_transmit_cb(
     TransmissionCallbackEvent event,
+    LogLevel level,
     const std::string &msg,
     double value)
 {
     if (on_transmit_cb_)
     {
-        std::thread([cb = on_transmit_cb_, event, msg, value]()
-                    { cb(event, msg, value); })
+        std::thread([cb = on_transmit_cb_, event, level, msg, value]()
+                    { cb(event, level, msg, value); })
             .detach();
     }
 }
@@ -1452,8 +1453,8 @@ void WsprTransmitter::transmit()
 {
     if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
     {
-        fire_transmit_cb(TransmissionCallbackEvent::COMPLETE, "Skipping transmission (frequency = 0.0).", 0.0);
-
+        fire_transmit_cb(TransmissionCallbackEvent::COMPLETE, LogLevel::INFO, "Skipping transmission (frequency = 0.0).", 0.0);
+        
         if (one_shot_.load(std::memory_order_acquire))
         {
             state_.store(State::COMPLETE, std::memory_order_release);
@@ -1468,7 +1469,7 @@ return;
         {
             std::cerr << log_tag << "transmit() aborted before start." << std::endl;
         }
-
+        
         if (one_shot_.load(std::memory_order_acquire))
         {
             state_.store(State::COMPLETE, std::memory_order_release);
@@ -1544,7 +1545,7 @@ return;
                               << "TX start aborted before window boundary."
                               << std::endl;
                 }
-
+                
                 if (one_shot_.load(std::memory_order_acquire))
                 {
                     state_.store(State::COMPLETE, std::memory_order_release);
@@ -1576,7 +1577,7 @@ return;
         }
 
         // Fire callback as close to the first symbol as possible.
-        fire_transmit_cb(TransmissionCallbackEvent::STARTING, "", trans_params_.frequency);
+        fire_transmit_cb(TransmissionCallbackEvent::STARTING, LogLevel::INFO, "", trans_params_.frequency);
 
         const int symbol_count = static_cast<int>(trans_params_.symbols.size());
         const double symtime = trans_params_.symtime;
@@ -1682,7 +1683,7 @@ return;
 
         const double actual =
             std::chrono::duration<double>(t_end_chrono - t0_chrono).count();
-        fire_transmit_cb(TransmissionCallbackEvent::COMPLETE, canceled ? "canceled" : "", actual);
+        fire_transmit_cb(TransmissionCallbackEvent::COMPLETE, LogLevel::INFO, canceled ? "canceled" : "", actual);
     }
 }
 

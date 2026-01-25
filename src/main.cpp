@@ -444,9 +444,12 @@ void sig_handler(int)
  */
 void transmitter_cb(
     WsprTransmitter::TransmissionCallbackEvent event,
+    WsprTransmitter::LogLevel level,
     const std::string &msg,
     double value)
 {
+    (void)level;
+
     switch (event)
     {
         case WsprTransmitter::TransmissionCallbackEvent::STARTING:
@@ -601,10 +604,11 @@ void configure_transmitter(bool isWspr)
     {
         wsprTransmitter.setTransmissionCallbacks(
             [](WsprTransmitter::TransmissionCallbackEvent event,
+               WsprTransmitter::LogLevel level,
                const std::string &msg,
                double value)
             {
-                transmitter_cb(event, msg, value);
+                transmitter_cb(event, level, msg, value);
             });
 wsprTransmitter.configure(
             WSPR_FREQ, 0, config.ppm,
