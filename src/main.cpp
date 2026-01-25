@@ -641,10 +641,11 @@ static void wait_for_completion(bool isWspr)
 
     bool stop_requested = false;
 
-    // In tone mode, allow spacebar to request stop while the tone is running.
+    // Allow spacebar to request stop while transmission is running.
+    // We place the terminal into non-canonical, non-echoing mode so we can
+    // read single characters without requiring Enter.
     std::optional<TermiosGuard> tg;
-    if (!isWspr)
-        tg.emplace();
+    tg.emplace();
 
     while (!g_terminate.load(std::memory_order_acquire))
     {
@@ -690,7 +691,7 @@ static void wait_for_completion(bool isWspr)
             return;
         }
 
-        if (!isWspr && !stop_requested)
+        if (!stop_requested)
         {
             fd_set rfds;
             FD_ZERO(&rfds);
@@ -723,7 +724,11 @@ static void wait_for_completion(bool isWspr)
                 if (::read(STDIN_FILENO, &c, 1) == 1 && c == ' ')
                 {
                     stop_requested = true;
-                    std::cout << "Stopping test tone." << std::endl;
+                    std::cout
+                        << (isWspr
+                                ? "Stopping WSPR transmission."
+                                : "Stopping test tone.")
+                        << std::endl;
                     wsprTransmitter.requestStopTx();
                 }
             }
