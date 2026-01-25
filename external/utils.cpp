@@ -11,6 +11,9 @@
 #include <cstring>
 #include <sys/wait.h>
 
+static constexpr auto debug_tag_chars = make_debug_tag_chars("Utils");
+static constexpr std::string_view debug_tag = as_string_view(debug_tag_chars);
+
 /**
  * @brief Get the PPM (frequency) value from `chronyc tracking`
  *
@@ -93,9 +96,12 @@ double get_ppm_from_chronyc()
             std::string label, colon, units;
             double ppm;
             ls >> label >> colon >> ppm >> units;
-            std::cout << "PPM set to: "
-                      << std::fixed << std::setprecision(3)
-                      << ppm << '\n';
+            std::cout << debug_tag
+                      << "PPM set to: "
+                      << std::fixed
+                      << std::setprecision(3)
+                      << ppm
+                      << std::endl;
             return ppm;
         }
     }
