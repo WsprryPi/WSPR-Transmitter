@@ -62,8 +62,8 @@ When used as a submodule, only `wspr_transmit.hpp/.cpp` are required.
 This project expects the following sibling projects when built as part of a
 larger tree:
 
-- **WSPR-Message**  
-  Encodes WSPR symbols and message data.  
+- **WSPR-Message**
+  Encodes WSPR symbols and message data.
   Expected path:
 
   ```text
@@ -71,7 +71,7 @@ larger tree:
   ```
 
 - **Mailbox**
-  Provides mailbox, DMA-safe memory allocation, and peripheral mapping.  
+  Provides mailbox, DMA-safe memory allocation, and peripheral mapping.
   Expected path:
 
   ```text

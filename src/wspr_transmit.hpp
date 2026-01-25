@@ -1558,10 +1558,8 @@ private:
      *   Shuts down DMA, PWM, and clock outputs while restoring any modified
      *   register state. The sequence ensures hardware is left in a safe
      *   state.
-     *
-     * @param verbose True to emit additional diagnostic output.
      */
-    void disable_hardware_sequence(bool verbose);
+    void disable_hardware_sequence();
 
     /**
      * @brief Disable the output clock driving the PWM hardware.

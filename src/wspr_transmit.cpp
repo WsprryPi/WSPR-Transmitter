@@ -56,20 +56,6 @@
 #include "mailbox.hpp"
 #include "bcm_model.hpp"
 
-#ifdef DEBUG_WSPR_TRANSMIT
-constexpr const bool debug = true;
-#else
-constexpr const bool debug = false;
-#endif
-
-#ifdef SELFTEST
-#include "utils"
-static constexpr auto log_tag_chars = make_log_tag_chars("Utils");
-static constexpr std::string_view log_tag = as_string_view(log_tag_chars);
-#else
-static constexpr std::string_view log_tag{"[WSPR-Transmitter] "};
-#endif
-
 // Helper classes and functions in anonymous namespace
 namespace
 {
@@ -923,9 +909,8 @@ bool WsprTransmitter::recover_from_watchdog_fault_locked()
             {
                 std::ostringstream oss;
                 oss
-                << "Watchdog recovery deferred (rate limited), "
-                << "retry in " << defer_ms << " ms."
-                ;
+                    << "Watchdog recovery deferred (rate limited), "
+                    << "retry in " << defer_ms << " ms.";
                 fire_transmit_cb(
                     TransmissionCallbackEvent::LOGGING,
                     LogLevel::ERROR,
@@ -974,8 +959,7 @@ bool WsprTransmitter::recover_from_watchdog_fault_locked()
 
     {
         std::ostringstream oss;
-        oss << "Attempting watchdog recovery."
-        ;
+        oss << "Attempting watchdog recovery.";
         fire_transmit_cb(
             TransmissionCallbackEvent::LOGGING,
             LogLevel::DEBUG,
@@ -1004,8 +988,7 @@ bool WsprTransmitter::recover_from_watchdog_fault_locked()
         {
             std::ostringstream oss;
             oss << "Watchdog recovery failed: "
-            << e.what()
-            ;
+                << e.what();
             fire_transmit_cb(
                 TransmissionCallbackEvent::LOGGING,
                 LogLevel::ERROR,
@@ -1017,8 +1000,7 @@ bool WsprTransmitter::recover_from_watchdog_fault_locked()
 
     {
         std::ostringstream oss;
-        oss << "Watchdog recovery complete."
-        ;
+        oss << "Watchdog recovery complete.";
         fire_transmit_cb(
             TransmissionCallbackEvent::LOGGING,
             LogLevel::DEBUG,
@@ -1043,13 +1025,13 @@ void WsprTransmitter::dumpParameters()
 {
     auto log_line =
         [this](const std::string &line)
-        {
-            fire_transmit_cb(
-                TransmissionCallbackEvent::LOGGING,
-                LogLevel::DEBUG,
-                line,
-                0.0);
-        };
+    {
+        fire_transmit_cb(
+            TransmissionCallbackEvent::LOGGING,
+            LogLevel::DEBUG,
+            line,
+            0.0);
+    };
 
     std::ostringstream oss;
 
@@ -1142,7 +1124,6 @@ void WsprTransmitter::dumpParameters()
     }
 }
 
-
 /* Private Methods */
 
 inline void WsprTransmitter::fire_transmit_cb(
@@ -1177,17 +1158,15 @@ void WsprTransmitter::start_watchdog()
 
     if (ncpu <= 1)
     {
-        if (debug)
-            {
-                std::ostringstream oss;
-                oss << "Watchdog disabled (single CPU system)."
-                ;
-                fire_transmit_cb(
-                    TransmissionCallbackEvent::LOGGING,
-                    LogLevel::ERROR,
-                    oss.str(),
-                    0.0);
-            }
+        {
+            std::ostringstream oss;
+            oss << "Watchdog disabled (single CPU system).";
+            fire_transmit_cb(
+                TransmissionCallbackEvent::LOGGING,
+                LogLevel::DEBUG,
+                oss.str(),
+                0.0);
+        }
         return;
     }
 
@@ -1252,17 +1231,14 @@ void WsprTransmitter::start_watchdog()
         std::memory_order_release);
     watchdog_last_conblk_.store(0, std::memory_order_release);
 
-    if (debug)
     {
-        {
-            std::ostringstream oss;
-            oss << "DMA watchdog started." ;
-            fire_transmit_cb(
-                TransmissionCallbackEvent::LOGGING,
-                LogLevel::DEBUG,
-                oss.str(),
-                0.0);
-        }
+        std::ostringstream oss;
+        oss << "DMA watchdog started.";
+        fire_transmit_cb(
+            TransmissionCallbackEvent::LOGGING,
+            LogLevel::DEBUG,
+            oss.str(),
+            0.0);
     }
 
     watchdog_thread_ = std::thread(
@@ -1344,27 +1320,22 @@ void WsprTransmitter::start_watchdog()
                     {
                         injected = true;
                         injected_conblk = read_conblk();
-#ifdef DEBUG_WSPR_TRANSMIT
-                        if (debug)
+
                         {
-                            {
-                                std::ostringstream oss;
-                                oss << "DMA watchdog: injecting stall."
+                            std::ostringstream oss;
+                            oss << "DMA watchdog: injecting stall."
                                 << " after="
                                 << std::chrono::duration_cast<
-                                std::chrono::milliseconds>(
-                                *inject_stall_after)
-                                .count()
-                                << " ms"
-                                ;
-                                fire_transmit_cb(
-                                    TransmissionCallbackEvent::LOGGING,
-                                    LogLevel::ERROR,
-                                    oss.str(),
-                                    0.0);
-                            }
+                                       std::chrono::milliseconds>(
+                                       *inject_stall_after)
+                                       .count()
+                                << " ms";
+                            fire_transmit_cb(
+                                TransmissionCallbackEvent::LOGGING,
+                                LogLevel::DEBUG,
+                                oss.str(),
+                                0.0);
                         }
-#endif
                     }
                 }
 
@@ -1394,8 +1365,6 @@ void WsprTransmitter::start_watchdog()
 
                 const auto stalled_for = std::chrono::nanoseconds(now_ns - last_ns);
 
-#ifdef DEBUG_WSPR_TRANSMIT
-                if (debug)
                 {
                     if ((now_tp - last_heartbeat) >= kHeartbeatPeriod)
                     {
@@ -1403,20 +1372,19 @@ void WsprTransmitter::start_watchdog()
                         {
                             std::ostringstream oss;
                             oss
-                            << "DMA watchdog: CS=0x" << std::hex << cs
-                            << " CONBLK_AD=0x" << conblk
-                            << std::dec
-                            << (advancing ? " advancing" : " not-advancing")
-                            << " stalled_for="
-                            << std::chrono::duration_cast<
-                            std::chrono::milliseconds>(
-                            stalled_for)
-                            .count()
-                            << " ms"
-                            ;
+                                << "DMA watchdog: CS=0x" << std::hex << cs
+                                << " CONBLK_AD=0x" << conblk
+                                << std::dec
+                                << (advancing ? " advancing" : " not-advancing")
+                                << " stalled_for="
+                                << std::chrono::duration_cast<
+                                       std::chrono::milliseconds>(
+                                       stalled_for)
+                                       .count()
+                                << " ms";
                             fire_transmit_cb(
                                 TransmissionCallbackEvent::LOGGING,
-                                LogLevel::ERROR,
+                                LogLevel::DEBUG,
                                 oss.str(),
                                 0.0);
                         }
@@ -1424,7 +1392,6 @@ void WsprTransmitter::start_watchdog()
                         last_heartbeat_conblk = conblk;
                     }
                 }
-#endif
 
                 if (stalled_for >= kStallTimeout)
                 {
@@ -1434,10 +1401,9 @@ void WsprTransmitter::start_watchdog()
                     {
                         std::ostringstream oss;
                         oss << "DMA watchdog detected a stall."
-                        << " CS=0x" << std::hex << cs
-                        << " CONBLK_AD=0x" << conblk
-                        << std::dec
-                        ;
+                            << " CS=0x" << std::hex << cs
+                            << " CONBLK_AD=0x" << conblk
+                            << std::dec;
                         fire_transmit_cb(
                             TransmissionCallbackEvent::LOGGING,
                             LogLevel::ERROR,
@@ -1472,17 +1438,14 @@ void WsprTransmitter::stop_watchdog()
         watchdog_thread_.join();
     }
 
-    if (debug)
     {
-        {
-            std::ostringstream oss;
-            oss << "DMA watchdog stopped." ;
-            fire_transmit_cb(
-                TransmissionCallbackEvent::LOGGING,
-                LogLevel::DEBUG,
-                oss.str(),
-                0.0);
-        }
+        std::ostringstream oss;
+        oss << "DMA watchdog stopped.";
+        fire_transmit_cb(
+            TransmissionCallbackEvent::LOGGING,
+            LogLevel::DEBUG,
+            oss.str(),
+            0.0);
     }
 }
 
@@ -1590,17 +1553,14 @@ void WsprTransmitter::transmit()
 
     if (shouldStop())
     {
-        if (debug)
         {
-            {
-                std::ostringstream oss;
-                oss << "transmit() aborted before start." ;
-                fire_transmit_cb(
-                    TransmissionCallbackEvent::LOGGING,
-                    LogLevel::ERROR,
-                    oss.str(),
-                    0.0);
-            }
+            std::ostringstream oss;
+            oss << "transmit() aborted before start.";
+            fire_transmit_cb(
+                TransmissionCallbackEvent::LOGGING,
+                LogLevel::DEBUG,
+                oss.str(),
+                0.0);
         }
 
         if (one_shot_.load(std::memory_order_acquire))
@@ -1692,18 +1652,14 @@ void WsprTransmitter::transmit()
 
             if (!sleepUntilAbsTightInterruptible(CLOCK_REALTIME, start_rt, spin_ns_))
             {
-                if (debug)
                 {
-                    {
-                        std::ostringstream oss;
-                        oss << "TX start aborted before window boundary."
-                        ;
-                        fire_transmit_cb(
-                            TransmissionCallbackEvent::LOGGING,
-                            LogLevel::ERROR,
-                            oss.str(),
-                            0.0);
-                    }
+                    std::ostringstream oss;
+                    oss << "TX start aborted before window boundary.";
+                    fire_transmit_cb(
+                        TransmissionCallbackEvent::LOGGING,
+                        LogLevel::DEBUG,
+                        oss.str(),
+                        0.0);
                 }
 
                 if (one_shot_.load(std::memory_order_acquire))
@@ -1714,7 +1670,6 @@ void WsprTransmitter::transmit()
                 return;
             }
 
-            if (debug)
             {
                 struct timespec now_rt{};
                 clock_gettime(CLOCK_REALTIME, &now_rt);
@@ -1726,14 +1681,13 @@ void WsprTransmitter::transmit()
                 {
                     std::ostringstream oss;
                     oss
-                    << "TX start realtime = "
-                    << std::setw(2) << std::setfill('0') << tm_rt.tm_hour << ":"
-                    << std::setw(2) << std::setfill('0') << tm_rt.tm_min << ":"
-                    << std::setw(2) << std::setfill('0') << tm_rt.tm_sec << "."
-                    << std::setw(6) << std::setfill('0') << usec
-                    << std::setfill(' ')
-                    << "Z"
-                    ;
+                        << "TX start realtime = "
+                        << std::setw(2) << std::setfill('0') << tm_rt.tm_hour << ":"
+                        << std::setw(2) << std::setfill('0') << tm_rt.tm_min << ":"
+                        << std::setw(2) << std::setfill('0') << tm_rt.tm_sec << "."
+                        << std::setw(6) << std::setfill('0') << usec
+                        << std::setfill(' ')
+                        << "Z";
                     fire_transmit_cb(
                         TransmissionCallbackEvent::LOGGING,
                         LogLevel::DEBUG,
@@ -1759,20 +1713,14 @@ void WsprTransmitter::transmit()
 
         if (::mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
         {
-            if (debug)
-            {
-                {
-                    std::ostringstream oss;
-                    oss << "mlockall failed: "
-                    << std::strerror(errno)
-                    ;
-                    fire_transmit_cb(
-                        TransmissionCallbackEvent::LOGGING,
-                        LogLevel::ERROR,
-                        oss.str(),
-                        0.0);
-                }
-            }
+            std::ostringstream oss;
+            oss << "mlockall failed: "
+                << std::strerror(errno);
+            fire_transmit_cb(
+                TransmissionCallbackEvent::LOGGING,
+                LogLevel::DEBUG,
+                oss.str(),
+                0.0);
         }
 
         int i = 0;
@@ -1794,7 +1742,6 @@ void WsprTransmitter::transmit()
                     break;
                 }
 
-                if (debug)
                 {
                     struct timespec now{};
                     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1808,22 +1755,16 @@ void WsprTransmitter::transmit()
                         {
                             std::ostringstream oss;
                             oss << "Symbol overrun: "
-                            << late_ns / 1e6
-                            << " ms late"
-                            ;
+                                << late_ns / 1e6
+                                << " ms late";
                             fire_transmit_cb(
                                 TransmissionCallbackEvent::LOGGING,
-                                LogLevel::ERROR,
+                                LogLevel::DEBUG,
                                 oss.str(),
                                 0.0);
                         }
                     }
                 }
-            }
-            else if (debug)
-            {
-                // Still compute the target so debug output can reference it.
-                (void)target;
             }
             if (shouldStop())
             {
@@ -1890,7 +1831,7 @@ void WsprTransmitter::dma_cleanup()
         return;
     }
 
-    disable_hardware_sequence(false);
+    disable_hardware_sequence();
 
     access_bus_address(CM_GP0DIV_BUS) = dma_config_.orig_gp0div;
     access_bus_address(CM_GP0CTL_BUS) = dma_config_.orig_gp0ctl;
@@ -1953,19 +1894,15 @@ void WsprTransmitter::thread_entry()
 
         if (aff_ret != 0)
         {
-            if (debug)
             {
-                {
-                    std::ostringstream oss;
-                    oss << "thread_entry(): failed to set CPU affinity: "
-                    << std::strerror(aff_ret)
-                    ;
-                    fire_transmit_cb(
-                        TransmissionCallbackEvent::LOGGING,
-                        LogLevel::ERROR,
-                        oss.str(),
-                        0.0);
-                }
+                std::ostringstream oss;
+                oss << "thread_entry(): failed to set CPU affinity: "
+                    << std::strerror(aff_ret);
+                fire_transmit_cb(
+                    TransmissionCallbackEvent::LOGGING,
+                    LogLevel::DEBUG,
+                    oss.str(),
+                    0.0);
             }
         }
     }
@@ -2088,7 +2025,7 @@ void WsprTransmitter::get_plld()
     {
         {
             std::ostringstream oss;
-            oss << "Error: Invalid PLLD frequency; defaulting to 500 MHz" ;
+            oss << "Error: Invalid PLLD frequency; defaulting to 500 MHz";
             fire_transmit_cb(
                 TransmissionCallbackEvent::LOGGING,
                 LogLevel::ERROR,
@@ -2211,13 +2148,13 @@ void WsprTransmitter::deallocate_memory_pool()
 // Disable DMA, PWM, then the output clock (in that order).
 // Centralizes the hardware shutdown sequence to avoid ordering drift across
 // call sites. This is safe to call multiple times.
-void WsprTransmitter::disable_hardware_sequence(bool verbose)
+void WsprTransmitter::disable_hardware_sequence()
 {
     const bool was_on =
         (state_.load(std::memory_order_acquire) ==
          State::TRANSMITTING);
 
-    if (verbose && debug && was_on && dma_config_.peripheral_base_virtual != nullptr)
+    if (was_on && dma_config_.peripheral_base_virtual != nullptr)
     {
         const std::uint32_t conblk =
             static_cast<std::uint32_t>(access_bus_address(DMA_BUS_BASE + 0x04));
@@ -2227,10 +2164,9 @@ void WsprTransmitter::disable_hardware_sequence(bool verbose)
         {
             std::ostringstream oss;
             oss << "DMA before off: CS=0x"
-            << std::hex << cs
-            << " CONBLK_AD=0x" << conblk
-            << std::dec
-            ;
+                << std::hex << cs
+                << " CONBLK_AD=0x" << conblk
+                << std::dec;
             fire_transmit_cb(
                 TransmissionCallbackEvent::LOGGING,
                 LogLevel::DEBUG,
@@ -2320,7 +2256,7 @@ void WsprTransmitter::transmit_on()
 void WsprTransmitter::transmit_off()
 {
     stop_watchdog();
-    disable_hardware_sequence(true);
+    disable_hardware_sequence();
 }
 
 /**
@@ -2373,21 +2309,18 @@ void WsprTransmitter::transmit_symbol(
             // If DMA isn't advancing, do not deadlock forever.
             if (waited_us >= kMaxWaitUs)
             {
-                if (debug)
-                {
                     {
                         std::ostringstream oss;
                         oss << "DMA appears stuck at CONBLK_AD=0x"
-                        << std::hex << cur << std::dec
-                        << ", forcing stop to avoid deadlock."
-                        ;
+                            << std::hex << cur << std::dec
+                            << ", forcing stop to avoid deadlock.";
                         fire_transmit_cb(
                             TransmissionCallbackEvent::LOGGING,
-                            LogLevel::ERROR,
+                            LogLevel::DEBUG,
                             oss.str(),
                             0.0);
                     }
-                }
+
                 stop_requested_.store(true, std::memory_order_release);
                 stop_cv_.notify_all();
                 return false;
@@ -2409,7 +2342,7 @@ void WsprTransmitter::transmit_symbol(
     const bool is_tone = (tsym == 0.0);
     const int f0_idx = static_cast<int>(sym_num) * 2;
     const int f1_idx = f0_idx + 1;
-    
+
     const std::int64_t pwm_clocks_per_iter =
         static_cast<std::int64_t>(PWM_CLOCKS_PER_ITER_NOMINAL);
 
@@ -2462,7 +2395,6 @@ void WsprTransmitter::transmit_symbol(
     const std::int64_t n_pwmclk_per_sym =
         static_cast<std::int64_t>(std::llround(pwm_sample_hz * tsym));
 
-    if (debug)
     {
         const int total_symbols =
             static_cast<int>(trans_params_.symbols.size());
@@ -2797,20 +2729,20 @@ void WsprTransmitter::setup_dma()
         {
             if (e.code().value() == ETIMEDOUT)
             {
-                if (debug)
-                    {
-                        std::ostringstream oss;
-                        oss << attempts
+                {
+                    std::ostringstream oss;
+                    oss << attempts
                         << ") allocating memory pool, retrying.";
-                        fire_transmit_cb(
-                            TransmissionCallbackEvent::LOGGING,
-                            LogLevel::ERROR,
-                            oss.str(),
-                            0.0);
-                    }
+                    fire_transmit_cb(
+                        TransmissionCallbackEvent::LOGGING,
+                        LogLevel::DEBUG,
+                        oss.str(),
+                        0.0);
+                }
 
                 // A timeout, let's retry
                 if (++attempts >= kMaxAttempts)
+                    // TODO:  Move this to a logging event?
                     throw std::runtime_error(
                         "Mailbox::setup_dma() Too many mailbox timeouts, "
                         "giving up");
@@ -2863,35 +2795,31 @@ void WsprTransmitter::setup_dma()
             "setup_dma(): PWM clock computed out of range (bad divisor/readback).");
     }
 
-    if (debug)
-        {
-            std::ostringstream oss;
-            oss << "PWM div reg=0x" << std::hex << div_reg << std::dec
+    {
+        std::ostringstream oss;
+        oss << "PWM div reg=0x" << std::hex << div_reg << std::dec
             << " divisor=" << divisor
             << " pwm_clock_init_=" << std::fixed << std::setprecision(3)
-            << pwm_clock_init_
-            ;
-            fire_transmit_cb(
-                TransmissionCallbackEvent::LOGGING,
-                LogLevel::ERROR,
-                oss.str(),
-                0.0);
-        }
+            << pwm_clock_init_;
+        fire_transmit_cb(
+            TransmissionCallbackEvent::LOGGING,
+            LogLevel::DEBUG,
+            oss.str(),
+            0.0);
+    }
 
-    if (debug)
-        {
-            std::ostringstream oss;
-            oss << "Actual PWM clock = "
+    {
+        std::ostringstream oss;
+        oss << "Actual PWM clock = "
             << std::fixed << std::setprecision(0)
             << pwm_clock_init_
-            << " Hz"
-            ;
-            fire_transmit_cb(
-                TransmissionCallbackEvent::LOGGING,
-                LogLevel::ERROR,
-                oss.str(),
-                0.0);
-        }
+            << " Hz";
+        fire_transmit_cb(
+            TransmissionCallbackEvent::LOGGING,
+            LogLevel::DEBUG,
+            oss.str(),
+            0.0);
+    }
 }
 
 /**
@@ -2922,7 +2850,7 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
     {
         center_freq_actual =
             dma_config_.plld_clock_frequency / std::floor(div_lo) - 1.6 * trans_params_.tone_spacing;
-        if (debug && trans_params_.frequency != 0.0)
+        if (trans_params_.frequency != 0.0)
         {
             std::stringstream temp;
             temp << "Center frequency has been changed to "
@@ -2931,11 +2859,10 @@ void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
             {
                 std::ostringstream oss;
                 oss << temp.str()
-                << " because of hardware limitations."
-                ;
+                    << " because of hardware limitations.";
                 fire_transmit_cb(
                     TransmissionCallbackEvent::LOGGING,
-                    LogLevel::ERROR,
+                    LogLevel::DEBUG,
                     oss.str(),
                     0.0);
             }
