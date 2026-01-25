@@ -38,6 +38,9 @@
 #include <string>             // std::string
 
 // POSIX and system headers
+#include <errno.h>   // errno
+#include <sys/select.h> // select(), fd_set, FD_* macros
+#include <sys/time.h>   // struct timeval
 #include <termios.h> // tcgetattr(), tcsetattr()
 #include <unistd.h>  // STDIN_FILENO
 
@@ -636,7 +639,14 @@ static void wait_for_completion(bool isWspr)
 {
     using namespace std::chrono_literals;
 
-    while (true)
+    bool stop_requested = false;
+
+    // In tone mode, allow spacebar to request stop while the tone is running.
+    std::optional<TermiosGuard> tg;
+    if (!isWspr)
+        tg.emplace();
+
+    while (!g_terminate.load(std::memory_order_acquire))
     {
         const auto state = wsprTransmitter.getState();
 
@@ -680,9 +690,51 @@ static void wait_for_completion(bool isWspr)
             return;
         }
 
+        if (!isWspr && !stop_requested)
+        {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(STDIN_FILENO, &rfds);
+            FD_SET(sig_pipe_fds[0], &rfds);
+
+            const int nf = std::max(STDIN_FILENO, sig_pipe_fds[0]) + 1;
+
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 100000; // 100ms
+
+            const int sel_ret = ::select(nf, &rfds, nullptr, nullptr, &tv);
+            if (sel_ret < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                break;
+            }
+
+            if (sel_ret == 0)
+                continue;
+
+            if (FD_ISSET(sig_pipe_fds[0], &rfds))
+                break;
+
+            if (FD_ISSET(STDIN_FILENO, &rfds))
+            {
+                char c = '\0';
+                if (::read(STDIN_FILENO, &c, 1) == 1 && c == ' ')
+                {
+                    stop_requested = true;
+                    std::cout << "Stopping test tone." << std::endl;
+                    wsprTransmitter.requestStopTx();
+                }
+            }
+
+            continue;
+        }
+
         std::this_thread::sleep_for(100ms);
     }
 }
+
 
 /**
  * @brief Main entry point for the transmitter application
