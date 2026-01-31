@@ -402,6 +402,27 @@ public:
     void requestStopTx();
 
     /**
+     * @brief Request TX stop without joining the transmit thread.
+     *
+     * @details
+     *   Used by the watchdog thread to avoid blocking inside join() if the
+     *   transmit thread is slow to unwind. Recovery will later perform the
+     *   full shutdown sequence.
+     */
+    void requestStopTxNoJoin() noexcept;
+
+    /**
+     * @brief Forcefully reset the DMA/PWM/clock hardware sequence.
+     *
+     * @details
+     *   This is a best-effort, non-throwing path used for watchdog recovery.
+     *   It can be called even when the transmitter state machine believes TX
+     *   is stalled.
+     */
+    void force_dma_reset_sequence() noexcept;
+
+
+    /**
      * @brief Stop and wait for the scheduler/transmit threads.
      *
      * @details

@@ -755,6 +755,55 @@ void WsprTransmitter::requestStopTx()
     }
 }
 
+void WsprTransmitter::requestStopTxNoJoin() noexcept
+{
+    stop_requested_.store(true, std::memory_order_release);
+    stop_cv_.notify_all();
+}
+
+void WsprTransmitter::force_dma_reset_sequence() noexcept
+{
+    // Best effort. If we are not mapped yet, nothing to do.
+    if (dma_config_.peripheral_base_virtual == nullptr)
+    {
+        return;
+    }
+
+    try
+    {
+        // Stop DMA first so it cannot continue writing while we tear down
+        // PWM/clock. ABORT+RESET is used to break a stuck engine.
+        volatile DMAregs *DMA0 =
+            reinterpret_cast<volatile DMAregs *>(&(access_bus_address(DMA_BUS_BASE)));
+
+        DMA0->CS = (1u << 30) | (1u << 31); // ABORT | RESET
+        usleep(10);
+        DMA0->CS = 1u << 31; // RESET
+        DMA0->CONBLK_AD = 0;
+        DMA0->TI = 0;
+        DMA0->SOURCE_AD = 0;
+        DMA0->DEST_AD = 0;
+        DMA0->TXFR_LEN = 0;
+        DMA0->STRIDE = 0;
+        DMA0->NEXTCONBK = 0;
+
+        // Clear sticky error bits.
+        DMA0->DEBUG = 7u;
+
+        // Disable PWM next to stop DREQ generation and FIFO activity.
+        access_bus_address(PWM_BUS_BASE + 0x00) = 0; // Disable PWM
+        access_bus_address(PWM_BUS_BASE + 0x08) = 0; // Disable PWM DMA
+
+        // Finally, disable the output clock.
+        disable_clock();
+    }
+    catch (...)
+    {
+        // Never throw from watchdog recovery.
+    }
+}
+
+
 bool WsprTransmitter::watchdogFaulted() const noexcept
 {
     return watchdog_faulted_.load(std::memory_order_acquire);
@@ -966,6 +1015,10 @@ bool WsprTransmitter::recover_from_watchdog_fault_locked()
             oss.str(),
             0.0);
     }
+
+    // Force a hardware stop first. This ensures a stalled DMA engine
+    // cannot keep the TX thread busy while we are trying to shut down.
+    force_dma_reset_sequence();
 
     // Stop threads first, then tear down hardware state.
     shutdown();
@@ -1412,7 +1465,11 @@ void WsprTransmitter::start_watchdog()
                     }
 
                     // Request a cooperative stop so the transmit thread can unwind.
-                    requestStopTx();
+                    // Do not join here. The watchdog thread must never block
+                    // indefinitely inside join() during a fault. Request a cooperative
+                    // stop, then forcefully reset the DMA engine so TX can unwind.
+                    requestStopTxNoJoin();
+                    force_dma_reset_sequence();
 
                     // Optionally perform an automatic recovery cycle.
                     request_watchdog_recovery();
