@@ -1283,6 +1283,7 @@ void WsprTransmitter::start_watchdog()
         std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(),
         std::memory_order_release);
     watchdog_last_conblk_.store(0, std::memory_order_release);
+    watchdog_last_txfr_len_.store(0, std::memory_order_release);
 
     {
         std::ostringstream oss;
@@ -1315,6 +1316,57 @@ void WsprTransmitter::start_watchdog()
                     access_bus_address(DMA_BUS_BASE + 0x04));
             };
 
+            auto read_txfr_len = [this]() -> std::uint32_t
+            {
+                // DMA channel TXFR_LEN register (bus-mapped)
+                return static_cast<std::uint32_t>(
+                    access_bus_address(DMA_BUS_BASE + 0x14));
+            };
+
+            auto read_dma_debug = [this]() -> std::uint32_t
+            {
+                // DMA channel DEBUG register (bus-mapped)
+                return static_cast<std::uint32_t>(
+                    access_bus_address(DMA_BUS_BASE + 0x20));
+            };
+
+            auto read_dma_nextconbk = [this]() -> std::uint32_t
+            {
+                // DMA channel NEXTCONBK register (bus-mapped)
+                return static_cast<std::uint32_t>(
+                    access_bus_address(DMA_BUS_BASE + 0x1C));
+            };
+
+            auto read_pwm_ctl = [this]() -> std::uint32_t
+            {
+                return static_cast<std::uint32_t>(
+                    access_bus_address(PWM_BUS_BASE + 0x00));
+            };
+
+            auto read_pwm_sta = [this]() -> std::uint32_t
+            {
+                return static_cast<std::uint32_t>(
+                    access_bus_address(PWM_BUS_BASE + 0x04));
+            };
+
+            auto read_pwm_dmac = [this]() -> std::uint32_t
+            {
+                return static_cast<std::uint32_t>(
+                    access_bus_address(PWM_BUS_BASE + 0x08));
+            };
+
+            auto read_gp0ctl = [this]() -> std::uint32_t
+            {
+                return static_cast<std::uint32_t>(
+                    access_bus_address(CM_GP0CTL_BUS));
+            };
+
+            auto read_gp0div = [this]() -> std::uint32_t
+            {
+                return static_cast<std::uint32_t>(
+                    access_bus_address(CM_GP0DIV_BUS));
+            };
+
             auto read_cs = [this]() -> std::uint32_t
             {
                 // DMA channel CS register (bus-mapped)
@@ -1326,11 +1378,14 @@ void WsprTransmitter::start_watchdog()
             auto last_heartbeat = std::chrono::steady_clock::now();
             [[maybe_unused]]
             std::uint32_t last_heartbeat_conblk = 0;
+            [[maybe_unused]]
+            std::uint32_t last_heartbeat_txfr_len = 0;
 
             // Stall injection state (test-only).
             bool injected = false;
             std::optional<std::chrono::steady_clock::time_point> tx_start;
             std::uint32_t injected_conblk = 0;
+            std::uint32_t injected_txfr_len = 0;
 
             while (!watchdog_stop_.load(std::memory_order_acquire))
             {
@@ -1354,6 +1409,7 @@ void WsprTransmitter::start_watchdog()
                             .count(),
                         std::memory_order_release);
                     watchdog_last_conblk_.store(read_conblk(), std::memory_order_release);
+                    watchdog_last_txfr_len_.store(read_txfr_len(), std::memory_order_release);
                     std::this_thread::sleep_for(kPollPeriod);
                     continue;
                 }
@@ -1373,6 +1429,7 @@ void WsprTransmitter::start_watchdog()
                     {
                         injected = true;
                         injected_conblk = read_conblk();
+                        injected_txfr_len = read_txfr_len();
 
                         {
                             std::ostringstream oss;
@@ -1393,12 +1450,18 @@ void WsprTransmitter::start_watchdog()
                 }
 
                 const std::uint32_t conblk = injected ? injected_conblk : read_conblk();
-                const std::uint32_t last = watchdog_last_conblk_.load(std::memory_order_acquire);
+                const std::uint32_t txfr_len = injected ? injected_txfr_len : read_txfr_len();
 
-                if (conblk != last)
+                const std::uint32_t last_conblk =
+                    watchdog_last_conblk_.load(std::memory_order_acquire);
+                const std::uint32_t last_txfr_len =
+                    watchdog_last_txfr_len_.load(std::memory_order_acquire);
+
+                if (conblk != last_conblk || txfr_len != last_txfr_len)
                 {
                     const auto ts = std::chrono::steady_clock::now();
                     watchdog_last_conblk_.store(conblk, std::memory_order_release);
+                    watchdog_last_txfr_len_.store(txfr_len, std::memory_order_release);
                     watchdog_last_change_ns_.store(
                         std::chrono::duration_cast<
                             std::chrono::nanoseconds>(
@@ -1421,12 +1484,15 @@ void WsprTransmitter::start_watchdog()
                 {
                     if ((now_tp - last_heartbeat) >= kHeartbeatPeriod)
                     {
-                        const bool advancing = (conblk != last_heartbeat_conblk);
+                        const bool advancing =
+                            (conblk != last_heartbeat_conblk) ||
+                            (txfr_len != last_heartbeat_txfr_len);
                         {
                             std::ostringstream oss;
                             oss
                                 << "DMA watchdog: CS=0x" << std::hex << cs
                                 << " CONBLK_AD=0x" << conblk
+                                << " TXFR_LEN=0x" << txfr_len
                                 << std::dec
                                 << (advancing ? " advancing" : " not-advancing")
                                 << " stalled_for="
@@ -1443,6 +1509,7 @@ void WsprTransmitter::start_watchdog()
                         }
                         last_heartbeat = now_tp;
                         last_heartbeat_conblk = conblk;
+                        last_heartbeat_txfr_len = txfr_len;
                     }
                 }
 
@@ -1462,6 +1529,61 @@ void WsprTransmitter::start_watchdog()
                             LogLevel::ERROR,
                             oss.str(),
                             0.0);
+                    }
+
+
+                    // Emit diagnostics at DEBUG level to help distinguish a
+                    // true DMA hang from a false-positive stall indication.
+                    try
+                    {
+                        const std::uint32_t debug = read_dma_debug();
+                        const std::uint32_t nextconbk = read_dma_nextconbk();
+                        const std::uint32_t pwm_ctl = read_pwm_ctl();
+                        const std::uint32_t pwm_sta = read_pwm_sta();
+                        const std::uint32_t pwm_dmac = read_pwm_dmac();
+                        const std::uint32_t gp0ctl = read_gp0ctl();
+                        const std::uint32_t gp0div = read_gp0div();
+
+                        std::ostringstream flags;
+                        flags
+                            << ((cs & (1u << 0)) ? " ACTIVE" : "")
+                            << ((cs & (1u << 1)) ? " END" : "")
+                            << ((cs & (1u << 2)) ? " INT" : "")
+                            << ((cs & (1u << 3)) ? " DREQ" : "")
+                            << ((cs & (1u << 4)) ? " PAUSED" : "")
+                            << ((cs & (1u << 5)) ? " DREQ_STOPS" : "")
+                            << ((cs & (1u << 6)) ? " WAIT_OUTSTANDING" : "")
+                            << ((cs & (1u << 8)) ? " ERROR" : "")
+                            << ((cs & (1u << 9)) ? " WAIT_RESP" : "")
+                            << ((cs & (1u << 28)) ? " WIDE_BURSTS" : "")
+                            << ((cs & (1u << 29)) ? " DISDEBUG" : "")
+                            << ((cs & (1u << 30)) ? " ABORT" : "")
+                            << ((cs & (1u << 31)) ? " RESET" : "");
+
+                        std::ostringstream oss;
+                        oss
+                            << "DMA watchdog diagnostics:"
+                            << " CS=0x" << std::hex << cs
+                            << " (" << flags.str() << " )"
+                            << " CONBLK_AD=0x" << conblk
+                            << " NEXTCONBK=0x" << nextconbk
+                            << " TXFR_LEN=0x" << txfr_len
+                            << " DEBUG=0x" << debug
+                            << " PWM_CTL=0x" << pwm_ctl
+                            << " PWM_STA=0x" << pwm_sta
+                            << " PWM_DMAC=0x" << pwm_dmac
+                            << " GP0CTL=0x" << gp0ctl
+                            << " GP0DIV=0x" << gp0div
+                            << std::dec;
+                        fire_transmit_cb(
+                            TransmissionCallbackEvent::LOGGING,
+                            LogLevel::DEBUG,
+                            oss.str(),
+                            0.0);
+                    }
+                    catch (...)
+                    {
+                        // Never throw from watchdog recovery.
                     }
 
                     // Request a cooperative stop so the transmit thread can unwind.

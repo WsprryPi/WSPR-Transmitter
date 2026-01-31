@@ -644,6 +644,15 @@ private:
     std::atomic<std::uint32_t> watchdog_last_conblk_{0};
 
     /**
+     * @brief Last observed DMA transfer length.
+     *
+     * @details
+     *   Used by the watchdog as a secondary progress indicator since some
+     *   DMA control block rings may legitimately keep CONBLK_AD constant.
+     */
+    std::atomic<std::uint32_t> watchdog_last_txfr_len_{0};
+
+    /**
      * @brief Timestamp of the last DMA control block change.
      *
      * @details
