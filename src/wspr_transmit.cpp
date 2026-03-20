@@ -342,6 +342,8 @@ WsprTransmitter::TransmissionScheduler::nextEvent() const
 
 void WsprTransmitter::TransmissionScheduler::run()
 {
+    std::chrono::system_clock::time_point last_when{};
+
     while (!stop_requested_.load(std::memory_order_acquire) &&
            !parent_->soft_off_.load(std::memory_order_acquire))
     {
@@ -352,6 +354,17 @@ void WsprTransmitter::TransmissionScheduler::run()
         }
 
         auto when = nextEvent();
+
+        // Never reuse the same WSPR window twice. This matters most for
+        // zero-frequency skip windows, which complete almost immediately at
+        // the boundary. Without remembering the last scheduled boundary, the
+        // scheduler can loop fast enough to compute the same window again and
+        // emit a second completion for the same slot.
+        if (last_when.time_since_epoch().count() != 0 &&
+            when <= last_when)
+        {
+            when = last_when + std::chrono::seconds(2 * 60);
+        }
 
         // Be conservative about late or ambiguous scheduling.
         //
@@ -448,6 +461,8 @@ void WsprTransmitter::TransmissionScheduler::run()
         parent_->tx_thread_ = std::thread(
             &WsprTransmitter::thread_entry,
             parent_);
+
+        last_when = when;
 
         if (parent_->one_shot_.load(std::memory_order_acquire))
         {
@@ -570,16 +585,42 @@ void WsprTransmitter::configure(
             trans_params_.frequency += dis(gen) * offset_freq;
     }
 
-    setup_dma();
+    if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
+    {
+        // A zero WSPR frequency designates an intentional skipped window.
+        // Do not initialize DMA or mailbox resources for this cycle.
+        scheduled_start_rt_ns_.store(0, std::memory_order_release);
+        state_.store(State::ENABLED, std::memory_order_release);
+        return;
+    }
 
-    dma_config_.plld_clock_frequency =
-        dma_config_.plld_nominal_freq * (1 - ppm / 1e6);
+    try
+    {
+        setup_dma();
 
-    double center_actual = trans_params_.frequency;
-    setup_dma_freq_table(center_actual);
+        dma_config_.plld_clock_frequency =
+            dma_config_.plld_nominal_freq * (1 - ppm / 1e6);
 
-    if (trans_params_.frequency != 0.0)
-        trans_params_.frequency = center_actual;
+        double center_actual = trans_params_.frequency;
+        setup_dma_freq_table(center_actual);
+
+        if (trans_params_.frequency != 0.0)
+            trans_params_.frequency = center_actual;
+
+        state_.store(State::ENABLED, std::memory_order_release);
+    }
+    catch (...)
+    {
+        try
+        {
+            shutdown();
+            dma_cleanup();
+        }
+        catch (...)
+        {
+        }
+        throw;
+    }
 }
 
 void WsprTransmitter::applyPpmCorrection(double ppm_new)
@@ -593,6 +634,11 @@ void WsprTransmitter::applyPpmCorrection(double ppm_new)
 
     dma_config_.plld_clock_frequency =
         dma_config_.plld_nominal_freq * (1.0 - ppm_new / 1e6);
+
+    if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
+    {
+        return;
+    }
 
     double center_actual = trans_params_.frequency;
     setup_dma_freq_table(center_actual);
@@ -630,6 +676,38 @@ void WsprTransmitter::clearSoftOff() noexcept
 void WsprTransmitter::startAsync()
 {
     stop_requested_.store(false, std::memory_order_release);
+
+    if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
+    {
+        // Intended skip window. Do not initialize DMA, but still let the
+        // normal scheduler/thread path advance to the scheduled window so the
+        // caller receives a completion event at the correct time.
+        const State prior = state_.load(std::memory_order_acquire);
+        if (prior == State::DISABLED || prior == State::COMPLETE ||
+            prior == State::CANCELLED)
+        {
+            state_.store(State::ENABLED, std::memory_order_release);
+        }
+
+        const bool immediate = transmit_now_.load(std::memory_order_acquire);
+        if (immediate)
+        {
+            scheduled_start_rt_ns_.store(0, std::memory_order_release);
+
+            std::lock_guard<std::mutex> lk(tx_thread_mtx_);
+            if (tx_thread_.joinable())
+            {
+                tx_thread_.join();
+            }
+
+            tx_thread_ = std::thread(&WsprTransmitter::thread_entry, this);
+        }
+        else
+        {
+            scheduler_.start();
+        }
+        return;
+    }
 
     // If the application has requested a soft-off, do not start scheduling.
     if (!trans_params_.is_tone && soft_off_.load(std::memory_order_acquire))
@@ -1279,8 +1357,9 @@ void WsprTransmitter::start_watchdog()
     }
 
     const auto now = std::chrono::steady_clock::now();
+    constexpr auto kStartupGrace = std::chrono::milliseconds(750);
     watchdog_last_change_ns_.store(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>((now + kStartupGrace).time_since_epoch()).count(),
         std::memory_order_release);
     watchdog_last_conblk_.store(0, std::memory_order_release);
     watchdog_last_txfr_len_.store(0, std::memory_order_release);
@@ -1717,16 +1796,38 @@ void WsprTransmitter::transmit()
 {
     if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
     {
-        fire_transmit_cb(TransmissionCallbackEvent::COMPLETE, LogLevel::INFO, "Skipping transmission (frequency = 0.0).", 0.0);
-
-        if (one_shot_.load(std::memory_order_acquire))
+        const std::int64_t start_rt_ns =
+            scheduled_start_rt_ns_.load(std::memory_order_acquire);
+        if (start_rt_ns != 0)
         {
-            const bool canceled = shouldStop();
+            struct timespec start_rt{};
+            start_rt.tv_sec = start_rt_ns / 1000000000LL;
+            start_rt.tv_nsec = static_cast<long>(start_rt_ns % 1000000000LL);
 
-            state_.store(canceled ? State::CANCELLED : State::COMPLETE,
-                         std::memory_order_release);
+            if (!sleepUntilAbsTightInterruptible(CLOCK_REALTIME, start_rt, spin_ns_))
+            {
+                const bool canceled = shouldStop();
+                state_.store(canceled ? State::CANCELLED : State::COMPLETE,
+                             std::memory_order_release);
+                fire_transmit_cb(canceled
+                                     ? TransmissionCallbackEvent::COMPLETE
+                                     : TransmissionCallbackEvent::SKIPPED,
+                                 LogLevel::INFO,
+                                 canceled ? "canceled" : "Skipping transmission",
+                                 0.0);
+                return;
+            }
         }
 
+        const bool canceled = shouldStop();
+        state_.store(canceled ? State::CANCELLED : State::COMPLETE,
+                     std::memory_order_release);
+        fire_transmit_cb(canceled
+                             ? TransmissionCallbackEvent::COMPLETE
+                             : TransmissionCallbackEvent::SKIPPED,
+                         LogLevel::INFO,
+                         canceled ? "canceled" : "Skipping transmission",
+                         0.0);
         return;
     }
 
@@ -1789,6 +1890,20 @@ void WsprTransmitter::transmit()
 
         transmit_on();
         TxOffGuard tx_guard(this);
+
+        if (!shouldStop())
+        {
+            transmit_symbol(
+                0,
+                0.0,
+                dummyBuf,
+                -1);
+
+            if (!shouldStop())
+            {
+                start_watchdog();
+            }
+        }
 
         while (!shouldStop())
         {
@@ -1903,7 +2018,26 @@ void WsprTransmitter::transmit()
         }
 
         int i = 0;
-        for (i = 0; i < symbol_count && !shouldStop(); ++i)
+        if (symbol_count > 0 && !shouldStop())
+        {
+            transmit_symbol(
+                static_cast<int>(trans_params_.symbols[0]),
+                symtime,
+                bufPtr,
+                0);
+
+            if (!shouldStop())
+            {
+                start_watchdog();
+                i = 1;
+            }
+            else
+            {
+                i = 1;
+            }
+        }
+
+        for (; i < symbol_count && !shouldStop(); ++i)
         {
             const int64_t offset_ns =
                 static_cast<int64_t>(
@@ -1911,37 +2045,31 @@ void WsprTransmitter::transmit()
 
             timespec target = add_ns(t0_ts, offset_ns);
 
-            // For i == 0, transmit_symbol() immediately follows the TX enable
-            // and timing anchor. Skipping the initial sleep avoids reporting a
-            // spurious overrun caused by normal loop overhead.
-            if (i != 0)
+            if (!sleepUntilAbsTightInterruptible(CLOCK_MONOTONIC, target, 200'000))
             {
-                if (!sleepUntilAbsTightInterruptible(CLOCK_MONOTONIC, target, 200'000))
+                break;
+            }
+
+            {
+                struct timespec now{};
+                clock_gettime(CLOCK_MONOTONIC, &now);
+
+                const int64_t late_ns =
+                    (now.tv_sec - target.tv_sec) * 1'000'000'000LL +
+                    (now.tv_nsec - target.tv_nsec);
+
+                if (late_ns > 1'000'000) // >1 ms late
                 {
-                    break;
-                }
-
-                {
-                    struct timespec now{};
-                    clock_gettime(CLOCK_MONOTONIC, &now);
-
-                    const int64_t late_ns =
-                        (now.tv_sec - target.tv_sec) * 1'000'000'000LL +
-                        (now.tv_nsec - target.tv_nsec);
-
-                    if (late_ns > 1'000'000) // >1 ms late
                     {
-                        {
-                            std::ostringstream oss;
-                            oss << "Symbol overrun: "
-                                << late_ns / 1e6
-                                << " ms late";
-                            fire_transmit_cb(
-                                TransmissionCallbackEvent::LOGGING,
-                                LogLevel::DEBUG,
-                                oss.str(),
-                                0.0);
-                        }
+                        std::ostringstream oss;
+                        oss << "Symbol overrun: "
+                            << late_ns / 1e6
+                            << " ms late";
+                        fire_transmit_cb(
+                            TransmissionCallbackEvent::LOGGING,
+                            LogLevel::DEBUG,
+                            oss.str(),
+                            0.0);
                     }
                 }
             }
@@ -2422,10 +2550,11 @@ void WsprTransmitter::transmit_on()
     // Apply clock control settings.
     access_bus_address(CM_GP0CTL_BUS) = temp;
 
-    // Set semaphore
+    // Set semaphore.
+    // Do not start the DMA watchdog here. On a cold start, the DMA engine can
+    // still be in its initial priming state at this point, which makes the
+    // watchdog falsely report a stall before the first symbol is queued.
     state_.store(State::TRANSMITTING, std::memory_order_release);
-
-    start_watchdog();
 }
 
 /**
