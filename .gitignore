@@ -38,3 +38,8 @@ build/
 *.exe
 *.out
 *.app
+
+# Node stuff
+node_modules/
+package.json
+package-lock.json
