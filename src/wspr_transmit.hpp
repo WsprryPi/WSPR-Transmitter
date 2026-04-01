@@ -34,8 +34,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -48,6 +48,30 @@
 
 // Project headers
 #include "wspr_message.hpp"
+
+class WsprTransmitBackend;
+class WsprRpiBackend;
+class IControllerBridge
+{
+public:
+    virtual ~IControllerBridge() = default;
+    virtual int backendStateValue() const noexcept = 0;
+    virtual void backendSetStateValue(int state) noexcept = 0;
+    virtual bool backendShouldStop() const noexcept = 0;
+    virtual void backendSignalStopRequest() noexcept = 0;
+    virtual void backendRequestStopTxNoJoin() noexcept = 0;
+    virtual bool backendWaitInterruptableFor(std::chrono::nanoseconds duration) = 0;
+    virtual void backendThrowIfStopRequested(const char *context) = 0;
+    virtual void backendFireTransmitCallback(int event,
+                                             int level,
+                                             const std::string &msg,
+                                             double value) = 0;
+    virtual bool backendRestartCurrentConfiguration() = 0;
+    virtual double backendFrequency() const noexcept = 0;
+    virtual double backendToneSpacing() const noexcept = 0;
+    virtual int backendPowerLevel() const noexcept = 0;
+    virtual std::size_t backendSymbolCount() const noexcept = 0;
+};
 
 /**
  * @class WsprTransmitter
@@ -70,7 +94,7 @@
  *   abstracts the complexities of hardware interaction, allowing higher-level
  *   code to transmit WSPR messages with minimal boilerplate.
  */
-class WsprTransmitter
+class WsprTransmitter : public IControllerBridge
 {
 public:
     /**
@@ -496,6 +520,35 @@ public:
      */
     void dumpParameters();
 
+    int backendStateValue() const noexcept override;
+
+    void backendSetStateValue(int state) noexcept override;
+
+    bool backendShouldStop() const noexcept override;
+
+    void backendSignalStopRequest() noexcept override;
+
+    void backendRequestStopTxNoJoin() noexcept override;
+
+    bool backendWaitInterruptableFor(std::chrono::nanoseconds duration) override;
+
+    void backendThrowIfStopRequested(const char *context) override;
+
+    void backendFireTransmitCallback(int event,
+                                     int level,
+                                     const std::string &msg,
+                                     double value) override;
+
+    bool backendRestartCurrentConfiguration() override;
+
+    double backendFrequency() const noexcept override;
+
+    double backendToneSpacing() const noexcept override;
+
+    int backendPowerLevel() const noexcept override;
+
+    std::size_t backendSymbolCount() const noexcept override;
+
 private:
     /**
      * @brief Start the DMA watchdog thread.
@@ -536,132 +589,6 @@ private:
     bool recover_from_watchdog_fault_locked();
 
     /**
-     * @brief Background thread used to monitor DMA progress.
-     *
-     * @details
-     *   This thread periodically checks the active DMA control block address
-     *   to detect stalls or lack of forward progress during transmission.
-     */
-    std::thread watchdog_thread_{};
-
-    /**
-     * @brief Stop flag for the watchdog thread.
-     *
-     * @details
-     *   When set to true, the watchdog thread will exit its monitoring loop
-     *   and terminate cleanly.
-     */
-    std::atomic<bool> watchdog_stop_{true};
-
-    /**
-     * @brief Latched watchdog fault indicator.
-     *
-     * @details
-     *   Set when the watchdog detects that the DMA engine has stopped making
-     *   forward progress. This flag remains set until cleared explicitly.
-     */
-    std::atomic<bool> watchdog_faulted_{false};
-
-    /**
-     * @brief Enable automatic watchdog recovery.
-     */
-    std::atomic<bool> watchdog_auto_recover_{true};
-
-    /**
-     * @brief Stop flag for the recovery worker thread.
-     */
-    std::atomic<bool> recovery_stop_{false};
-
-    /**
-     * @brief Indicates a recovery cycle has been requested.
-     */
-    std::atomic<bool> recovery_pending_{false};
-
-    /**
-     * @brief True while a recovery cycle is actively running.
-     */
-    std::atomic<bool> recovery_in_progress_{false};
-
-    /**
-     * @brief Rate limiting window for watchdog recovery.
-     */
-    static constexpr auto kRecoveryWindow = std::chrono::minutes(10);
-
-    /**
-     * @brief Maximum number of recoveries permitted within the window.
-     */
-    static constexpr std::size_t kMaxRecoveriesInWindow = 3;
-
-    /**
-     * @brief Minimum time between recovery attempts.
-     */
-    static constexpr auto kMinRecoveryInterval = std::chrono::seconds(30);
-
-    /**
-     * @brief Mutex guarding recovery rate limit state.
-     */
-    mutable std::mutex recovery_rate_mtx_{};
-
-    /**
-     * @brief Timestamps of recent recovery attempts.
-     */
-    std::deque<std::chrono::steady_clock::time_point> recovery_attempts_{};
-
-    /**
-     * @brief Next time a rate-limited recovery attempt may run.
-     */
-    std::chrono::steady_clock::time_point recovery_defer_until_{};
-
-    /**
-     * @brief State to restore after successful recovery.
-     */
-    State post_recovery_state_{State::ENABLED};
-
-    /**
-     * @brief Worker thread that performs DMA/PWM/clock recovery.
-     */
-    std::thread recovery_thread_{};
-
-    /**
-     * @brief Synchronization for the recovery worker wait loop.
-     */
-    std::mutex recovery_wait_mtx_;
-    std::condition_variable recovery_cv_;
-
-    /**
-     * @brief Guards the core recovery sequence against concurrent callers.
-     */
-    std::mutex recovery_mtx_;
-
-    /**
-     * @brief Last observed DMA control block address.
-     *
-     * @details
-     *   Used by the watchdog to determine whether the DMA engine is advancing
-     *   through the control block ring.
-     */
-    std::atomic<std::uint32_t> watchdog_last_conblk_{0};
-
-    /**
-     * @brief Last observed DMA transfer length.
-     *
-     * @details
-     *   Used by the watchdog as a secondary progress indicator since some
-     *   DMA control block rings may legitimately keep CONBLK_AD constant.
-     */
-    std::atomic<std::uint32_t> watchdog_last_txfr_len_{0};
-
-    /**
-     * @brief Timestamp of the last DMA control block change.
-     *
-     * @details
-     *   Stored as a steady-clock tick count representing when the watchdog
-     *   last observed progress in the DMA control block pointer.
-     */
-    std::atomic<std::chrono::steady_clock::time_point::rep>
-        watchdog_last_change_ns_{0};
-
-    /**
      * @brief CPU core affinity for the transmit thread.
      *
      * @details
@@ -669,15 +596,6 @@ private:
      *   reduce scheduling jitter during tight timing loops.
      */
     int tx_cpu_{0};
-
-    /**
-     * @brief CPU core affinity for the watchdog thread.
-     *
-     * @details
-     *   Separating the watchdog from the transmit core reduces interference
-     *   with real-time transmission timing.
-     */
-    int watchdog_cpu_{1};
 
     /**
      * @brief Busy-wait tail duration in nanoseconds.
@@ -846,58 +764,6 @@ private:
     std::mutex stop_mutex_;
 
     /**
-     * @brief Global DMA setup semaphore.
-     *
-     * Shows if setup_dma() has been run and not yet torn down.
-     */
-    bool dma_setup_done_{false};
-
-    /**
-     * @brief Holds the bus and virtual addresses for a physical memory page.
-     *
-     * This structure is used to store the mapping between the bus address
-     * (used by DMA/peripherals) and the virtual address (used by the
-     * application) of a single page of physical memory.
-     *
-     * @var PageInfo::b
-     *      The bus address of the physical memory page.
-     * @var PageInfo::v
-     *      The virtual address mapped to the physical memory page.
-     */
-    struct PageInfo
-    {
-        std::uintptr_t b; ///< Bus address.
-        void *v;          ///< Virtual address.
-    };
-
-    /**
-     * @brief Page information for the constant memory page.
-     *
-     * This global variable holds the bus and virtual addresses of the
-     * constant memory page, which is used to store fixed data required for DMA
-     * operations, such as the tuning words for frequency generation.
-     */
-    struct PageInfo const_page_;
-
-    /**
-     * @brief Page information for the DMA instruction page.
-     *
-     * This global variable holds the bus and virtual addresses of the DMA
-     * instruction page, where DMA control blocks (CBs) are stored. This page
-     * is used during the setup and operation of DMA transfers.
-     */
-    struct PageInfo instr_page_;
-
-    /**
-     * @brief Array of page information structures for DMA control blocks.
-     *
-     * This global array contains the bus and virtual addresses for each page
-     * used in the DMA instruction chain. It holds 1024 entries, corresponding
-     * to the 1024 DMA control blocks used for managing data transfers.
-     */
-    struct PageInfo instructions_[1024];
-
-    /**
      * @brief Random frequency offset for standard WSPR transmissions.
      *
      * This constant defines the range, in Hertz, for random frequency offsets
@@ -929,124 +795,6 @@ private:
      *       the actual symbol duration.
      */
     static constexpr double WSPR_SYMTIME = 8192.0 / 12000.0;
-
-    /**
-     * @brief Actual PWM clock frequency used for symbol timing.
-     *
-     * This field holds the measured PWM clock rate (in Hz) read back from the
-     * hardware after configuring the clock divisor. It ensures precise symbol
-     * durations across platforms.
-     *
-     * @details
-     *   Calculated as:
-     *   pwm_clock_init_ = plld_clock_frequency / divisor
-     *   where `divisor` is read from the PWM clock divider register. Used in
-     *   `transmit_symbol()` to convert the desired symbol time (`tsym`) into
-     *   clock ticks.
-     */
-    double pwm_clock_init_{0};
-
-    /**
-     * @brief Bus base address for GPIO peripheral registers.
-     *
-     * @details
-     *   Base bus address used to access GPIO function select, set, clear,
-     *   and level registers through the peripheral mapping.
-     */
-    static constexpr uint32_t GPIO_BUS_BASE = 0x7E200000;
-
-    /**
-     * @brief Bus address of the GPCLK0 control register.
-     *
-     * @details
-     *   Used to enable, disable, and configure the GPCLK0 clock source
-     *   driving the PWM hardware.
-     */
-    static constexpr uint32_t CM_GP0CTL_BUS = 0x7E101070;
-
-    /**
-     * @brief Bus address of the GPCLK0 divider register.
-     *
-     * @details
-     *   Holds the integer and fractional divider controlling the effective
-     *   GPCLK0 output frequency.
-     */
-    static constexpr uint32_t CM_GP0DIV_BUS = 0x7E101074;
-
-    /**
-     * @brief Bus address of the GPIO pads control register (GPIO 0-27).
-     *
-     * @details
-     *   Controls drive strength, slew rate, and hysteresis for GPIO pins
-     *   used by the transmitter.
-     */
-    static constexpr uint32_t PADS_GPIO_0_27_BUS = 0x7E10002C;
-
-    /**
-     * @brief Bus base address for clock manager registers.
-     *
-     * @details
-     *   Base address for the clock control and divider registers used to
-     *   configure GPCLK and other peripheral clocks.
-     */
-    static constexpr uint32_t CLK_BUS_BASE = 0x7E101000;
-
-    /**
-     * @brief Bus base address for DMA controller registers.
-     *
-     * @details
-     *   Used to configure and control the DMA engine responsible for
-     *   feeding PWM data during transmission.
-     */
-    static constexpr uint32_t DMA_BUS_BASE = 0x7E007000;
-
-    /**
-     * @brief Bus base address for PWM controller registers.
-     *
-     * @details
-     *   Used to configure PWM channels, FIFOs, and ranges for DMA-driven RF
-     *   output.
-     */
-    static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
-
-    //
-    // This constant controls how many PWM "clocks" worth of work we try
-    // to cover per inner-loop iteration in transmit_symbol().
-    //
-    // On 32-bit builds, the per-iteration overhead of updating DMA control
-    // blocks is much higher, and a small nominal value can stretch a
-    // 110-second WSPR frame into multiple minutes. Use a larger chunk size
-    // on 32-bit to keep runtime bounded.
-    //
-    // The symbol timing math is still driven by n_pwmclk_per_sym, so this
-    // only changes how frequently we patch the DMA ring.
-#if INTPTR_MAX == INT32_MAX
-    static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 50000;
-#else
-    static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
-#endif
-
-    /**
-     * @brief Validate the nominal PWM clocks per iteration.
-     *
-     * @details
-     *   Ensures at compile time that the configured nominal number of PWM
-     *   clocks per transmit iteration is valid and non-zero.
-     */
-    static_assert(
-        PWM_CLOCKS_PER_ITER_NOMINAL > 0,
-        "PWM_CLOCKS_PER_ITER_NOMINAL must be non-zero.");
-
-    /**
-     * @brief GPIO drive strength lookup table.
-     *
-     * @details
-     *   Maps a drive-strength index to the corresponding GPIO drive current
-     *   in milliamps. The index is written into the pads control register
-     *   to select the desired drive capability.
-     */
-    static inline constexpr std::array<int, 8> DRIVE_STRENGTH_TABLE = {
-        2, 4, 6, 8, 10, 12, 14, 16};
 
     /**
      * @struct WsprTransmissionParams
@@ -1120,15 +868,6 @@ private:
         double tone_spacing;
 
         /**
-         * @brief DMA tuning table frequencies in Hz.
-         *
-         * @details
-         *   This table is populated during configuration and used by the
-         *   transmit loop to drive frequency changes with precise timing.
-         */
-        std::vector<double> dma_table_freq;
-
-        /**
          * @brief Enable randomized in-band frequency offset.
          */
         bool use_offset;
@@ -1147,7 +886,6 @@ private:
               power(0),
               symtime(0.0),
               tone_spacing(0.0),
-              dma_table_freq(1024, 0.0),
               use_offset(false)
         {
         }
@@ -1161,285 +899,6 @@ private:
      *   used by the scheduler and transmit thread.
      */
     WsprTransmissionParams trans_params_;
-
-    /**
-     * @struct DMAConfig
-     * @brief Holds DMA and clock configuration state.
-     *
-     * @details
-     *   This structure stores derived clock frequencies and snapshots of
-     *   hardware register state that must be preserved and restored when
-     *   enabling or disabling DMA-driven transmission.
-     */
-    struct DMAConfig
-    {
-        /**
-         * @brief Nominal PLLD frequency in Hz.
-         *
-         * @details
-         *   Base PLLD frequency before any runtime correction or divisor
-         *   adjustments are applied.
-         */
-        double plld_nominal_freq;
-
-        /**
-         * @brief Effective PLLD clock frequency in Hz.
-         *
-         * @details
-         *   Actual PLLD frequency after applying PPM correction and divider
-         *   configuration.
-         */
-        double plld_clock_frequency;
-
-        /**
-         * @brief Virtual base pointer for mapped peripheral registers.
-         *
-         * @details
-         *   Points to the memory-mapped peripheral region used to access
-         *   GPIO, PWM, DMA, and clock registers.
-         */
-        volatile uint8_t *peripheral_base_virtual;
-
-        /**
-         * @brief Saved GPCLK0 control register value.
-         */
-        uint32_t orig_gp0ctl;
-
-        /**
-         * @brief Saved GPCLK0 divider register value.
-         */
-        uint32_t orig_gp0div;
-
-        /**
-         * @brief Saved PWM control register value.
-         */
-        uint32_t orig_pwm_ctl;
-
-        /**
-         * @brief Saved PWM status register value.
-         */
-        uint32_t orig_pwm_sta;
-
-        /**
-         * @brief Saved PWM range register for channel 1.
-         */
-        uint32_t orig_pwm_rng1;
-
-        /**
-         * @brief Saved PWM range register for channel 2.
-         */
-        uint32_t orig_pwm_rng2;
-
-        /**
-         * @brief Saved PWM FIFO configuration register value.
-         */
-        uint32_t orig_pwm_fifocfg;
-
-        /**
-         * @brief Construct with default nominal values.
-         *
-         * @details
-         *   Initializes the nominal PLLD frequency and clears all saved
-         *   register snapshots.
-         */
-        DMAConfig()
-            : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
-              plld_clock_frequency(plld_nominal_freq),
-              peripheral_base_virtual(nullptr),
-              orig_gp0ctl(0),
-              orig_gp0div(0),
-              orig_pwm_ctl(0),
-              orig_pwm_sta(0),
-              orig_pwm_rng1(0),
-              orig_pwm_rng2(0),
-              orig_pwm_fifocfg(0)
-        {
-        }
-    };
-
-    /**
-     * @brief DMA and clock configuration instance.
-     *
-     * @details
-     *   Holds the active DMA and clock configuration for the current
-     *   transmitter instance.
-     */
-    DMAConfig dma_config_;
-
-    /**
-     * @struct MailboxStruct
-     * @brief Tracks mailbox-managed memory pool state.
-     *
-     * @details
-     *   This structure records the handle and addressing information for
-     *   memory allocated through the Raspberry Pi mailbox interface. The
-     *   memory pool is used to back DMA control blocks and constant data
-     *   required during transmission.
-     */
-    struct MailboxStruct
-    {
-        /**
-         * @brief Mailbox allocation handle.
-         *
-         * @details
-         *   Identifier returned by the mailbox interface when allocating
-         *   contiguous GPU memory.
-         */
-        uint32_t mem_ref = 0;
-
-        /**
-         * @brief Bus address of the allocated memory pool.
-         */
-        std::uintptr_t bus_addr = 0;
-
-        /**
-         * @brief Virtual address of the mapped memory pool.
-         *
-         * @details
-         *   Used by the application to access mailbox-allocated memory.
-         */
-        volatile uint8_t *virt_addr = nullptr;
-
-        /**
-         * @brief Total size of the allocated memory pool in bytes.
-         */
-        unsigned pool_size = 0;
-
-        /**
-         * @brief Number of pages allocated in the pool.
-         */
-        unsigned pool_cnt = 0;
-    };
-
-    /**
-     * @brief Mailbox memory pool instance.
-     *
-     * @details
-     *   Holds the active mailbox allocation used by the transmitter.
-     */
-    MailboxStruct mailbox_struct_;
-
-    /**
-     * @struct CB
-     * @brief DMA control block structure.
-     *
-     * @details
-     *   Represents a single DMA control block as consumed by the BCM DMA
-     *   engine. Fields correspond directly to the hardware-defined control
-     *   block layout and must not be reordered.
-     */
-    struct CB
-    {
-        /** @brief Transfer information flags. */
-        volatile unsigned int TI;
-
-        /** @brief Source bus address. */
-        volatile unsigned int SOURCE_AD;
-
-        /** @brief Destination bus address. */
-        volatile unsigned int DEST_AD;
-
-        /** @brief Transfer length and 2D stride control. */
-        volatile unsigned int TXFR_LEN;
-
-        /** @brief 2D stride configuration. */
-        volatile unsigned int STRIDE;
-
-        /** @brief Bus address of the next control block. */
-        volatile unsigned int NEXTCONBK;
-
-        /** @brief Reserved field, must be zero. */
-        volatile unsigned int RES1;
-
-        /** @brief Reserved field, must be zero. */
-        volatile unsigned int RES2;
-    };
-
-    /**
-     * @struct GPCTL
-     * @brief GPCLK control register bitfield layout.
-     *
-     * @details
-     *   Maps directly onto the GPCLK control register. Bit widths and
-     *   ordering must match the hardware specification exactly.
-     */
-    struct GPCTL
-    {
-        /** @brief Clock source selection. */
-        uint32_t SRC : 4;
-
-        /** @brief Clock enable. */
-        uint32_t ENAB : 1;
-
-        /** @brief Kill clock output. */
-        uint32_t KILL : 1;
-
-        /** @brief Reserved bit. */
-        uint32_t : 1;
-
-        /** @brief Clock busy status. */
-        uint32_t BUSY : 1;
-
-        /** @brief Output invert control. */
-        uint32_t FLIP : 1;
-
-        /** @brief Clock MASH filter setting. */
-        uint32_t MASH : 2;
-
-        /** @brief Reserved bits. */
-        uint32_t : 13;
-
-        /** @brief Write password field. */
-        uint32_t PASSWD : 8;
-    };
-
-    /**
-     * @brief Compile-time validation of GPCTL layout size.
-     *
-     * @details
-     *   Ensures the GPCTL bitfield maps to a single 32-bit register.
-     */
-    static_assert(
-        sizeof(GPCTL) == 4,
-        "GPCTL must be exactly 32 bits.");
-
-    /**
-     * @struct DMAregs
-     * @brief DMA channel register layout.
-     *
-     * @details
-     *   Represents the memory-mapped registers for a single DMA channel.
-     *   Used to control and monitor DMA engine operation.
-     */
-    struct DMAregs
-    {
-        /** @brief Control and status register. */
-        volatile unsigned int CS;
-
-        /** @brief Current control block address register. */
-        volatile unsigned int CONBLK_AD;
-
-        /** @brief Transfer information mirror register. */
-        volatile unsigned int TI;
-
-        /** @brief Source address mirror register. */
-        volatile unsigned int SOURCE_AD;
-
-        /** @brief Destination address mirror register. */
-        volatile unsigned int DEST_AD;
-
-        /** @brief Transfer length mirror register. */
-        volatile unsigned int TXFR_LEN;
-
-        /** @brief 2D stride mirror register. */
-        volatile unsigned int STRIDE;
-
-        /** @brief Next control block address mirror register. */
-        volatile unsigned int NEXTCONBK;
-
-        /** @brief Debug register. */
-        volatile unsigned int DEBUG;
-    };
 
     /**
      * @brief Invoke the configured transmission callback.
@@ -1500,7 +959,7 @@ private:
      * @param level Power level index.
      * @return Output power in milliwatts.
      */
-    constexpr int get_gpio_power_mw(int level);
+    int get_gpio_power_mw(int level);
 
     /**
      * @brief Convert milliwatts to dBm.
@@ -1520,82 +979,6 @@ private:
      * @param bus_addr Bus address of the register.
      * @return Reference to the mapped register value.
      */
-    inline volatile int &access_bus_address(std::uintptr_t bus_addr);
-
-    /**
-     * @brief Set a bit in a peripheral register.
-     *
-     * @param base Bus base address of the register.
-     * @param bit Bit index to set.
-     */
-    inline void set_bit_bus_address(std::uintptr_t base, unsigned int bit);
-
-    /**
-     * @brief Clear a bit in a peripheral register.
-     *
-     * @param base Bus base address of the register.
-     * @param bit Bit index to clear.
-     */
-    inline void clear_bit_bus_address(std::uintptr_t base, unsigned int bit);
-
-    /**
-     * @brief Read PLLD configuration and derive clock parameters.
-     *
-     * @details
-     *   Queries the hardware PLLD configuration and populates internal
-     *   frequency values used for PWM and DMA timing calculations.
-     */
-    void get_plld();
-
-    /**
-     * @brief Allocate a mailbox-managed memory pool.
-     *
-     * @details
-     *   Requests contiguous physical memory via the mailbox interface for
-     *   use by DMA control blocks and constant data pages.
-     *
-     * @param numpages Number of memory pages to allocate.
-     */
-    void allocate_memory_pool(unsigned numpages);
-
-    /**
-     * @brief Acquire a physical memory page from the pool.
-     *
-     * @details
-     *   Retrieves one page of memory from the mailbox pool and returns both
-     *   its virtual and bus addresses.
-     *
-     * @param vAddr Output pointer to receive the virtual address.
-     * @param bAddr Output pointer to receive the bus address.
-     */
-    void get_real_mem_page_from_pool(void **vAddr, void **bAddr);
-
-    /**
-     * @brief Release the mailbox-managed memory pool.
-     *
-     * @details
-     *   Frees all memory previously allocated via the mailbox interface and
-     *   clears associated tracking state.
-     */
-    void deallocate_memory_pool();
-
-    /**
-     * @brief Disable transmitter hardware in a controlled sequence.
-     *
-     * @details
-     *   Shuts down DMA, PWM, and clock outputs while restoring any modified
-     *   register state. The sequence ensures hardware is left in a safe state.
-     */
-    void disable_hardware_sequence();
-
-    /**
-     * @brief Disable the output clock driving the PWM hardware.
-     *
-     * @details
-     *   Stops the GPCLK source used for RF generation.
-     */
-    void disable_clock();
-
     /**
      * @brief Enable RF output for transmission.
      *
@@ -1656,31 +1039,8 @@ private:
      * @param instr_page Reference to the instruction page mapping.
      * @param instructions Array of instruction page mappings.
      */
-    void create_dma_pages(
-        PageInfo &const_page,
-        PageInfo &instr_page,
-        PageInfo instructions[]);
-
-    /**
-     * @brief Initialize DMA and related hardware.
-     *
-     * @details
-     *   Configures DMA channels, control blocks, PWM, and clock routing
-     *   required for DMA-driven RF generation.
-     */
     void setup_dma();
 
-    /**
-     * @brief Build the DMA frequency table.
-     *
-     * @details
-     *   Populates the tuning-word frequency table based on the configured
-     *   center frequency and PPM correction. The realized center frequency
-     *   after hardware quantization is returned to the caller.
-     *
-     * @param center_freq_actual Output value for the realized center
-     *        frequency in Hz.
-     */
     void setup_dma_freq_table(double &center_freq_actual);
 
     /**
@@ -1799,6 +1159,11 @@ private:
      *   Manages window-based transmission timing for message mode.
      */
     TransmissionScheduler scheduler_{this};
+
+    /**
+     * @brief Pi-specific transmission backend.
+     */
+    std::unique_ptr<WsprTransmitBackend> backend_;
 };
 
 /**
