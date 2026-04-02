@@ -1,7 +1,6 @@
 /**
  * @file wspr_transmit.cpp
- * @brief A class to encapsulate configuration and DMA‑driven transmission of
- *        WSPR signals.
+ * @brief Controller/facade implementation for configured WSPR transmission.
  *
  * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
@@ -419,11 +418,10 @@ void WsprTransmitter::configure(
     {
         prepareTransmissionBackend();
 
-        double center_actual = trans_params_.frequency;
-        configureTransmissionBackend(center_actual);
+        const auto configure_result = configureTransmissionBackend();
 
         if (trans_params_.frequency != 0.0)
-            trans_params_.frequency = center_actual;
+            trans_params_.frequency = configure_result.applied_frequency_hz;
 
         state_.store(State::ENABLED, std::memory_order_release);
     }
@@ -455,10 +453,9 @@ void WsprTransmitter::applyPpmCorrection(double ppm_new)
         return;
     }
 
-    double center_actual = trans_params_.frequency;
-    configureTransmissionBackend(center_actual);
+    const auto configure_result = configureTransmissionBackend();
     if (trans_params_.frequency != 0.0)
-        trans_params_.frequency = center_actual;
+        trans_params_.frequency = configure_result.applied_frequency_hz;
 }
 
 void WsprTransmitter::setThreadScheduling(int policy, int priority)
@@ -1434,9 +1431,9 @@ void WsprTransmitter::prepareTransmissionBackend()
     backend_->prepareTransmission();
 }
 
-void WsprTransmitter::configureTransmissionBackend(double &center_freq_actual)
+WsprTransmissionConfigureResult WsprTransmitter::configureTransmissionBackend()
 {
-    backend_->configureTransmission(buildTransmissionPlan(), center_freq_actual);
+    return backend_->configureTransmission(buildTransmissionPlan());
 }
 
 void WsprTransmitter::beginTransmissionOutput()

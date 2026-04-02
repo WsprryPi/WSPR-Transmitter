@@ -1,3 +1,28 @@
+/**
+ * @file wspr_transmit_backend_rpi.cpp
+ * @brief Raspberry Pi DMA/PWM/mailbox WSPR backend implementation.
+ *
+ * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #include "wspr_transmit_backend_rpi.hpp"
 
 #include <algorithm>
@@ -199,10 +224,10 @@ void WsprRpiBackend::prepareTransmission()
     setup_dma();
 }
 
-void WsprRpiBackend::configureTransmission(const WsprTransmissionPlan &plan,
-                                           double &center_freq_actual)
+WsprTransmissionConfigureResult WsprRpiBackend::configureTransmission(
+    const WsprTransmissionPlan &plan)
 {
-    setup_dma_freq_table(plan, center_freq_actual);
+    return setup_dma_freq_table(plan);
 }
 
 void WsprRpiBackend::cleanupTransmission()
@@ -1625,9 +1650,12 @@ void WsprRpiBackend::setup_dma()
     }
 }
 
-void WsprRpiBackend::setup_dma_freq_table(const WsprTransmissionPlan &plan,
-                                          double &center_freq_actual)
+WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
+    const WsprTransmissionPlan &plan)
 {
+    WsprTransmissionConfigureResult result{};
+    result.applied_frequency_hz = plan.frequency_hz;
+
     double div_lo = bit_trunc(
                         dma_config_.plld_clock_frequency /
                             (plan.frequency_hz - 1.5 * plan.tone_spacing_hz),
@@ -1640,14 +1668,14 @@ void WsprRpiBackend::setup_dma_freq_table(const WsprTransmissionPlan &plan,
 
     if (std::floor(div_lo) != std::floor(div_hi))
     {
-        center_freq_actual =
+        result.applied_frequency_hz =
             dma_config_.plld_clock_frequency / std::floor(div_lo) -
             1.6 * plan.tone_spacing_hz;
         if (plan.frequency_hz != 0.0)
         {
             std::stringstream temp;
             temp << "Center frequency has been changed to "
-                 << WsprTransmitter::formatFrequencyMHz(center_freq_actual)
+                 << WsprTransmitter::formatFrequencyMHz(result.applied_frequency_hz)
                  << " MHz";
             std::ostringstream oss;
             oss << temp.str()
@@ -1660,7 +1688,7 @@ void WsprRpiBackend::setup_dma_freq_table(const WsprTransmissionPlan &plan,
         }
     }
 
-    double tone0_freq = center_freq_actual - 1.5 * plan.tone_spacing_hz;
+    double tone0_freq = result.applied_frequency_hz - 1.5 * plan.tone_spacing_hz;
     std::vector<std::uint32_t> tuning_word(1024);
 
     for (int i = 0; i < 8; i++)
@@ -1692,4 +1720,6 @@ void WsprRpiBackend::setup_dma_freq_table(const WsprTransmissionPlan &plan,
             assert((tuning_word[i] & (~0xFFFu)) == (tuning_word[i + 1] & (~0xFFFu)));
         }
     }
+
+    return result;
 }

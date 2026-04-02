@@ -1,3 +1,28 @@
+/**
+ * @file wspr_transmit_backend_rpi.hpp
+ * @brief Raspberry Pi DMA/PWM/mailbox WSPR transmission backend.
+ *
+ * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 #ifndef WSPR_TRANSMIT_BACKEND_RPI_HPP
 #define WSPR_TRANSMIT_BACKEND_RPI_HPP
 
@@ -14,32 +39,142 @@
 #include "wspr_transmit_backend.hpp"
 #include "wspr_transmit.hpp"
 
+/**
+ * @class WsprRpiBackend
+ * @brief Raspberry Pi implementation of the generic transmission backend.
+ *
+ * @details
+ * This backend owns all Raspberry Pi-specific transmission details,
+ * including:
+ * - Broadcom mailbox allocation and peripheral mapping
+ * - DMA control-block construction and ring sequencing
+ * - PWM and GPCLK programming
+ * - GPIO drive-strength based output power control
+ * - DMA watchdog monitoring and backend-private recovery
+ *
+ * The controller provides transmission intent and timing decisions. This
+ * backend translates that intent into Raspberry Pi hardware actions while
+ * keeping DMA, mailbox, watchdog, and recovery state private.
+ */
 class WsprRpiBackend : public WsprTransmitBackend
 {
 public:
+    /**
+     * @brief Construct a Raspberry Pi backend bound to the controller bridge.
+     *
+     * @param owner Controller bridge used for state access, stop requests, and
+     *              callback forwarding.
+     */
     explicit WsprRpiBackend(IControllerBridge &owner);
+
+    /**
+     * @brief Destroy the backend and release backend-owned resources.
+     */
     ~WsprRpiBackend() override;
 
+    /**
+     * @brief Start the Raspberry Pi DMA watchdog.
+     */
     void startFaultMonitoring() override;
+
+    /**
+     * @brief Stop the Raspberry Pi DMA watchdog.
+     */
     void stopFaultMonitoring() override;
+
+    /**
+     * @brief Prepare DMA, mailbox, clock, and peripheral resources.
+     */
     void prepareTransmission() override;
-    void configureTransmission(const WsprTransmissionPlan &plan,
-                               double &center_freq_actual) override;
+
+    /**
+     * @brief Apply the requested transmission plan to Raspberry Pi hardware.
+     *
+     * @param plan Backend-neutral transmission snapshot.
+     * @return Applied configuration result including the actual RF center
+     *         frequency in hertz (Hz).
+     */
+    WsprTransmissionConfigureResult configureTransmission(
+        const WsprTransmissionPlan &plan) override;
+
+    /**
+     * @brief Tear down DMA, mailbox, PWM, and clock resources.
+     */
     void cleanupTransmission() override;
+
+    /**
+     * @brief Convert a drive-strength level into an estimated power value.
+     *
+     * @param level Drive-strength index.
+     * @return Estimated output power in milliwatts (mW).
+     */
     int getOutputPowerMilliwatts(int level) override;
+
+    /**
+     * @brief Enable Raspberry Pi RF output for the configured transmission.
+     *
+     * @param plan Backend-neutral transmission snapshot.
+     */
     void beginTransmissionOutput(const WsprTransmissionPlan &plan) override;
+
+    /**
+     * @brief Disable Raspberry Pi RF output.
+     */
     void endTransmissionOutput() override;
+
+    /**
+     * @brief Emit one symbol using the backend-private DMA ring.
+     *
+     * @param plan Backend-neutral transmission snapshot.
+     * @param sym_num Symbol value to emit.
+     * @param tsym Symbol duration in seconds.
+     * @param symbol_index Zero-based symbol index, or `-1` when not
+     *                     applicable.
+     */
     void emitSymbol(
         const WsprTransmissionPlan &plan,
         const std::uint32_t &sym_num,
         const double &tsym,
         int symbol_index) override;
+
+    /**
+     * @brief Perform a best-effort hardware reset of active transmission
+     *        output.
+     */
     void resetTransmissionOutput() noexcept override;
+
+    /**
+     * @brief Return whether the DMA watchdog has latched a fault.
+     */
     bool faulted() const noexcept override;
+
+    /**
+     * @brief Clear the latched DMA watchdog fault.
+     */
     void clearFault() noexcept override;
+
+    /**
+     * @brief Enable or disable automatic watchdog recovery.
+     *
+     * @param enable True to enable automatic recovery.
+     */
     void setAutoRecover(bool enable) noexcept override;
+
+    /**
+     * @brief Return whether automatic watchdog recovery is enabled.
+     */
     bool autoRecoverEnabled() const noexcept override;
+
+    /**
+     * @brief Attempt synchronous recovery from a latched watchdog fault.
+     *
+     * @return True if recovery succeeded, false otherwise.
+     */
     bool recoverFromFault() override;
+
+    /**
+     * @brief Return whether watchdog recovery is currently running.
+     */
     bool recoveryInProgress() const noexcept override;
 
 private:
@@ -118,8 +253,8 @@ private:
     void start_watchdog();
     void stop_watchdog();
     void setup_dma();
-    void setup_dma_freq_table(const WsprTransmissionPlan &plan,
-                              double &center_freq_actual);
+    WsprTransmissionConfigureResult setup_dma_freq_table(
+        const WsprTransmissionPlan &plan);
     void dma_cleanup();
     int get_gpio_power_mw(int level);
     void transmit_on(const WsprTransmissionPlan &plan);

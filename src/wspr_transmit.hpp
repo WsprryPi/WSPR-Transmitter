@@ -1,8 +1,6 @@
-
 /**
  * @file wspr_transmit.hpp
- * @brief A class to encapsulate configuration and DMA-driven transmission of
- *        WSPR signals.
+ * @brief Controller/facade API for configured WSPR transmission.
  *
  * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
@@ -72,24 +70,35 @@ public:
 
 /**
  * @class WsprTransmitter
- * @brief Encapsulates configuration and DMA-driven transmission of WSPR
- *        signals.
+ * @brief Controller/facade for configured WSPR transmission.
  *
  * @details
- *   The WsprTransmitter class provides a full interface for setting up and
- *   executing Weak Signal Propagation Reporter (WSPR) transmissions on a
- *   Raspberry Pi. It handles:
- *     - Configuration of RF frequency, power level, PPM calibration, and
- *       message parameters via configure().
- *     - Low-level mailbox allocation, peripheral memory mapping, and DMA/PWM
- *       initialization for precise symbol timing.
- *     - Start/stop of transmission loops (tone mode or symbol mode).
- *     - Dynamic updates of PPM correction and DMA frequency tables.
- *     - Safe teardown of DMA, PWM, and mailbox resources (idempotent).
+ *   `WsprTransmitter` owns the public API, configured transmission state,
+ *   scheduling policy, and transmit timing loop. Hardware-specific work is
+ *   delegated to an active `WsprTransmitBackend` implementation.
  *
- *   Designed for global instantiation and thread-safe operation, this class
- *   abstracts the complexities of hardware interaction, allowing higher-level
- *   code to transmit WSPR messages with minimal boilerplate.
+ *   Responsibilities of the controller include:
+ *   - Accepting configuration such as RF frequency in hertz (Hz), power
+ *     level, parts-per-million (PPM) correction, and optional WSPR message
+ *     fields.
+ *   - Building a backend-neutral `WsprTransmissionPlan` snapshot.
+ *   - Choosing when transmission starts and when each symbol is emitted.
+ *   - Managing scheduler, worker threads, stop requests, and high-level
+ *     transmission state.
+ *   - Forwarding logging and lifecycle callbacks.
+ *
+ *   Responsibilities intentionally left to the backend include:
+ *   - Hardware setup and teardown
+ *   - RF output enable/disable
+ *   - Platform-specific symbol emission
+ *   - Fault detection and recovery implementation
+ *
+ *   The controller's runtime lifecycle is:
+ *   1. `configure(...)`
+ *   2. `startAsync()`
+ *   3. Backend prepare/configure
+ *   4. Timed symbol emission through `emitSymbol(...)`
+ *   5. Output stop and cleanup on completion, cancellation, or fault
  */
 class WsprTransmitter : public IControllerBridge
 {
@@ -180,18 +189,6 @@ public:
      */
     WsprTransmitter &operator=(WsprTransmitter &&) = delete;
 
-    /**
-     * @brief Signature for user-provided transmission callbacks.
-     *
-     * This callback receives either a message string or a frequency value,
-     * allowing the user to handle both human-readable messages and numeric
-     * data.
-     *
-     * @param arg A variant containing either a std::string or a double value.
-     *            The string may carry a descriptive message, while the double
-     *            represents a frequency in Hz (or another unit depending
-     *            on context).
-     */
     /**
      * @brief Identifies which transmission callback event is being reported.
      */
@@ -956,7 +953,7 @@ private:
      */
     void prepareTransmissionBackend();
 
-    void configureTransmissionBackend(double &center_freq_actual);
+    WsprTransmissionConfigureResult configureTransmissionBackend();
 
     /**
      * @brief Entry point for the transmit worker thread.
