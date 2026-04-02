@@ -184,27 +184,81 @@ WsprRpiBackend::~WsprRpiBackend()
     stop_watchdog();
 }
 
-bool WsprRpiBackend::watchdogFaulted() const noexcept
+void WsprRpiBackend::startFaultMonitoring()
+{
+    start_watchdog();
+}
+
+void WsprRpiBackend::stopFaultMonitoring()
+{
+    stop_watchdog();
+}
+
+void WsprRpiBackend::prepareTransmission()
+{
+    setup_dma();
+}
+
+void WsprRpiBackend::configureTransmission(double &center_freq_actual)
+{
+    setup_dma_freq_table(center_freq_actual);
+}
+
+void WsprRpiBackend::cleanupTransmission()
+{
+    dma_cleanup();
+}
+
+int WsprRpiBackend::getOutputPowerMilliwatts(int level)
+{
+    return get_gpio_power_mw(level);
+}
+
+void WsprRpiBackend::beginTransmissionOutput()
+{
+    transmit_on();
+}
+
+void WsprRpiBackend::endTransmissionOutput()
+{
+    transmit_off();
+}
+
+void WsprRpiBackend::emitSymbol(
+    const std::uint32_t &sym_num,
+    const double &tsym,
+    std::uint32_t &bufPtr,
+    int symbol_index)
+{
+    transmit_symbol(sym_num, tsym, bufPtr, symbol_index);
+}
+
+void WsprRpiBackend::resetTransmissionOutput() noexcept
+{
+    force_dma_reset_sequence();
+}
+
+bool WsprRpiBackend::faulted() const noexcept
 {
     return watchdog_faulted_.load(std::memory_order_acquire);
 }
 
-void WsprRpiBackend::clearWatchdogFault() noexcept
+void WsprRpiBackend::clearFault() noexcept
 {
     watchdog_faulted_.store(false, std::memory_order_release);
 }
 
-void WsprRpiBackend::setWatchdogAutoRecover(bool enable) noexcept
+void WsprRpiBackend::setAutoRecover(bool enable) noexcept
 {
     watchdog_auto_recover_.store(enable, std::memory_order_release);
 }
 
-bool WsprRpiBackend::watchdogAutoRecoverEnabled() const noexcept
+bool WsprRpiBackend::autoRecoverEnabled() const noexcept
 {
     return watchdog_auto_recover_.load(std::memory_order_acquire);
 }
 
-bool WsprRpiBackend::recoverFromWatchdogFault()
+bool WsprRpiBackend::recoverFromFault()
 {
     std::lock_guard<std::mutex> lk(recovery_mtx_);
     return recover_from_watchdog_fault_locked();
@@ -247,8 +301,7 @@ void WsprRpiBackend::recovery_worker()
 
             if (watchdog_auto_recover_.load(std::memory_order_acquire) &&
                 watchdog_faulted_.load(std::memory_order_acquire) &&
-                (static_cast<WsprTransmitter::State>(owner_.backendStateValue()) ==
-                 WsprTransmitter::State::HUNG))
+                (owner_.backendStateValue() == WsprTransmitState::HUNG))
             {
                 std::lock_guard<std::mutex> rlk(recovery_rate_mtx_);
                 const auto now_tp = std::chrono::steady_clock::now();
@@ -338,13 +391,13 @@ bool WsprRpiBackend::recover_from_watchdog_fault_locked()
                     << "Watchdog recovery deferred (rate limited), "
                     << "retry in " << defer_ms << " ms.";
                 owner_.backendFireTransmitCallback(
-                    static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                    static_cast<int>(WsprTransmitter::LogLevel::ERROR),
+                    WsprTransmissionCallbackEvent::LOGGING,
+                    WsprTransmitLogLevel::ERROR,
                     oss.str(),
                     0.0);
             }
 
-            owner_.backendSetStateValue(static_cast<int>(WsprTransmitter::State::HUNG));
+            owner_.backendSetStateValue(WsprTransmitState::HUNG);
             return false;
         }
 
@@ -352,31 +405,30 @@ bool WsprRpiBackend::recover_from_watchdog_fault_locked()
         recovery_attempts_.push_back(now_tp);
     }
 
-    const WsprTransmitter::State prior_state =
-        static_cast<WsprTransmitter::State>(owner_.backendStateValue());
-    if (prior_state == WsprTransmitter::State::DISABLED)
+    const WsprTransmitState prior_state = owner_.backendStateValue();
+    if (prior_state == WsprTransmitState::DISABLED)
     {
-        post_recovery_state_ = static_cast<int>(WsprTransmitter::State::DISABLED);
+        post_recovery_state_ = WsprTransmitState::DISABLED;
     }
-    else if (prior_state == WsprTransmitter::State::COMPLETE ||
-             prior_state == WsprTransmitter::State::CANCELLED)
+    else if (prior_state == WsprTransmitState::COMPLETE ||
+             prior_state == WsprTransmitState::CANCELLED)
     {
-        post_recovery_state_ = static_cast<int>(prior_state);
+        post_recovery_state_ = prior_state;
     }
     else
     {
-        post_recovery_state_ = static_cast<int>(WsprTransmitter::State::ENABLED);
+        post_recovery_state_ = WsprTransmitState::ENABLED;
     }
 
     recovery_in_progress_.store(true, std::memory_order_release);
-    owner_.backendSetStateValue(static_cast<int>(WsprTransmitter::State::RECOVERING));
+    owner_.backendSetStateValue(WsprTransmitState::RECOVERING);
 
     {
         std::ostringstream oss;
         oss << "Attempting watchdog recovery.";
         owner_.backendFireTransmitCallback(
-            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-            static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
             oss.str(),
             0.0);
     }
@@ -386,21 +438,21 @@ bool WsprRpiBackend::recover_from_watchdog_fault_locked()
     try
     {
         owner_.backendRestartCurrentConfiguration();
-        clearWatchdogFault();
+        clearFault();
         owner_.backendSetStateValue(post_recovery_state_);
         recovery_in_progress_.store(false, std::memory_order_release);
     }
     catch (const std::exception &e)
     {
         recovery_in_progress_.store(false, std::memory_order_release);
-        owner_.backendSetStateValue(static_cast<int>(WsprTransmitter::State::HUNG));
+        owner_.backendSetStateValue(WsprTransmitState::HUNG);
         {
             std::ostringstream oss;
             oss << "Watchdog recovery failed: "
                 << e.what();
             owner_.backendFireTransmitCallback(
-                static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                static_cast<int>(WsprTransmitter::LogLevel::ERROR),
+                WsprTransmissionCallbackEvent::LOGGING,
+                WsprTransmitLogLevel::ERROR,
                 oss.str(),
                 0.0);
         }
@@ -411,8 +463,8 @@ bool WsprRpiBackend::recover_from_watchdog_fault_locked()
         std::ostringstream oss;
         oss << "Watchdog recovery complete.";
         owner_.backendFireTransmitCallback(
-            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-            static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
             oss.str(),
             0.0);
     }
@@ -429,8 +481,8 @@ void WsprRpiBackend::start_watchdog()
             std::ostringstream oss;
             oss << "Watchdog disabled (single CPU system).";
             owner_.backendFireTransmitCallback(
-                static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+                WsprTransmissionCallbackEvent::LOGGING,
+                WsprTransmitLogLevel::DEBUG,
                 oss.str(),
                 0.0);
         }
@@ -499,8 +551,8 @@ void WsprRpiBackend::start_watchdog()
         std::ostringstream oss;
         oss << "DMA watchdog started.";
         owner_.backendFireTransmitCallback(
-            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-            static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
             oss.str(),
             0.0);
     }
@@ -588,8 +640,7 @@ void WsprRpiBackend::start_watchdog()
 
             while (!watchdog_stop_.load(std::memory_order_acquire))
             {
-                if (static_cast<WsprTransmitter::State>(owner_.backendStateValue()) !=
-                    WsprTransmitter::State::TRANSMITTING)
+                if (owner_.backendStateValue() != WsprTransmitState::TRANSMITTING)
                 {
                     std::this_thread::sleep_for(kPollPeriod);
                     continue;
@@ -636,8 +687,8 @@ void WsprRpiBackend::start_watchdog()
                                    .count()
                             << " ms";
                         owner_.backendFireTransmitCallback(
-                            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                            static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+                            WsprTransmissionCallbackEvent::LOGGING,
+                            WsprTransmitLogLevel::DEBUG,
                             oss.str(),
                             0.0);
                     }
@@ -690,8 +741,8 @@ void WsprRpiBackend::start_watchdog()
                                .count()
                         << " ms";
                     owner_.backendFireTransmitCallback(
-                        static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                        static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+                        WsprTransmissionCallbackEvent::LOGGING,
+                        WsprTransmitLogLevel::DEBUG,
                         oss.str(),
                         0.0);
                     last_heartbeat = now_tp;
@@ -702,7 +753,7 @@ void WsprRpiBackend::start_watchdog()
                 if (stalled_for >= kStallTimeout)
                 {
                     watchdog_faulted_.store(true, std::memory_order_release);
-                    owner_.backendSetStateValue(static_cast<int>(WsprTransmitter::State::HUNG));
+                    owner_.backendSetStateValue(WsprTransmitState::HUNG);
 
                     {
                         std::ostringstream oss;
@@ -711,8 +762,8 @@ void WsprRpiBackend::start_watchdog()
                             << " CONBLK_AD=0x" << conblk
                             << std::dec;
                         owner_.backendFireTransmitCallback(
-                            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                            static_cast<int>(WsprTransmitter::LogLevel::ERROR),
+                            WsprTransmissionCallbackEvent::LOGGING,
+                            WsprTransmitLogLevel::ERROR,
                             oss.str(),
                             0.0);
                     }
@@ -759,8 +810,8 @@ void WsprRpiBackend::start_watchdog()
                             << " GP0DIV=0x" << gp0div
                             << std::dec;
                         owner_.backendFireTransmitCallback(
-                            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                            static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+                            WsprTransmissionCallbackEvent::LOGGING,
+                            WsprTransmitLogLevel::DEBUG,
                             oss.str(),
                             0.0);
                     }
@@ -797,8 +848,8 @@ void WsprRpiBackend::stop_watchdog()
         std::ostringstream oss;
         oss << "DMA watchdog stopped.";
         owner_.backendFireTransmitCallback(
-            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-            static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
             oss.str(),
             0.0);
     }
@@ -969,8 +1020,8 @@ void WsprRpiBackend::get_plld()
         std::ostringstream oss;
         oss << "Error: Invalid PLLD frequency; defaulting to 500 MHz";
         owner_.backendFireTransmitCallback(
-            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-            static_cast<int>(WsprTransmitter::LogLevel::ERROR),
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::ERROR,
             oss.str(),
             0.0);
         dma_config_.plld_nominal_freq = 500e6;
@@ -1050,8 +1101,7 @@ void WsprRpiBackend::deallocate_memory_pool()
 void WsprRpiBackend::disable_hardware_sequence()
 {
     const bool was_on =
-        (static_cast<WsprTransmitter::State>(owner_.backendStateValue()) ==
-         WsprTransmitter::State::TRANSMITTING);
+        (owner_.backendStateValue() == WsprTransmitState::TRANSMITTING);
 
     if (was_on && dma_config_.peripheral_base_virtual != nullptr)
     {
@@ -1066,8 +1116,8 @@ void WsprRpiBackend::disable_hardware_sequence()
             << " CONBLK_AD=0x" << conblk
             << std::dec;
         owner_.backendFireTransmitCallback(
-            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-            static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
             oss.str(),
             0.0);
     }
@@ -1076,7 +1126,7 @@ void WsprRpiBackend::disable_hardware_sequence()
     {
         if (!recovery_in_progress_.load(std::memory_order_acquire))
         {
-            owner_.backendSetStateValue(static_cast<int>(WsprTransmitter::State::ENABLED));
+            owner_.backendSetStateValue(WsprTransmitState::ENABLED);
         }
         return;
     }
@@ -1095,7 +1145,7 @@ void WsprRpiBackend::disable_clock()
 {
     if (!recovery_in_progress_.load(std::memory_order_acquire))
     {
-        owner_.backendSetStateValue(static_cast<int>(WsprTransmitter::State::ENABLED));
+        owner_.backendSetStateValue(WsprTransmitState::ENABLED);
     }
 
     if (dma_config_.peripheral_base_virtual == nullptr)
@@ -1118,7 +1168,7 @@ void WsprRpiBackend::transmit_on()
     std::memcpy(&temp, &setupword, sizeof(int));
 
     access_bus_address(CM_GP0CTL_BUS) = temp;
-    owner_.backendSetStateValue(static_cast<int>(WsprTransmitter::State::TRANSMITTING));
+    owner_.backendSetStateValue(WsprTransmitState::TRANSMITTING);
 }
 
 void WsprRpiBackend::transmit_off()
@@ -1168,8 +1218,8 @@ void WsprRpiBackend::transmit_symbol(
                     << std::hex << cur << std::dec
                     << ", forcing stop to avoid deadlock.";
                 owner_.backendFireTransmitCallback(
-                    static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                    static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+                    WsprTransmissionCallbackEvent::LOGGING,
+                    WsprTransmitLogLevel::DEBUG,
                     oss.str(),
                     0.0);
 
@@ -1258,8 +1308,8 @@ void WsprRpiBackend::transmit_symbol(
             << " pwm_clocks_per_iter=" << pwm_clocks_per_iter;
 
         owner_.backendFireTransmitCallback(
-                    static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                    static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+                    WsprTransmissionCallbackEvent::LOGGING,
+                    WsprTransmitLogLevel::DEBUG,
                     oss.str(),
                     0.0);
     }
@@ -1494,8 +1544,8 @@ void WsprRpiBackend::setup_dma()
                 oss << attempts
                     << ") allocating memory pool, retrying.";
                 owner_.backendFireTransmitCallback(
-                    static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                    static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+                    WsprTransmissionCallbackEvent::LOGGING,
+                    WsprTransmitLogLevel::DEBUG,
                     oss.str(),
                     0.0);
 
@@ -1551,8 +1601,8 @@ void WsprRpiBackend::setup_dma()
             << " pwm_clock_init_=" << std::fixed << std::setprecision(3)
             << pwm_clock_init_;
         owner_.backendFireTransmitCallback(
-            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-            static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
             oss.str(),
             0.0);
     }
@@ -1564,8 +1614,8 @@ void WsprRpiBackend::setup_dma()
             << pwm_clock_init_
             << " Hz";
         owner_.backendFireTransmitCallback(
-            static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-            static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
             oss.str(),
             0.0);
     }
@@ -1598,8 +1648,8 @@ void WsprRpiBackend::setup_dma_freq_table(double &center_freq_actual)
             oss << temp.str()
                 << " because of hardware limitations.";
             owner_.backendFireTransmitCallback(
-                static_cast<int>(WsprTransmitter::TransmissionCallbackEvent::LOGGING),
-                static_cast<int>(WsprTransmitter::LogLevel::DEBUG),
+                WsprTransmissionCallbackEvent::LOGGING,
+                WsprTransmitLogLevel::DEBUG,
                 oss.str(),
                 0.0);
         }

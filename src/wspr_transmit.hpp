@@ -48,6 +48,7 @@
 
 // Project headers
 #include "wspr_message.hpp"
+#include "wspr_transmit_types.hpp"
 
 class WsprTransmitBackend;
 class WsprRpiBackend;
@@ -55,15 +56,15 @@ class IControllerBridge
 {
 public:
     virtual ~IControllerBridge() = default;
-    virtual int backendStateValue() const noexcept = 0;
-    virtual void backendSetStateValue(int state) noexcept = 0;
+    virtual WsprTransmitState backendStateValue() const noexcept = 0;
+    virtual void backendSetStateValue(WsprTransmitState state) noexcept = 0;
     virtual bool backendShouldStop() const noexcept = 0;
     virtual void backendSignalStopRequest() noexcept = 0;
     virtual void backendRequestStopTxNoJoin() noexcept = 0;
     virtual bool backendWaitInterruptableFor(std::chrono::nanoseconds duration) = 0;
     virtual void backendThrowIfStopRequested(const char *context) = 0;
-    virtual void backendFireTransmitCallback(int event,
-                                             int level,
+    virtual void backendFireTransmitCallback(WsprTransmissionCallbackEvent event,
+                                             WsprTransmitLogLevel level,
                                              const std::string &msg,
                                              double value) = 0;
     virtual bool backendRestartCurrentConfiguration() = 0;
@@ -109,71 +110,18 @@ public:
      * - requestStopTx() never transitions to DISABLED.
      * - Stopping TX preserves hardware readiness.
      */
-    enum class State
-    {
-        /** @brief Not enabled to transmit. */
-        DISABLED,
+    using State = WsprTransmitState;
 
-        /** @brief Enabled to transmit and idle. */
-        ENABLED,
-
-        /** @brief Actively transmitting. */
-        TRANSMITTING,
-
-        /** @brief Recovering from a watchdog stall. */
-        RECOVERING,
-
-        /** @brief Transmission finished (one-shot or tone). */
-        COMPLETE,
-
-        /** @brief Transmission was cancelled by request. */
-        CANCELLED,
-
-        /** @brief Reserved for future fault handling. */
-        HUNG
-    };
-
-    /**
-     * @brief Convert a State to a constant string.
-     *
-     * @param state State value to convert.
-     * @return A constant C string describing the state.
-     */
     constexpr const char *stateToString(State state) noexcept
     {
-        switch (state)
-        {
-        case State::DISABLED:
-            return "DISABLED";
-        case State::ENABLED:
-            return "ENABLED";
-        case State::TRANSMITTING:
-            return "TRANSMITTING";
-        case State::RECOVERING:
-            return "RECOVERING";
-        case State::COMPLETE:
-            return "COMPLETE";
-        case State::CANCELLED:
-            return "CANCELLED";
-        case State::HUNG:
-            return "HUNG";
-        default:
-            return "UNKNOWN";
-        }
+        return wsprTransmitStateToString(state);
     }
 
     /**
      * @enum LogLevel
      * @brief Log level for callback messages.
      */
-    enum class LogLevel
-    {
-        DEBUG,
-        INFO,
-        WARN,
-        ERROR,
-        FATAL
-    };
+    using LogLevel = WsprTransmitLogLevel;
 
     /**
      * @brief Convert a State to a lowercase std::string.
@@ -251,13 +199,7 @@ public:
     /**
      * @brief Identifies which transmission callback event is being reported.
      */
-    enum class TransmissionCallbackEvent
-    {
-        STARTING,
-        COMPLETE,
-        SKIPPED,
-        LOGGING
-    };
+    using TransmissionCallbackEvent = WsprTransmissionCallbackEvent;
 
     /**
      * @brief Signature for user-provided transmission callback.
@@ -520,9 +462,9 @@ public:
      */
     void dumpParameters();
 
-    int backendStateValue() const noexcept override;
+    WsprTransmitState backendStateValue() const noexcept override;
 
-    void backendSetStateValue(int state) noexcept override;
+    void backendSetStateValue(WsprTransmitState state) noexcept override;
 
     bool backendShouldStop() const noexcept override;
 
@@ -534,8 +476,8 @@ public:
 
     void backendThrowIfStopRequested(const char *context) override;
 
-    void backendFireTransmitCallback(int event,
-                                     int level,
+    void backendFireTransmitCallback(WsprTransmissionCallbackEvent event,
+                                     WsprTransmitLogLevel level,
                                      const std::string &msg,
                                      double value) override;
 
@@ -550,24 +492,9 @@ public:
     std::size_t backendSymbolCount() const noexcept override;
 
 private:
-    /**
-     * @brief Start the DMA watchdog thread.
-     *
-     * @details
-     *   Launches the background watchdog that monitors DMA progress and
-     *   detects stalled or non-advancing control blocks during transmission.
-     *   This function is idempotent if the watchdog is already running.
-     */
-    void start_watchdog();
+    void startFaultMonitoring();
 
-    /**
-     * @brief Stop the DMA watchdog thread.
-     *
-     * @details
-     *   Requests the watchdog thread to stop and waits for it to exit
-     *   cleanly before returning.
-     */
-    void stop_watchdog();
+    void stopFaultMonitoring();
 
     /**
      * @brief Request a recovery cycle after a watchdog fault.
@@ -947,7 +874,7 @@ private:
      *   Tears down DMA state, restores hardware registers, and releases
      *   mailbox-allocated memory used during transmission.
      */
-    void dma_cleanup();
+    void cleanupTransmissionBackend();
 
     /**
      * @brief Convert a GPIO power level index to milliwatts.
@@ -959,7 +886,7 @@ private:
      * @param level Power level index.
      * @return Output power in milliwatts.
      */
-    int get_gpio_power_mw(int level);
+    int getOutputPowerMilliwatts(int level);
 
     /**
      * @brief Convert milliwatts to dBm.
@@ -985,7 +912,7 @@ private:
      * @details
      *   Activates clocks and GPIO routing required to begin emitting RF.
      */
-    void transmit_on();
+    void beginTransmissionOutput();
 
     /**
      * @brief Disable RF output after transmission.
@@ -993,7 +920,7 @@ private:
      * @details
      *   Turns off clocks and GPIO routing to stop RF emission cleanly.
      */
-    void transmit_off();
+    void endTransmissionOutput();
 
     /**
      * @brief Transmit work corresponding to a single WSPR symbol.
@@ -1009,7 +936,7 @@ private:
      * @param bufPtr Current DMA buffer pointer, updated as blocks advance.
      * @param symbol_index Optional symbol index override.
      */
-    void transmit_symbol(
+    void emitSymbol(
         const std::uint32_t &sym_num,
         const double &tsym,
         std::uint32_t &bufPtr,
@@ -1039,9 +966,9 @@ private:
      * @param instr_page Reference to the instruction page mapping.
      * @param instructions Array of instruction page mappings.
      */
-    void setup_dma();
+    void prepareTransmissionBackend();
 
-    void setup_dma_freq_table(double &center_freq_actual);
+    void configureTransmissionBackend(double &center_freq_actual);
 
     /**
      * @brief Entry point for the transmit worker thread.

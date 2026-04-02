@@ -454,15 +454,15 @@ void sig_handler(int)
  * @param frequency    Frequency in Hz; zero indicates no frequency.
  */
 void transmitter_cb(
-    WsprTransmitter::TransmissionCallbackEvent event,
-    WsprTransmitter::LogLevel level,
+    WsprTransmissionCallbackEvent event,
+    WsprTransmitLogLevel level,
     const std::string &msg,
     double value)
 {
 
     switch (event)
     {
-    case WsprTransmitter::TransmissionCallbackEvent::STARTING:
+    case WsprTransmissionCallbackEvent::STARTING:
     {
         const double frequency = value;
 
@@ -500,7 +500,7 @@ void transmitter_cb(
         }
         break;
     }
-    case WsprTransmitter::TransmissionCallbackEvent::COMPLETE:
+    case WsprTransmissionCallbackEvent::COMPLETE:
     {
         const double elapsed = value;
 
@@ -548,10 +548,10 @@ void transmitter_cb(
         g_end_cv.notify_one();
         break;
     }
-    case WsprTransmitter::TransmissionCallbackEvent::LOGGING:
+    case WsprTransmissionCallbackEvent::LOGGING:
     {
         std::ostream &base =
-            (level == WsprTransmitter::LogLevel::ERROR)
+            (level == WsprTransmitLogLevel::ERROR)
                 ? static_cast<std::ostream &>(std::cerr)
                 : static_cast<std::ostream &>(std::cout);
 
@@ -633,8 +633,8 @@ void configure_transmitter(bool isWspr)
     wsprTransmitter.setThreadScheduling(SCHED_FIFO, 50);
 
     wsprTransmitter.setTransmissionCallbacks(
-        [](WsprTransmitter::TransmissionCallbackEvent event,
-           WsprTransmitter::LogLevel level,
+        [](WsprTransmissionCallbackEvent event,
+           WsprTransmitLogLevel level,
            const std::string &msg,
            double value)
         {
@@ -681,8 +681,8 @@ static void wait_for_completion(bool isWspr)
     {
         const auto state = wsprTransmitter.getState();
 
-        if (state == WsprTransmitter::State::COMPLETE ||
-            state == WsprTransmitter::State::CANCELLED)
+        if (state == WsprTransmitState::COMPLETE ||
+            state == WsprTransmitState::CANCELLED)
         {
             std::cout
                 << log_tag
@@ -693,7 +693,7 @@ static void wait_for_completion(bool isWspr)
             return;
         }
 
-        if (state == WsprTransmitter::State::HUNG)
+        if (state == WsprTransmitState::HUNG)
         {
             std::cerr
                 << log_tag
@@ -704,7 +704,7 @@ static void wait_for_completion(bool isWspr)
             return;
         }
 
-        if (state == WsprTransmitter::State::RECOVERING)
+        if (state == WsprTransmitState::RECOVERING)
         {
             std::cerr
                 << log_tag
@@ -715,7 +715,7 @@ static void wait_for_completion(bool isWspr)
             return;
         }
 
-        if (state == WsprTransmitter::State::DISABLED)
+        if (state == WsprTransmitState::DISABLED)
         {
             std::cerr
                 << log_tag

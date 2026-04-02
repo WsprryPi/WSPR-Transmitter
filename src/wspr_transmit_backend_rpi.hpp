@@ -20,25 +20,25 @@ public:
     explicit WsprRpiBackend(IControllerBridge &owner);
     ~WsprRpiBackend() override;
 
-    void start_watchdog() override;
-    void stop_watchdog() override;
-    void setup_dma() override;
-    void setup_dma_freq_table(double &center_freq_actual) override;
-    void dma_cleanup() override;
-    int get_gpio_power_mw(int level) override;
-    void transmit_on() override;
-    void transmit_off() override;
-    void transmit_symbol(
+    void startFaultMonitoring() override;
+    void stopFaultMonitoring() override;
+    void prepareTransmission() override;
+    void configureTransmission(double &center_freq_actual) override;
+    void cleanupTransmission() override;
+    int getOutputPowerMilliwatts(int level) override;
+    void beginTransmissionOutput() override;
+    void endTransmissionOutput() override;
+    void emitSymbol(
         const std::uint32_t &sym_num,
         const double &tsym,
         std::uint32_t &bufPtr,
         int symbol_index) override;
-    void force_dma_reset_sequence() noexcept override;
-    bool watchdogFaulted() const noexcept override;
-    void clearWatchdogFault() noexcept override;
-    void setWatchdogAutoRecover(bool enable) noexcept override;
-    bool watchdogAutoRecoverEnabled() const noexcept override;
-    bool recoverFromWatchdogFault() override;
+    void resetTransmissionOutput() noexcept override;
+    bool faulted() const noexcept override;
+    void clearFault() noexcept override;
+    void setAutoRecover(bool enable) noexcept override;
+    bool autoRecoverEnabled() const noexcept override;
+    bool recoverFromFault() override;
     bool recoveryInProgress() const noexcept override;
 
 private:
@@ -114,6 +114,20 @@ private:
     inline volatile int &access_bus_address(std::uintptr_t bus_addr);
     inline void set_bit_bus_address(std::uintptr_t base, unsigned int bit);
     inline void clear_bit_bus_address(std::uintptr_t base, unsigned int bit);
+    void start_watchdog();
+    void stop_watchdog();
+    void setup_dma();
+    void setup_dma_freq_table(double &center_freq_actual);
+    void dma_cleanup();
+    int get_gpio_power_mw(int level);
+    void transmit_on();
+    void transmit_off();
+    void transmit_symbol(
+        const std::uint32_t &sym_num,
+        const double &tsym,
+        std::uint32_t &bufPtr,
+        int symbol_index);
+    void force_dma_reset_sequence() noexcept;
     void get_plld();
     void allocate_memory_pool(unsigned numpages);
     void get_real_mem_page_from_pool(void **vAddr, void **bAddr);
@@ -139,7 +153,7 @@ private:
     mutable std::mutex recovery_rate_mtx_{};
     std::deque<std::chrono::steady_clock::time_point> recovery_attempts_{};
     std::chrono::steady_clock::time_point recovery_defer_until_{};
-    int post_recovery_state_{static_cast<int>(WsprTransmitter::State::ENABLED)};
+    WsprTransmitState post_recovery_state_{WsprTransmitState::ENABLED};
 
     std::thread recovery_thread_{};
     std::mutex recovery_wait_mtx_;

@@ -328,7 +328,7 @@ WsprTransmitter::WsprTransmitter()
 WsprTransmitter::~WsprTransmitter()
 {
     shutdown();
-    dma_cleanup();
+    cleanupTransmissionBackend();
 }
 
 void WsprTransmitter::setTransmissionCallbacks(TransmissionCallback cb)
@@ -365,7 +365,7 @@ void WsprTransmitter::configure(
     }
 
     shutdown();
-    dma_cleanup();
+    cleanupTransmissionBackend();
 
     stop_requested_.store(false);
 
@@ -417,10 +417,10 @@ void WsprTransmitter::configure(
 
     try
     {
-        setup_dma();
+        prepareTransmissionBackend();
 
         double center_actual = trans_params_.frequency;
-        setup_dma_freq_table(center_actual);
+        configureTransmissionBackend(center_actual);
 
         if (trans_params_.frequency != 0.0)
             trans_params_.frequency = center_actual;
@@ -432,7 +432,7 @@ void WsprTransmitter::configure(
         try
         {
             shutdown();
-            dma_cleanup();
+            cleanupTransmissionBackend();
         }
         catch (...)
         {
@@ -456,7 +456,7 @@ void WsprTransmitter::applyPpmCorrection(double ppm_new)
     }
 
     double center_actual = trans_params_.frequency;
-    setup_dma_freq_table(center_actual);
+    configureTransmissionBackend(center_actual);
     if (trans_params_.frequency != 0.0)
         trans_params_.frequency = center_actual;
 }
@@ -617,7 +617,7 @@ void WsprTransmitter::shutdown()
         }
     }
 
-    stop_watchdog();
+    stopFaultMonitoring();
 
     // Return to DISABLED when the transmitter is shut down, unless a
     // watchdog recovery is in progress or the transmitter is latched HUNG.
@@ -656,38 +656,38 @@ void WsprTransmitter::requestStopTxNoJoin() noexcept
 
 void WsprTransmitter::force_dma_reset_sequence() noexcept
 {
-    backend_->force_dma_reset_sequence();
+    backend_->resetTransmissionOutput();
 }
 
 
 bool WsprTransmitter::watchdogFaulted() const noexcept
 {
-    return backend_->watchdogFaulted();
+    return backend_->faulted();
 }
 
 void WsprTransmitter::clearWatchdogFault() noexcept
 {
-    backend_->clearWatchdogFault();
+    backend_->clearFault();
 }
 
 void WsprTransmitter::setWatchdogAutoRecover(bool enable) noexcept
 {
-    backend_->setWatchdogAutoRecover(enable);
+    backend_->setAutoRecover(enable);
 }
 
 bool WsprTransmitter::watchdogAutoRecoverEnabled() const noexcept
 {
-    return backend_->watchdogAutoRecoverEnabled();
+    return backend_->autoRecoverEnabled();
 }
 
 bool WsprTransmitter::recoverFromWatchdogFault()
 {
-    return backend_->recoverFromWatchdogFault();
+    return backend_->recoverFromFault();
 }
 
 void WsprTransmitter::request_watchdog_recovery() noexcept
 {
-    backend_->recoverFromWatchdogFault();
+    backend_->recoverFromFault();
 }
 
 void WsprTransmitter::recovery_worker()
@@ -696,16 +696,16 @@ void WsprTransmitter::recovery_worker()
 
 bool WsprTransmitter::recover_from_watchdog_fault_locked()
 {
-    return backend_->recoverFromWatchdogFault();
+    return backend_->recoverFromFault();
 }
 
 void WsprTransmitter::stopAndJoin()
 {
     shutdown();
-    dma_cleanup();
+    cleanupTransmissionBackend();
 }
 
-WsprTransmitter::State WsprTransmitter::getState() const noexcept
+WsprTransmitState WsprTransmitter::getState() const noexcept
 {
     return state_.load(std::memory_order_acquire);
 }
@@ -746,7 +746,7 @@ void WsprTransmitter::dumpParameters()
     oss << "GPIO Power:        "
         << std::fixed
         << std::setprecision(1)
-        << convert_mw_dbm(get_gpio_power_mw(trans_params_.power))
+        << convert_mw_dbm(getOutputPowerMilliwatts(trans_params_.power))
         << " dBm";
     log_line(oss.str());
     oss.str("");
@@ -829,14 +829,14 @@ inline void WsprTransmitter::fire_transmit_cb(
     }
 }
 
-int WsprTransmitter::backendStateValue() const noexcept
+WsprTransmitState WsprTransmitter::backendStateValue() const noexcept
 {
-    return static_cast<int>(state_.load(std::memory_order_acquire));
+    return state_.load(std::memory_order_acquire);
 }
 
-void WsprTransmitter::backendSetStateValue(int state) noexcept
+void WsprTransmitter::backendSetStateValue(WsprTransmitState state) noexcept
 {
-    state_.store(static_cast<State>(state), std::memory_order_release);
+    state_.store(state, std::memory_order_release);
 }
 
 bool WsprTransmitter::backendShouldStop() const noexcept
@@ -866,15 +866,12 @@ void WsprTransmitter::backendThrowIfStopRequested(const char *context)
 }
 
 void WsprTransmitter::backendFireTransmitCallback(
-    int event,
-    int level,
+    WsprTransmissionCallbackEvent event,
+    WsprTransmitLogLevel level,
     const std::string &msg,
     double value)
 {
-    fire_transmit_cb(static_cast<TransmissionCallbackEvent>(event),
-                     static_cast<LogLevel>(level),
-                     msg,
-                     value);
+    fire_transmit_cb(event, level, msg, value);
 }
 
 bool WsprTransmitter::backendRestartCurrentConfiguration()
@@ -888,7 +885,7 @@ bool WsprTransmitter::backendRestartCurrentConfiguration()
     const bool use_offset = trans_params_.use_offset;
 
     shutdown();
-    dma_cleanup();
+    cleanupTransmissionBackend();
     configure(frequency, power, ppm, call_sign, grid_square, power_dbm,
               use_offset);
     startAsync();
@@ -927,14 +924,14 @@ bool WsprTransmitter::shouldStop() const noexcept
     return false;
 }
 
-void WsprTransmitter::start_watchdog()
+void WsprTransmitter::startFaultMonitoring()
 {
-    backend_->start_watchdog();
+    backend_->startFaultMonitoring();
 }
 
-void WsprTransmitter::stop_watchdog()
+void WsprTransmitter::stopFaultMonitoring()
 {
-    backend_->stop_watchdog();
+    backend_->stopFaultMonitoring();
 }
 
 bool WsprTransmitter::waitInterruptableFor(std::chrono::nanoseconds duration)
@@ -1101,7 +1098,7 @@ void WsprTransmitter::transmit()
         {
             if (enabled && self)
             {
-                self->transmit_off();
+                self->endTransmissionOutput();
             }
         }
     };
@@ -1118,12 +1115,12 @@ void WsprTransmitter::transmit()
 
         const auto t0_chrono = std::chrono::steady_clock::now();
 
-        transmit_on();
+        beginTransmissionOutput();
         TxOffGuard tx_guard(this);
 
         if (!shouldStop())
         {
-            transmit_symbol(
+            emitSymbol(
                 0,
                 0.0,
                 dummyBuf,
@@ -1131,13 +1128,13 @@ void WsprTransmitter::transmit()
 
             if (!shouldStop())
             {
-                start_watchdog();
+                startFaultMonitoring();
             }
         }
 
         while (!shouldStop())
         {
-            transmit_symbol(
+            emitSymbol(
                 0,
                 0.0,
                 dummyBuf,
@@ -1146,7 +1143,7 @@ void WsprTransmitter::transmit()
 
         const auto t_end_chrono = std::chrono::steady_clock::now();
 
-        transmit_off();
+        endTransmissionOutput();
         tx_guard.dismiss();
 
         const bool canceled = shouldStop();
@@ -1227,7 +1224,7 @@ void WsprTransmitter::transmit()
         const int symbol_count = static_cast<int>(trans_params_.symbols.size());
         const double symtime = trans_params_.symtime;
 
-        transmit_on();
+        beginTransmissionOutput();
         TxOffGuard tx_guard(this);
 
         // Anchor symbol timing to monotonic clock AFTER TX is enabled.
@@ -1250,7 +1247,7 @@ void WsprTransmitter::transmit()
         int i = 0;
         if (symbol_count > 0 && !shouldStop())
         {
-            transmit_symbol(
+            emitSymbol(
                 static_cast<int>(trans_params_.symbols[0]),
                 symtime,
                 bufPtr,
@@ -1258,7 +1255,7 @@ void WsprTransmitter::transmit()
 
             if (!shouldStop())
             {
-                start_watchdog();
+                startFaultMonitoring();
                 i = 1;
             }
             else
@@ -1308,7 +1305,7 @@ void WsprTransmitter::transmit()
                 break;
             }
 
-            transmit_symbol(
+            emitSymbol(
                 static_cast<int>(trans_params_.symbols[i]),
                 symtime,
                 bufPtr,
@@ -1335,7 +1332,7 @@ void WsprTransmitter::transmit()
         // shutdown overhead should not be counted against the on-air duration.
         const auto t_end_chrono = std::chrono::steady_clock::now();
 
-        transmit_off();
+        endTransmissionOutput();
         tx_guard.dismiss();
 
         state_.store(canceled ? State::CANCELLED : State::COMPLETE,
@@ -1355,14 +1352,14 @@ void WsprTransmitter::join_transmission()
     }
 }
 
-void WsprTransmitter::dma_cleanup()
+void WsprTransmitter::cleanupTransmissionBackend()
 {
-    backend_->dma_cleanup();
+    backend_->cleanupTransmission();
 }
 
-int WsprTransmitter::get_gpio_power_mw(int level)
+int WsprTransmitter::getOutputPowerMilliwatts(int level)
 {
-    return backend_->get_gpio_power_mw(level);
+    return backend_->getOutputPowerMilliwatts(level);
 }
 
 inline double WsprTransmitter::convert_mw_dbm(double mw)
@@ -1439,38 +1436,38 @@ void WsprTransmitter::set_thread_priority()
             std::strerror(ret));
     }
 }
-void WsprTransmitter::transmit_symbol(
+void WsprTransmitter::emitSymbol(
     const std::uint32_t &sym_num,
     const double &tsym,
     std::uint32_t &bufPtr,
     int symbol_index)
 {
-    backend_->transmit_symbol(sym_num, tsym, bufPtr, symbol_index);
+    backend_->emitSymbol(sym_num, tsym, bufPtr, symbol_index);
 }
 
-void WsprTransmitter::setup_dma()
+void WsprTransmitter::prepareTransmissionBackend()
 {
-    backend_->setup_dma();
+    backend_->prepareTransmission();
 }
 
-void WsprTransmitter::setup_dma_freq_table(double &center_freq_actual)
+void WsprTransmitter::configureTransmissionBackend(double &center_freq_actual)
 {
-    backend_->setup_dma_freq_table(center_freq_actual);
+    backend_->configureTransmission(center_freq_actual);
 }
 
-void WsprTransmitter::transmit_on()
+void WsprTransmitter::beginTransmissionOutput()
 {
-    backend_->transmit_on();
+    backend_->beginTransmissionOutput();
 }
 
-void WsprTransmitter::transmit_off()
+void WsprTransmitter::endTransmissionOutput()
 {
-    backend_->transmit_off();
+    backend_->endTransmissionOutput();
 }
 
 std::string WsprTransmitter::stateToStringLower(State state)
 {
-    std::string s = stateToString(state);
+    std::string s = wsprTransmitStateToString(state);
     std::transform(
         s.begin(),
         s.end(),
