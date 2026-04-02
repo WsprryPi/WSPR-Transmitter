@@ -82,7 +82,7 @@ constexpr double WSPR_CENTER_FREQ_2M = 144490500.0;
 
 // Select your frequency constant
 static constexpr double WSPR_FREQ = WSPR_CENTER_FREQ_80M;
-static constexpr uint8_t POWER = 0; // Power index, 0-7, where 0 is 2mA (-3.4dBm) and 7 is 16mA (+10.6dBm)
+static constexpr uint8_t POWER = 7; // Power index, 0-7, where 0 is 2mA (-3.4dBm) and 7 is 16mA (+10.6dBm)
 
 /**
  * @brief Mutex used to guard shared shutdown and transmission state
