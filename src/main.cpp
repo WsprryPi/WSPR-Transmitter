@@ -60,22 +60,29 @@ static constexpr std::string_view GRID = "EM18";
 static constexpr uint8_t POWER_DBM = 20;
 
 // Frequency choices - Leave alone (see below)
-static constexpr double _2200m = 137500.0;
-static constexpr double _160m = 1838100.0;
-static constexpr double _80m = 3568600.0;
-static constexpr double _60m = 5288700.0;
-static constexpr double _40m = 7038600.0;
-static constexpr double _30m = 10140200.0;
-static constexpr double _22m = 13555400.0;
-static constexpr double _20m = 14095600.0;
-static constexpr double _17m = 18106100.0;
-static constexpr double _15m = 21096100.0;
-static constexpr double _12m = 24926100.0;
-static constexpr double _10m = 28126100.0;
-static constexpr double _6m = 50294500.0;
+constexpr double WSPR_CENTER_FREQ_2200M = 137500.0;
+constexpr double WSPR_CENTER_FREQ_2200M_15 = 137612.5;
+constexpr double WSPR_CENTER_FREQ_630M = 475700.0;
+constexpr double WSPR_CENTER_FREQ_630M_15 = 475812.5;
+constexpr double WSPR_CENTER_FREQ_160M = 1838100.0;
+constexpr double WSPR_CENTER_FREQ_160M_15 = 1838212.5;
+constexpr double WSPR_CENTER_FREQ_80M = 3570100.0;
+constexpr double WSPR_CENTER_FREQ_60M = 5288700.0;
+constexpr double WSPR_CENTER_FREQ_40M = 7040100.0;
+constexpr double WSPR_CENTER_FREQ_30M = 10140200.0;
+constexpr double WSPR_CENTER_FREQ_22M = 13553000.0;
+constexpr double WSPR_CENTER_FREQ_20M = 14097100.0;
+constexpr double WSPR_CENTER_FREQ_17M = 18106100.0;
+constexpr double WSPR_CENTER_FREQ_15M = 21096100.0;
+constexpr double WSPR_CENTER_FREQ_12M = 24926100.0;
+constexpr double WSPR_CENTER_FREQ_10M = 28126100.0;
+constexpr double WSPR_CENTER_FREQ_6M = 50294500.0;
+constexpr double WSPR_CENTER_FREQ_4M = 70092500.0;
+constexpr double WSPR_CENTER_FREQ_2M = 144490500.0;
 
 // Select your frequency constant
-static constexpr double WSPR_FREQ = _20m;
+static constexpr double WSPR_FREQ = WSPR_CENTER_FREQ_80M;
+static constexpr uint8_t POWER = 0; // Power index, 0-7, where 0 is 2mA (-3.4dBm) and 7 is 16mA (+10.6dBm)
 
 /**
  * @brief Mutex used to guard shared shutdown and transmission state
@@ -637,7 +644,7 @@ void configure_transmitter(bool isWspr)
     if (isWspr)
     {
         wsprTransmitter.configure(
-            WSPR_FREQ, 0, config.ppm,
+            WSPR_FREQ, POWER, config.ppm,
             CALLSIGN, GRID, POWER_DBM, /*use_offset=*/true);
     }
     else
