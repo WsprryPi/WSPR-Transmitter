@@ -721,33 +721,14 @@ private:
     struct WsprTransmissionParams
     {
         /**
-         * @brief Number of symbols in a WSPR message.
+         * @brief Input-level WSPR message configuration.
          */
-        static const std::size_t symbol_count = MSG_SIZE;
+        WsprMessageConfig message_config;
 
         /**
-         * @brief Encoded WSPR symbol values.
-         *
-         * @details
-         *   Each entry represents a symbol index used to select the
-         *   corresponding frequency from the DMA tuning table.
+         * @brief Prepared encoded WSPR symbol sequence.
          */
-        std::array<uint8_t, symbol_count> symbols;
-
-        /**
-         * @brief Callsign used for WSPR message encoding.
-         */
-        std::string call_sign;
-
-        /**
-         * @brief Maidenhead grid square used for WSPR message encoding.
-         */
-        std::string grid_square;
-
-        /**
-         * @brief Transmit power in dBm for WSPR message encoding.
-         */
-        int power_dbm;
+        std::shared_ptr<WsprSymbolSequence> symbol_sequence;
 
         /**
          * @brief Center RF frequency in Hz.
@@ -788,10 +769,8 @@ private:
          * @brief Construct parameters with safe defaults.
          */
         WsprTransmissionParams()
-            : symbols{},
-              call_sign{},
-              grid_square{},
-              power_dbm(0),
+            : message_config{},
+              symbol_sequence(std::make_shared<WsprSymbolSequence>()),
               frequency(0.0),
               ppm(0.0),
               is_tone(false),

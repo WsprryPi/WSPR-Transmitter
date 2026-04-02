@@ -1311,7 +1311,7 @@ void WsprRpiBackend::transmit_symbol(
 
     {
         const int total_symbols =
-            static_cast<int>(plan.symbol_count);
+            static_cast<int>(plan.symbolCount());
 
         std::ostringstream oss;
         oss

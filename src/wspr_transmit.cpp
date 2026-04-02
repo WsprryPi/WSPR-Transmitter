@@ -50,7 +50,7 @@
 // Project headers
 #include "wspr_transmit.hpp" // Class Declarations
 #include "wspr_transmit_backend_rpi.hpp"
-#include "wspr_message.hpp"
+#include "wspr_message_encoder.hpp"
 
 // Helper classes and functions in anonymous namespace
 namespace
@@ -368,22 +368,22 @@ void WsprTransmitter::configure(
 
     stop_requested_.store(false);
 
-    trans_params_.call_sign = call_sign;
-    trans_params_.grid_square = grid_square;
-    trans_params_.power_dbm = power_dbm;
+    trans_params_.message_config.message_type = WsprMessageType::Type1;
+    trans_params_.message_config.call_sign = call_sign;
+    trans_params_.message_config.grid_square = grid_square;
+    trans_params_.message_config.power_dbm = power_dbm;
+    trans_params_.symbol_sequence = std::make_shared<WsprSymbolSequence>();
     trans_params_.frequency = frequency;
     trans_params_.ppm = ppm;
     trans_params_.power = power;
     trans_params_.use_offset = use_offset;
 
-    if (!trans_params_.call_sign.empty() && !trans_params_.grid_square.empty() && trans_params_.power_dbm != 0)
+    if (!trans_params_.message_config.call_sign.empty() &&
+        !trans_params_.message_config.grid_square.empty() &&
+        trans_params_.message_config.power_dbm != 0)
     {
         trans_params_.is_tone = false;
-        WsprMessage msg(
-            trans_params_.call_sign,
-            trans_params_.grid_square,
-            trans_params_.power_dbm);
-        std::copy_n(msg.symbols, msg.size, trans_params_.symbols.begin());
+        *trans_params_.symbol_sequence = encodeWsprMessage(trans_params_.message_config);
     }
     else
     {
@@ -722,13 +722,13 @@ void WsprTransmitter::dumpParameters()
     std::ostringstream oss;
 
     oss << "Call Sign:         "
-        << (trans_params_.is_tone ? "N/A" : trans_params_.call_sign);
+        << (trans_params_.is_tone ? "N/A" : trans_params_.message_config.call_sign);
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "Grid Square:       "
-        << (trans_params_.is_tone ? "N/A" : trans_params_.grid_square);
+        << (trans_params_.is_tone ? "N/A" : trans_params_.message_config.grid_square);
     log_line(oss.str());
     oss.str("");
     oss.clear();
@@ -785,8 +785,7 @@ void WsprTransmitter::dumpParameters()
     {
         log_line("WSPR Symbols:");
 
-        const int symbol_count =
-            static_cast<int>(trans_params_.symbols.size());
+        const int symbol_count = static_cast<int>(trans_params_.symbol_sequence->symbolCount());
 
         std::string line;
         line.reserve(128);
@@ -794,7 +793,7 @@ void WsprTransmitter::dumpParameters()
         for (int i = 0; i < symbol_count; ++i)
         {
             line += std::to_string(
-                static_cast<int>(trans_params_.symbols[i]));
+                static_cast<int>(trans_params_.symbol_sequence->symbols[i]));
 
             if (i < symbol_count - 1)
             {
@@ -876,9 +875,9 @@ bool WsprTransmitter::backendRestartCurrentConfiguration()
     const double frequency = trans_params_.frequency;
     const int power = trans_params_.power;
     const double ppm = trans_params_.ppm;
-    const std::string call_sign = trans_params_.call_sign;
-    const std::string grid_square = trans_params_.grid_square;
-    const int power_dbm = trans_params_.power_dbm;
+    const std::string call_sign = trans_params_.message_config.call_sign;
+    const std::string grid_square = trans_params_.message_config.grid_square;
+    const int power_dbm = trans_params_.message_config.power_dbm;
     const bool use_offset = trans_params_.use_offset;
 
     shutdown();
@@ -895,7 +894,7 @@ WsprTransmissionPlan WsprTransmitter::buildTransmissionPlan() const noexcept
         trans_params_.frequency,
         trans_params_.tone_spacing,
         trans_params_.power,
-        trans_params_.symbols.size()};
+        trans_params_.symbol_sequence};
 }
 
 bool WsprTransmitter::shouldStop() const noexcept
@@ -1201,7 +1200,8 @@ void WsprTransmitter::transmit()
         // Fire callback as close to the first symbol as possible.
         fire_transmit_cb(TransmissionCallbackEvent::STARTING, LogLevel::INFO, "", trans_params_.frequency);
 
-        const int symbol_count = static_cast<int>(trans_params_.symbols.size());
+        const int symbol_count =
+            static_cast<int>(trans_params_.symbol_sequence->symbolCount());
         const double symtime = trans_params_.symtime;
 
         beginTransmissionOutput();
@@ -1228,7 +1228,7 @@ void WsprTransmitter::transmit()
         if (symbol_count > 0 && !shouldStop())
         {
             emitSymbol(
-                static_cast<int>(trans_params_.symbols[0]),
+                static_cast<int>(trans_params_.symbol_sequence->symbols[0]),
                 symtime,
                 0);
 
@@ -1285,7 +1285,7 @@ void WsprTransmitter::transmit()
             }
 
             emitSymbol(
-                static_cast<int>(trans_params_.symbols[i]),
+                static_cast<int>(trans_params_.symbol_sequence->symbols[i]),
                 symtime,
                 i);
         }

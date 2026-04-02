@@ -27,6 +27,10 @@
 #define WSPR_TRANSMIT_TYPES_HPP
 
 #include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 
 /**
  * @enum WsprTransmitState
@@ -88,6 +92,36 @@ enum class WsprTransmissionCallbackEvent
     LOGGING
 };
 
+enum class WsprMessageType
+{
+    Type1,
+    Type2,
+    Type3
+};
+
+struct WsprMessageConfig
+{
+    WsprMessageType message_type = WsprMessageType::Type1;
+    std::string call_sign{};
+    std::string grid_square{};
+    int power_dbm = 0;
+};
+
+struct WsprSymbolSequence
+{
+    std::vector<std::uint8_t> symbols{};
+
+    std::size_t symbolCount() const noexcept
+    {
+        return symbols.size();
+    }
+
+    bool empty() const noexcept
+    {
+        return symbols.empty();
+    }
+};
+
 /**
  * @struct WsprTransmissionPlan
  * @brief Backend-neutral snapshot of transmission intent and configuration.
@@ -122,9 +156,14 @@ struct WsprTransmissionPlan
     int power_level = 0;
 
     /**
-     * @brief Total number of symbols in the configured transmission.
+     * @brief Prepared encoded symbol sequence for timed backend execution.
      */
-    std::size_t symbol_count = 0;
+    std::shared_ptr<const WsprSymbolSequence> symbol_sequence{};
+
+    std::size_t symbolCount() const noexcept
+    {
+        return symbol_sequence ? symbol_sequence->symbolCount() : 0;
+    }
 };
 
 /**
