@@ -892,24 +892,13 @@ bool WsprTransmitter::backendRestartCurrentConfiguration()
     return true;
 }
 
-double WsprTransmitter::backendFrequency() const noexcept
+WsprTransmissionPlan WsprTransmitter::buildTransmissionPlan() const noexcept
 {
-    return trans_params_.frequency;
-}
-
-double WsprTransmitter::backendToneSpacing() const noexcept
-{
-    return trans_params_.tone_spacing;
-}
-
-int WsprTransmitter::backendPowerLevel() const noexcept
-{
-    return trans_params_.power;
-}
-
-std::size_t WsprTransmitter::backendSymbolCount() const noexcept
-{
-    return trans_params_.symbols.size();
+    return WsprTransmissionPlan{
+        trans_params_.frequency,
+        trans_params_.tone_spacing,
+        trans_params_.power,
+        trans_params_.symbols.size()};
 }
 
 bool WsprTransmitter::shouldStop() const noexcept
@@ -1105,8 +1094,6 @@ void WsprTransmitter::transmit()
 
     if (trans_params_.is_tone)
     {
-        std::uint32_t dummyBuf = 0;
-
         // Fire callback as close to the first symbol as possible.
         fire_transmit_cb(TransmissionCallbackEvent::STARTING,
                          LogLevel::INFO,
@@ -1123,7 +1110,6 @@ void WsprTransmitter::transmit()
             emitSymbol(
                 0,
                 0.0,
-                dummyBuf,
                 -1);
 
             if (!shouldStop())
@@ -1137,7 +1123,6 @@ void WsprTransmitter::transmit()
             emitSymbol(
                 0,
                 0.0,
-                dummyBuf,
                 -1);
         }
 
@@ -1160,8 +1145,6 @@ void WsprTransmitter::transmit()
     }
     else
     {
-        std::uint32_t bufPtr = 0;
-
         // Align to the scheduler-provided realtime boundary before starting TX.
         const std::int64_t start_rt_ns =
             scheduled_start_rt_ns_.load(std::memory_order_acquire);
@@ -1250,7 +1233,6 @@ void WsprTransmitter::transmit()
             emitSymbol(
                 static_cast<int>(trans_params_.symbols[0]),
                 symtime,
-                bufPtr,
                 0);
 
             if (!shouldStop())
@@ -1308,7 +1290,6 @@ void WsprTransmitter::transmit()
             emitSymbol(
                 static_cast<int>(trans_params_.symbols[i]),
                 symtime,
-                bufPtr,
                 i);
         }
 
@@ -1439,10 +1420,13 @@ void WsprTransmitter::set_thread_priority()
 void WsprTransmitter::emitSymbol(
     const std::uint32_t &sym_num,
     const double &tsym,
-    std::uint32_t &bufPtr,
     int symbol_index)
 {
-    backend_->emitSymbol(sym_num, tsym, bufPtr, symbol_index);
+    backend_->emitSymbol(
+        buildTransmissionPlan(),
+        sym_num,
+        tsym,
+        symbol_index);
 }
 
 void WsprTransmitter::prepareTransmissionBackend()
@@ -1452,12 +1436,12 @@ void WsprTransmitter::prepareTransmissionBackend()
 
 void WsprTransmitter::configureTransmissionBackend(double &center_freq_actual)
 {
-    backend_->configureTransmission(center_freq_actual);
+    backend_->configureTransmission(buildTransmissionPlan(), center_freq_actual);
 }
 
 void WsprTransmitter::beginTransmissionOutput()
 {
-    backend_->beginTransmissionOutput();
+    backend_->beginTransmissionOutput(buildTransmissionPlan());
 }
 
 void WsprTransmitter::endTransmissionOutput()

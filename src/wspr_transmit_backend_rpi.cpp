@@ -199,9 +199,10 @@ void WsprRpiBackend::prepareTransmission()
     setup_dma();
 }
 
-void WsprRpiBackend::configureTransmission(double &center_freq_actual)
+void WsprRpiBackend::configureTransmission(const WsprTransmissionPlan &plan,
+                                           double &center_freq_actual)
 {
-    setup_dma_freq_table(center_freq_actual);
+    setup_dma_freq_table(plan, center_freq_actual);
 }
 
 void WsprRpiBackend::cleanupTransmission()
@@ -214,9 +215,10 @@ int WsprRpiBackend::getOutputPowerMilliwatts(int level)
     return get_gpio_power_mw(level);
 }
 
-void WsprRpiBackend::beginTransmissionOutput()
+void WsprRpiBackend::beginTransmissionOutput(const WsprTransmissionPlan &plan)
 {
-    transmit_on();
+    dma_buf_ptr_ = 0;
+    transmit_on(plan);
 }
 
 void WsprRpiBackend::endTransmissionOutput()
@@ -225,16 +227,17 @@ void WsprRpiBackend::endTransmissionOutput()
 }
 
 void WsprRpiBackend::emitSymbol(
+    const WsprTransmissionPlan &plan,
     const std::uint32_t &sym_num,
     const double &tsym,
-    std::uint32_t &bufPtr,
     int symbol_index)
 {
-    transmit_symbol(sym_num, tsym, bufPtr, symbol_index);
+    transmit_symbol(plan, sym_num, tsym, symbol_index);
 }
 
 void WsprRpiBackend::resetTransmissionOutput() noexcept
 {
+    dma_buf_ptr_ = 0;
     force_dma_reset_sequence();
 }
 
@@ -925,6 +928,7 @@ void WsprRpiBackend::dma_cleanup()
 
     dma_config_ = DMAConfig();
     mailbox_struct_ = MailboxStruct();
+    dma_buf_ptr_ = 0;
 }
 
 int WsprRpiBackend::get_gpio_power_mw(int level)
@@ -1154,13 +1158,13 @@ void WsprRpiBackend::disable_clock()
     gpclk0_disable_wait(access_bus_address(CM_GP0CTL_BUS));
 }
 
-void WsprRpiBackend::transmit_on()
+void WsprRpiBackend::transmit_on(const WsprTransmissionPlan &plan)
 {
     set_bit_bus_address(GPIO_BUS_BASE, 14);
     clear_bit_bus_address(GPIO_BUS_BASE, 13);
     clear_bit_bus_address(GPIO_BUS_BASE, 12);
 
-    access_bus_address(PADS_GPIO_0_27_BUS) = 0x5a000018 + owner_.backendPowerLevel();
+    access_bus_address(PADS_GPIO_0_27_BUS) = 0x5a000018 + plan.power_level;
 
     struct GPCTL setupword = {6, 0, 0, 0, 0, 3, 0x5A};
     setupword = {6, 1, 0, 0, 0, 3, 0x5A};
@@ -1178,9 +1182,9 @@ void WsprRpiBackend::transmit_off()
 }
 
 void WsprRpiBackend::transmit_symbol(
+    const WsprTransmissionPlan &plan,
     const std::uint32_t &sym_num,
     const double &tsym,
-    std::uint32_t &bufPtr,
     int symbol_index)
 {
     if (owner_.backendShouldStop())
@@ -1235,7 +1239,7 @@ void WsprRpiBackend::transmit_symbol(
 
     auto advance_with_lead = [&]() -> void
     {
-        bufPtr = (bufPtr + kLead) & kMask;
+        dma_buf_ptr_ = (dma_buf_ptr_ + kLead) & kMask;
     };
 
     const bool is_tone = (tsym == 0.0);
@@ -1254,20 +1258,20 @@ void WsprRpiBackend::transmit_symbol(
             const std::uint32_t n_pwmclk =
                 static_cast<std::uint32_t>(pwm_clocks_per_iter);
 
-            bufPtr = (bufPtr + 1) & kMask;
-            if (!wait_cb_not_active(bufPtr))
+            dma_buf_ptr_ = (dma_buf_ptr_ + 1) & kMask;
+            if (!wait_cb_not_active(dma_buf_ptr_))
                 return;
 
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
+            reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->SOURCE_AD =
                 static_cast<std::uint32_t>(
                     static_cast<std::uintptr_t>(const_page_.b) +
                     static_cast<std::uintptr_t>(f0_idx * 4));
 
-            bufPtr = (bufPtr + 1) & kMask;
-            if (!wait_cb_not_active(bufPtr))
+            dma_buf_ptr_ = (dma_buf_ptr_ + 1) & kMask;
+            if (!wait_cb_not_active(dma_buf_ptr_))
                 return;
 
-            reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN = n_pwmclk;
+            reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->TXFR_LEN = n_pwmclk;
         }
 
         return;
@@ -1282,7 +1286,7 @@ void WsprRpiBackend::transmit_symbol(
 
     {
         const int total_symbols =
-            static_cast<int>(owner_.backendSymbolCount());
+            static_cast<int>(plan.symbol_count);
 
         std::ostringstream oss;
         oss
@@ -1332,8 +1336,8 @@ void WsprRpiBackend::transmit_symbol(
              reinterpret_cast<std::uint32_t *>(const_page_.v)[f1_idx] & 0x00FFFFFFu) /
          std::pow(2.0, 12));
     const double tone_freq =
-        owner_.backendFrequency() - 1.5 * owner_.backendToneSpacing() +
-        static_cast<double>(sym_num) * owner_.backendToneSpacing();
+        plan.frequency_hz - 1.5 * plan.tone_spacing_hz +
+        static_cast<double>(sym_num) * plan.tone_spacing_hz;
 
     const double f0_ratio =
         1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
@@ -1365,36 +1369,36 @@ void WsprRpiBackend::transmit_symbol(
 
         const std::int64_t n_f1 = n_pwmclk - n_f0;
 
-        bufPtr = (bufPtr + 1) & kMask;
-        if (!wait_cb_not_active(bufPtr))
+        dma_buf_ptr_ = (dma_buf_ptr_ + 1) & kMask;
+        if (!wait_cb_not_active(dma_buf_ptr_))
             return;
 
-        reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
+        reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->SOURCE_AD =
             static_cast<std::uint32_t>(
                 static_cast<std::uintptr_t>(const_page_.b) +
                 static_cast<std::uintptr_t>(f0_idx * 4));
 
-        bufPtr = (bufPtr + 1) & kMask;
-        if (!wait_cb_not_active(bufPtr))
+        dma_buf_ptr_ = (dma_buf_ptr_ + 1) & kMask;
+        if (!wait_cb_not_active(dma_buf_ptr_))
             return;
 
-        reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
+        reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->TXFR_LEN =
             static_cast<std::uint32_t>(n_f0);
 
-        bufPtr = (bufPtr + 1) & kMask;
-        if (!wait_cb_not_active(bufPtr))
+        dma_buf_ptr_ = (dma_buf_ptr_ + 1) & kMask;
+        if (!wait_cb_not_active(dma_buf_ptr_))
             return;
 
-        reinterpret_cast<CB *>(instructions_[bufPtr].v)->SOURCE_AD =
+        reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->SOURCE_AD =
             static_cast<std::uint32_t>(
                 static_cast<std::uintptr_t>(const_page_.b) +
                 static_cast<std::uintptr_t>(f1_idx * 4));
 
-        bufPtr = (bufPtr + 1) & kMask;
-        if (!wait_cb_not_active(bufPtr))
+        dma_buf_ptr_ = (dma_buf_ptr_ + 1) & kMask;
+        if (!wait_cb_not_active(dma_buf_ptr_))
             return;
 
-        reinterpret_cast<CB *>(instructions_[bufPtr].v)->TXFR_LEN =
+        reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->TXFR_LEN =
             static_cast<std::uint32_t>(n_f1);
 
         n_pwmclk_transmitted += n_pwmclk;
@@ -1621,24 +1625,25 @@ void WsprRpiBackend::setup_dma()
     }
 }
 
-void WsprRpiBackend::setup_dma_freq_table(double &center_freq_actual)
+void WsprRpiBackend::setup_dma_freq_table(const WsprTransmissionPlan &plan,
+                                          double &center_freq_actual)
 {
     double div_lo = bit_trunc(
                         dma_config_.plld_clock_frequency /
-                            (owner_.backendFrequency() - 1.5 * owner_.backendToneSpacing()),
+                            (plan.frequency_hz - 1.5 * plan.tone_spacing_hz),
                         -12) +
                     std::pow(2.0, -12);
     double div_hi = bit_trunc(
         dma_config_.plld_clock_frequency /
-            (owner_.backendFrequency() + 1.5 * owner_.backendToneSpacing()),
+            (plan.frequency_hz + 1.5 * plan.tone_spacing_hz),
         -12);
 
     if (std::floor(div_lo) != std::floor(div_hi))
     {
         center_freq_actual =
             dma_config_.plld_clock_frequency / std::floor(div_lo) -
-            1.6 * owner_.backendToneSpacing();
-        if (owner_.backendFrequency() != 0.0)
+            1.6 * plan.tone_spacing_hz;
+        if (plan.frequency_hz != 0.0)
         {
             std::stringstream temp;
             temp << "Center frequency has been changed to "
@@ -1655,12 +1660,12 @@ void WsprRpiBackend::setup_dma_freq_table(double &center_freq_actual)
         }
     }
 
-    double tone0_freq = center_freq_actual - 1.5 * owner_.backendToneSpacing();
+    double tone0_freq = center_freq_actual - 1.5 * plan.tone_spacing_hz;
     std::vector<std::uint32_t> tuning_word(1024);
 
     for (int i = 0; i < 8; i++)
     {
-        double tone_freq = tone0_freq + (i >> 1) * owner_.backendToneSpacing();
+        double tone_freq = tone0_freq + (i >> 1) * plan.tone_spacing_hz;
         double div = bit_trunc(dma_config_.plld_clock_frequency / tone_freq, -12);
 
         if (i % 2 == 0)

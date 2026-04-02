@@ -23,15 +23,16 @@ public:
     void startFaultMonitoring() override;
     void stopFaultMonitoring() override;
     void prepareTransmission() override;
-    void configureTransmission(double &center_freq_actual) override;
+    void configureTransmission(const WsprTransmissionPlan &plan,
+                               double &center_freq_actual) override;
     void cleanupTransmission() override;
     int getOutputPowerMilliwatts(int level) override;
-    void beginTransmissionOutput() override;
+    void beginTransmissionOutput(const WsprTransmissionPlan &plan) override;
     void endTransmissionOutput() override;
     void emitSymbol(
+        const WsprTransmissionPlan &plan,
         const std::uint32_t &sym_num,
         const double &tsym,
-        std::uint32_t &bufPtr,
         int symbol_index) override;
     void resetTransmissionOutput() noexcept override;
     bool faulted() const noexcept override;
@@ -117,15 +118,16 @@ private:
     void start_watchdog();
     void stop_watchdog();
     void setup_dma();
-    void setup_dma_freq_table(double &center_freq_actual);
+    void setup_dma_freq_table(const WsprTransmissionPlan &plan,
+                              double &center_freq_actual);
     void dma_cleanup();
     int get_gpio_power_mw(int level);
-    void transmit_on();
+    void transmit_on(const WsprTransmissionPlan &plan);
     void transmit_off();
     void transmit_symbol(
+        const WsprTransmissionPlan &plan,
         const std::uint32_t &sym_num,
         const double &tsym,
-        std::uint32_t &bufPtr,
         int symbol_index);
     void force_dma_reset_sequence() noexcept;
     void get_plld();
@@ -165,6 +167,7 @@ private:
     std::atomic<std::chrono::steady_clock::time_point::rep> watchdog_last_change_ns_{0};
 
     bool dma_setup_done_{false};
+    std::uint32_t dma_buf_ptr_{0};
     double pwm_clock_init_{0};
     int watchdog_cpu_{1};
     PageInfo const_page_{};

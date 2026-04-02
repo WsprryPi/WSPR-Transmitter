@@ -1,6 +1,8 @@
 #ifndef WSPR_TRANSMIT_TYPES_HPP
 #define WSPR_TRANSMIT_TYPES_HPP
 
+#include <cstddef>
+
 enum class WsprTransmitState
 {
     DISABLED,
@@ -50,6 +52,14 @@ enum class WsprTransmissionCallbackEvent
     COMPLETE,
     SKIPPED,
     LOGGING
+};
+
+struct WsprTransmissionPlan
+{
+    double frequency_hz = 0.0;
+    double tone_spacing_hz = 0.0;
+    int power_level = 0;
+    std::size_t symbol_count = 0;
 };
 
 #endif

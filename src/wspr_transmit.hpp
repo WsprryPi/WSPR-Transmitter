@@ -68,10 +68,6 @@ public:
                                              const std::string &msg,
                                              double value) = 0;
     virtual bool backendRestartCurrentConfiguration() = 0;
-    virtual double backendFrequency() const noexcept = 0;
-    virtual double backendToneSpacing() const noexcept = 0;
-    virtual int backendPowerLevel() const noexcept = 0;
-    virtual std::size_t backendSymbolCount() const noexcept = 0;
 };
 
 /**
@@ -483,14 +479,6 @@ public:
 
     bool backendRestartCurrentConfiguration() override;
 
-    double backendFrequency() const noexcept override;
-
-    double backendToneSpacing() const noexcept override;
-
-    int backendPowerLevel() const noexcept override;
-
-    std::size_t backendSymbolCount() const noexcept override;
-
 private:
     void startFaultMonitoring();
 
@@ -848,6 +836,8 @@ private:
                           const std::string &msg,
                           double value);
 
+    WsprTransmissionPlan buildTransmissionPlan() const noexcept;
+
     /**
      * @brief Execute the transmission loop.
      *
@@ -933,13 +923,11 @@ private:
      *
      * @param sym_num Sequential symbol number within the transmission.
      * @param tsym Symbol duration in seconds.
-     * @param bufPtr Current DMA buffer pointer, updated as blocks advance.
      * @param symbol_index Optional symbol index override.
      */
     void emitSymbol(
         const std::uint32_t &sym_num,
         const double &tsym,
-        std::uint32_t &bufPtr,
         int symbol_index = -1);
 
     /**
