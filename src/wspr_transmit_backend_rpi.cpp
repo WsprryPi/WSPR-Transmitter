@@ -46,6 +46,7 @@
 
 #include "bcm_model.hpp"
 #include "mailbox.hpp"
+#include "signal_handler.hpp"
 
 namespace
 {
@@ -310,6 +311,8 @@ void WsprRpiBackend::request_watchdog_recovery() noexcept
 
 void WsprRpiBackend::recovery_worker()
 {
+    block_signals();
+
     for (;;)
     {
         std::unique_lock<std::mutex> lk(recovery_wait_mtx_);
