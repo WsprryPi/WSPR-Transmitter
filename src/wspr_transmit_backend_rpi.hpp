@@ -1,0 +1,335 @@
+/**
+ * @file wspr_transmit_backend_rpi.hpp
+ * @brief Raspberry Pi DMA/PWM/mailbox WSPR transmission backend.
+ *
+ * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+#ifndef WSPR_TRANSMIT_BACKEND_RPI_HPP
+#define WSPR_TRANSMIT_BACKEND_RPI_HPP
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#include "wspr_transmit_backend.hpp"
+#include "wspr_transmit.hpp"
+
+/**
+ * @class WsprRpiBackend
+ * @brief Raspberry Pi implementation of the generic transmission backend.
+ *
+ * @details
+ * This backend owns all Raspberry Pi-specific transmission details,
+ * including:
+ * - Broadcom mailbox allocation and peripheral mapping
+ * - DMA control-block construction and ring sequencing
+ * - PWM and GPCLK programming
+ * - GPIO drive-strength based output power control
+ * - DMA watchdog monitoring and backend-private recovery
+ *
+ * The controller provides transmission intent and timing decisions. This
+ * backend translates that intent into Raspberry Pi hardware actions while
+ * keeping DMA, mailbox, watchdog, and recovery state private.
+ */
+class WsprRpiBackend : public WsprTransmitBackend
+{
+public:
+    /**
+     * @brief Construct a Raspberry Pi backend bound to the controller bridge.
+     *
+     * @param owner Controller bridge used for state access, stop requests, and
+     *              callback forwarding.
+     */
+    explicit WsprRpiBackend(IControllerBridge &owner);
+
+    /**
+     * @brief Destroy the backend and release backend-owned resources.
+     */
+    ~WsprRpiBackend() override;
+
+    /**
+     * @brief Start the Raspberry Pi DMA watchdog.
+     */
+    void startFaultMonitoring() override;
+
+    /**
+     * @brief Stop the Raspberry Pi DMA watchdog.
+     */
+    void stopFaultMonitoring() override;
+
+    /**
+     * @brief Prepare DMA, mailbox, clock, and peripheral resources.
+     */
+    void prepareTransmission() override;
+
+    /**
+     * @brief Apply the requested transmission plan to Raspberry Pi hardware.
+     *
+     * @param plan Backend-neutral transmission snapshot.
+     * @return Applied configuration result including the actual RF center
+     *         frequency in hertz (Hz).
+     */
+    WsprTransmissionConfigureResult configureTransmission(
+        const WsprTransmissionPlan &plan) override;
+
+    /**
+     * @brief Tear down DMA, mailbox, PWM, and clock resources.
+     */
+    void cleanupTransmission() override;
+
+    /**
+     * @brief Convert a drive-strength level into an estimated power value.
+     *
+     * @param level Drive-strength index.
+     * @return Estimated output power in milliwatts (mW).
+     */
+    int getOutputPowerMilliwatts(int level) override;
+
+    /**
+     * @brief Enable Raspberry Pi RF output for the configured transmission.
+     *
+     * @param plan Backend-neutral transmission snapshot.
+     */
+    void beginTransmissionOutput(const WsprTransmissionPlan &plan) override;
+
+    /**
+     * @brief Disable Raspberry Pi RF output.
+     */
+    void endTransmissionOutput() override;
+
+    /**
+     * @brief Emit one symbol using the backend-private DMA ring.
+     *
+     * @param plan Backend-neutral transmission snapshot.
+     * @param sym_num Symbol value to emit.
+     * @param tsym Symbol duration in seconds.
+     * @param symbol_index Zero-based symbol index, or `-1` when not
+     *                     applicable.
+     */
+    void emitSymbol(
+        const WsprTransmissionPlan &plan,
+        const std::uint32_t &sym_num,
+        const double &tsym,
+        int symbol_index) override;
+
+    /**
+     * @brief Perform a best-effort hardware reset of active transmission
+     *        output.
+     */
+    void resetTransmissionOutput() noexcept override;
+
+    /**
+     * @brief Return whether the DMA watchdog has latched a fault.
+     */
+    bool faulted() const noexcept override;
+
+    /**
+     * @brief Clear the latched DMA watchdog fault.
+     */
+    void clearFault() noexcept override;
+
+    /**
+     * @brief Enable or disable automatic watchdog recovery.
+     *
+     * @param enable True to enable automatic recovery.
+     */
+    void setAutoRecover(bool enable) noexcept override;
+
+    /**
+     * @brief Return whether automatic watchdog recovery is enabled.
+     */
+    bool autoRecoverEnabled() const noexcept override;
+
+    /**
+     * @brief Attempt synchronous recovery from a latched watchdog fault.
+     *
+     * @return True if recovery succeeded, false otherwise.
+     */
+    bool recoverFromFault() override;
+
+    /**
+     * @brief Return whether watchdog recovery is currently running.
+     */
+    bool recoveryInProgress() const noexcept override;
+
+private:
+    struct PageInfo
+    {
+        std::uintptr_t b = 0;
+        void *v = nullptr;
+    };
+
+    struct DMAConfig
+    {
+        double plld_nominal_freq;
+        double plld_clock_frequency;
+        volatile uint8_t *peripheral_base_virtual;
+        uint32_t orig_gp0ctl;
+        uint32_t orig_gp0div;
+        uint32_t orig_pwm_ctl;
+        uint32_t orig_pwm_sta;
+        uint32_t orig_pwm_rng1;
+        uint32_t orig_pwm_rng2;
+        uint32_t orig_pwm_fifocfg;
+
+        DMAConfig();
+    };
+
+    struct MailboxStruct
+    {
+        uint32_t mem_ref = 0;
+        std::uintptr_t bus_addr = 0;
+        volatile uint8_t *virt_addr = nullptr;
+        unsigned pool_size = 0;
+        unsigned pool_cnt = 0;
+    };
+
+    struct CB
+    {
+        volatile unsigned int TI;
+        volatile unsigned int SOURCE_AD;
+        volatile unsigned int DEST_AD;
+        volatile unsigned int TXFR_LEN;
+        volatile unsigned int STRIDE;
+        volatile unsigned int NEXTCONBK;
+        volatile unsigned int RES1;
+        volatile unsigned int RES2;
+    };
+
+    struct GPCTL
+    {
+        uint32_t SRC : 4;
+        uint32_t ENAB : 1;
+        uint32_t KILL : 1;
+        uint32_t : 1;
+        uint32_t BUSY : 1;
+        uint32_t FLIP : 1;
+        uint32_t MASH : 2;
+        uint32_t : 13;
+        uint32_t PASSWD : 8;
+    };
+
+    struct DMAregs
+    {
+        volatile unsigned int CS;
+        volatile unsigned int CONBLK_AD;
+        volatile unsigned int TI;
+        volatile unsigned int SOURCE_AD;
+        volatile unsigned int DEST_AD;
+        volatile unsigned int TXFR_LEN;
+        volatile unsigned int STRIDE;
+        volatile unsigned int NEXTCONBK;
+        volatile unsigned int DEBUG;
+    };
+
+    inline volatile int &access_bus_address(std::uintptr_t bus_addr);
+    inline void set_bit_bus_address(std::uintptr_t base, unsigned int bit);
+    inline void clear_bit_bus_address(std::uintptr_t base, unsigned int bit);
+    void start_watchdog();
+    void stop_watchdog();
+    void setup_dma();
+    WsprTransmissionConfigureResult setup_dma_freq_table(
+        const WsprTransmissionPlan &plan);
+    void dma_cleanup();
+    int get_gpio_power_mw(int level);
+    void transmit_on(const WsprTransmissionPlan &plan);
+    void transmit_off();
+    void transmit_symbol(
+        const WsprTransmissionPlan &plan,
+        const std::uint32_t &sym_num,
+        const double &tsym,
+        int symbol_index);
+    void force_dma_reset_sequence() noexcept;
+    void get_plld();
+    void allocate_memory_pool(unsigned numpages);
+    void get_real_mem_page_from_pool(void **vAddr, void **bAddr);
+    void deallocate_memory_pool();
+    void disable_hardware_sequence();
+    void disable_clock();
+    double bit_trunc(const double &d, const int &lsb);
+    void create_dma_pages(PageInfo &const_page, PageInfo &instr_page, PageInfo instructions[]);
+    void request_watchdog_recovery() noexcept;
+    void recovery_worker();
+    bool recover_from_watchdog_fault_locked();
+
+    IControllerBridge &owner_;
+
+    std::thread watchdog_thread_{};
+    std::atomic<bool> watchdog_stop_{true};
+    std::atomic<bool> watchdog_faulted_{false};
+    std::atomic<bool> watchdog_auto_recover_{true};
+    std::atomic<bool> recovery_stop_{false};
+    std::atomic<bool> recovery_pending_{false};
+    std::atomic<bool> recovery_in_progress_{false};
+
+    mutable std::mutex recovery_rate_mtx_{};
+    std::deque<std::chrono::steady_clock::time_point> recovery_attempts_{};
+    std::chrono::steady_clock::time_point recovery_defer_until_{};
+    WsprTransmitState post_recovery_state_{WsprTransmitState::ENABLED};
+
+    std::thread recovery_thread_{};
+    std::mutex recovery_wait_mtx_;
+    std::condition_variable recovery_cv_;
+    std::mutex recovery_mtx_;
+
+    std::atomic<std::uint32_t> watchdog_last_conblk_{0};
+    std::atomic<std::uint32_t> watchdog_last_txfr_len_{0};
+    std::atomic<std::chrono::steady_clock::time_point::rep> watchdog_last_change_ns_{0};
+
+    bool dma_setup_done_{false};
+    std::uint32_t dma_buf_ptr_{0};
+    double pwm_clock_init_{0};
+    int watchdog_cpu_{1};
+    PageInfo const_page_{};
+    PageInfo instr_page_{};
+    PageInfo instructions_[1024]{};
+    DMAConfig dma_config_{};
+    MailboxStruct mailbox_struct_{};
+
+    static constexpr auto kRecoveryWindow = std::chrono::minutes(10);
+    static constexpr std::size_t kMaxRecoveriesInWindow = 3;
+    static constexpr auto kMinRecoveryInterval = std::chrono::seconds(30);
+    static constexpr uint32_t GPIO_BUS_BASE = 0x7E200000;
+    static constexpr uint32_t CM_GP0CTL_BUS = 0x7E101070;
+    static constexpr uint32_t CM_GP0DIV_BUS = 0x7E101074;
+    static constexpr uint32_t PADS_GPIO_0_27_BUS = 0x7E10002C;
+    static constexpr uint32_t CLK_BUS_BASE = 0x7E101000;
+    static constexpr uint32_t DMA_BUS_BASE = 0x7E007000;
+    static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
+
+#if INTPTR_MAX == INT32_MAX
+    static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 50000;
+#else
+    static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
+#endif
+
+    static inline constexpr std::array<int, 8> DRIVE_STRENGTH_TABLE = {
+        2, 4, 6, 8, 10, 12, 14, 16};
+};
+
+#endif
