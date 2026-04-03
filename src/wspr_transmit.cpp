@@ -733,7 +733,7 @@ void WsprTransmitter::dumpParameters()
     oss.str("");
     oss.clear();
 
-    oss << "WSPR Frequency:    "
+    oss << "Actual RF Freq:    "
         << formatFrequencyMHz(trans_params_.frequency)
         << " MHz";
     log_line(oss.str());
