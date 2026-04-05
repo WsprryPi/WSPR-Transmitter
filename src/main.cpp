@@ -48,6 +48,7 @@
 // Project headers
 #include "config_handler.hpp"
 #include "utils.hpp"
+#include "wspr_reference_adapter.hpp"
 #include "wspr_transmit.hpp"
 
 #define SELFTEST
@@ -643,13 +644,22 @@ void configure_transmitter(bool isWspr)
 
     if (isWspr)
     {
-        wsprTransmitter.configure(
-            WSPR_FREQ, POWER, config.ppm,
-            CALLSIGN, GRID, POWER_DBM, /*use_offset=*/true);
+        const PreparedWsprTransmission plan =
+            build_prepared_wspr_transmission(
+                std::string(CALLSIGN),
+                std::string(GRID),
+                POWER_DBM);
+
+        wsprTransmitter.configureWspr(
+            WSPR_FREQ,
+            POWER,
+            config.ppm,
+            plan,
+            /*use_offset=*/true);
     }
     else
     {
-        wsprTransmitter.configure(WSPR_FREQ, 0, config.ppm);
+        wsprTransmitter.configureTone(WSPR_FREQ, 0, config.ppm);
     }
 
 #ifdef DEBUG_WSPR_TRANSMIT

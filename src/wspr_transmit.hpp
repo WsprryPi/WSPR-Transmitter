@@ -45,7 +45,7 @@
 #include <sys/time.h> // for struct timeval
 
 // Project headers
-#include "wspr_message.hpp"
+#include "wspr_reference_adapter.hpp"
 #include "wspr_transmit_types.hpp"
 
 class WsprTransmitBackend;
@@ -94,7 +94,7 @@ public:
  *   - Fault detection and recovery implementation
  *
  *   The controller's runtime lifecycle is:
- *   1. `configure(...)`
+ *   1. `configureTone(...)` or `configureWspr(...)`
  *   2. `startAsync()`
  *   3. Backend prepare/configure
  *   4. Timed symbol emission through `emitSymbol(...)`
@@ -260,13 +260,16 @@ public:
      * @param[in] power_dbm    dBm value for WSPR message (ignored if tone).
      * @param[in] use_offset   True to apply a small random offset within band.
      */
-    void configure(
+    void configureTone(
+        double frequency,
+        int power,
+        double ppm);
+
+    void configureWspr(
         double frequency,
         int power,
         double ppm,
-        std::string_view call_sign = {},
-        std::string_view grid_square = {},
-        int power_dbm = 0,
+        const PreparedWsprTransmission &plan,
         bool use_offset = false);
 
     /**
@@ -715,20 +718,15 @@ private:
      * @details
      *   Holds all derived and user-supplied parameters required to perform
      *   either a tone transmission or an encoded WSPR message transmission.
-     *   The contents of this structure are populated by configure() and are
+     *   The contents of this structure are populated by configuration calls and are
      *   treated as read-only during an active transmission.
      */
     struct WsprTransmissionParams
     {
         /**
-         * @brief Input-level WSPR message configuration.
+         * @brief Prepared WSPR transmission plan containing one or more frames.
          */
-        WsprMessageConfig message_config;
-
-        /**
-         * @brief Prepared encoded WSPR symbol sequence.
-         */
-        std::shared_ptr<WsprSymbolSequence> symbol_sequence;
+        PreparedWsprTransmission wspr_plan;
 
         /**
          * @brief Center RF frequency in Hz.
@@ -769,8 +767,7 @@ private:
          * @brief Construct parameters with safe defaults.
          */
         WsprTransmissionParams()
-            : message_config{},
-              symbol_sequence(std::make_shared<WsprSymbolSequence>()),
+            : wspr_plan{},
               frequency(0.0),
               ppm(0.0),
               is_tone(false),

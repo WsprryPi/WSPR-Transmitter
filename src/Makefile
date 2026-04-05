@@ -8,6 +8,7 @@ CXXVER := 20
 SUDO := sudo
 # Add any required submodules by their src path
 SUBMODULE_SRCDIRS := $(wildcard ../../WSPR-Message/src)
+SUBMODULE_SRCDIRS += $(wildcard ../../WSPR-Reference/src/wspr)
 SUBMODULE_SRCDIRS += $(wildcard ../../Mailbox/src)
 SUBMODULE_SRCDIRS += $(wildcard ../external)
 
@@ -97,6 +98,7 @@ CXXFLAGS += $(COMMON_FLAGS) $(COMM_CXX_FLAGS)
 # Include paths
 CXXFLAGS += -I$(abspath .)
 CXXFLAGS += $(foreach dir,$(SUBMODULE_SRCDIRS),-I$(abspath $(dir)))
+CXXFLAGS += -I$(abspath ../../WSPR-Reference/include)
 
 # C++ Debug Flags
 CXX_DEBUG_FLAGS := $(CXXFLAGS) -g $(DEBUG)	# Debug flags
