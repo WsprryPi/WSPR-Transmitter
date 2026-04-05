@@ -942,7 +942,7 @@ WsprTransmissionPlan WsprTransmitter::buildTransmissionPlan() const noexcept
         trans_params_.frequency,
         trans_params_.tone_spacing,
         trans_params_.power,
-        nullptr};
+        trans_params_.is_tone ? 0U : trans_params_.wspr_plan.totalSymbolCount()};
 }
 
 bool WsprTransmitter::shouldStop() const noexcept

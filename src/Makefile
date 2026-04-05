@@ -7,8 +7,7 @@ CXXVER := 20
 # Prefix for executing tests, "sudo" if required
 SUDO := sudo
 # Add any required submodules by their src path
-SUBMODULE_SRCDIRS := $(wildcard ../../WSPR-Message/src)
-SUBMODULE_SRCDIRS += $(wildcard ../../WSPR-Reference/src/wspr)
+SUBMODULE_SRCDIRS := $(wildcard ../../WSPR-Reference/src/wspr)
 SUBMODULE_SRCDIRS += $(wildcard ../../Mailbox/src)
 SUBMODULE_SRCDIRS += $(wildcard ../external)
 
