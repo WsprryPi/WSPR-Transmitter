@@ -75,6 +75,12 @@ PreparedWsprTransmission build_prepared_wspr_transmission(
     int power_dbm);
 
 PreparedWsprTransmission build_prepared_wspr_transmission(
+    const std::string& callsign,
+    const std::string& locator,
+    int power_dbm,
+    wspr::TransmissionPlanPreference preference);
+
+PreparedWsprTransmission build_prepared_wspr_transmission(
     const wspr::WsprEncodeResult& result);
 
 #endif // WSPR_REFERENCE_ADAPTER_HPP

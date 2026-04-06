@@ -43,7 +43,20 @@ PreparedWsprTransmission build_prepared_wspr_transmission(
     int power_dbm)
 {
     return build_prepared_wspr_transmission(
-        wspr::encode_message(callsign, locator, power_dbm));
+        callsign,
+        locator,
+        power_dbm,
+        wspr::TransmissionPlanPreference::Auto);
+}
+
+PreparedWsprTransmission build_prepared_wspr_transmission(
+    const std::string& callsign,
+    const std::string& locator,
+    int power_dbm,
+    wspr::TransmissionPlanPreference preference)
+{
+    return build_prepared_wspr_transmission(
+        wspr::encode_message(callsign, locator, power_dbm, preference));
 }
 
 PreparedWsprTransmission build_prepared_wspr_transmission(
