@@ -650,18 +650,26 @@ void configure_transmitter(bool isWspr)
                 std::string(GRID),
                 POWER_DBM);
 
-        wsprTransmitter.setTransmitGpio(config.tx_pin);
-        wsprTransmitter.configureWspr(
-            WSPR_FREQ,
-            POWER,
-            config.ppm,
-            plan,
-            /*use_offset=*/true);
+        WsprTransmissionRequest request;
+        request.mode = WsprTransmissionMode::WSPR;
+        request.wspr_plan = plan;
+        request.dial_frequency_hz = WSPR_FREQ;
+        request.actual_rf_frequency_hz = WSPR_FREQ;
+        request.ppm = config.ppm;
+        request.power_level = POWER;
+        request.tx_gpio = config.tx_pin;
+        request.use_offset = true;
+        wsprTransmitter.configureExecution(request);
     }
     else
     {
-        wsprTransmitter.setTransmitGpio(config.tx_pin);
-        wsprTransmitter.configureTone(WSPR_FREQ, 0, config.ppm);
+        WsprTransmissionRequest request;
+        request.mode = WsprTransmissionMode::TONE;
+        request.dial_frequency_hz = WSPR_FREQ;
+        request.actual_rf_frequency_hz = WSPR_FREQ;
+        request.ppm = config.ppm;
+        request.tx_gpio = config.tx_pin;
+        wsprTransmitter.configureExecution(request);
     }
 
 #ifdef DEBUG_WSPR_TRANSMIT

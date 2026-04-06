@@ -30,6 +30,8 @@
 #include <cstdint>
 #include <string>
 
+#include "wspr_reference_adapter.hpp"
+
 /**
  * @enum WsprTransmitState
  * @brief High-level runtime state for the transmitter controller.
@@ -88,6 +90,56 @@ enum class WsprTransmissionCallbackEvent
     COMPLETE,
     SKIPPED,
     LOGGING
+};
+
+enum class WsprTransmissionMode
+{
+    WSPR,
+    TONE
+};
+
+inline constexpr int kWsprTransmitControlGpioUnset = -1;
+inline constexpr int kWsprRandomOffsetHz = 80;
+
+/**
+ * @struct WsprTransmissionRequest
+ * @brief Complete execution-time request for one transmitter run.
+ *
+ * @details
+ * Built by the orchestration layer and executed by the transmitter without
+ * further policy decisions. It intentionally carries both transmitter-facing
+ * data and orchestration metadata for the currently selected slot so callers
+ * can keep one coherent snapshot for scheduling, logging, and GPIO control.
+ */
+struct WsprTransmissionRequest
+{
+    WsprTransmissionMode mode = WsprTransmissionMode::WSPR;
+    PreparedWsprTransmission wspr_plan{};
+    double dial_frequency_hz = 0.0;
+    double actual_rf_frequency_hz = 0.0;
+    double ppm = 0.0;
+    int power_level = 0;
+    int tx_gpio = 4;
+    bool use_offset = false;
+    double applied_offset_hz = 0.0;
+    int frequency_control_gpio = kWsprTransmitControlGpioUnset;
+    bool frequency_control_active_high = false;
+    std::string frequency_entry_label{};
+
+    bool isTone() const noexcept
+    {
+        return mode == WsprTransmissionMode::TONE;
+    }
+
+    bool isSkipWindow() const noexcept
+    {
+        return !isTone() && actual_rf_frequency_hz == 0.0;
+    }
+
+    std::size_t totalSymbolCount() const noexcept
+    {
+        return isTone() ? 0U : wspr_plan.totalSymbolCount();
+    }
 };
 
 /**

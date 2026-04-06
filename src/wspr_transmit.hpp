@@ -78,9 +78,8 @@ public:
  *   delegated to an active `WsprTransmitBackend` implementation.
  *
  *   Responsibilities of the controller include:
- *   - Accepting configuration such as RF frequency in hertz (Hz), power
- *     level, parts-per-million (PPM) correction, and optional WSPR message
- *     fields.
+ *   - Accepting a fully selected execution request from the orchestration
+ *     layer.
  *   - Building a backend-neutral `WsprTransmissionPlan` snapshot.
  *   - Choosing when transmission starts and when each symbol is emitted.
  *   - Managing scheduler, worker threads, stop requests, and high-level
@@ -94,7 +93,7 @@ public:
  *   - Fault detection and recovery implementation
  *
  *   The controller's runtime lifecycle is:
- *   1. `configureTone(...)` or `configureWspr(...)`
+ *   1. `configureExecution(...)`
  *   2. `startAsync()`
  *   3. Backend prepare/configure
  *   4. Timed symbol emission through `emitSymbol(...)`
@@ -235,44 +234,14 @@ public:
     static std::string formatFrequencyMHz(double frequency_hz);
 
     /**
-     * @brief Configure transmitter parameters.
+     * @brief Configure one execution request.
      *
      * @details
-     *   Sets frequency, power level, PPM calibration, and message parameters.
-     *   This does not start the scheduler or begin transmitting.
-     *
-     * @details Performs the following sequence:
-     *   1. Set the desired RF frequency and power level.
-     *   2. Populate WSPR symbol data if transmitting a message.
-     *   3. Determine WSPR mode (2-tone or 15-tone) and symbol timing.
-     *   4. Optionally apply a random frequency offset to spread spectral load.
-     *   5. Initialize DMA and mailbox resources.
-     *   6. Apply the specified PPM calibration to the PLLD clock.
-     *   7. Rebuild the DMA frequency table with the new PPM-corrected clock.
-     *   8. Update the actual center frequency after any hardware adjustments.
-     *
-     * @param[in] frequency    Target RF frequency in Hz.
-     * @param[in] power        Transmit power index (0-n).
-     * @param[in] ppm          Parts-per-million correction to apply (for
-     *                         example +11.135).
-     * @param[in] callsign     Optional callsign for WSPR message.
-     * @param[in] grid_square  Optional Maidenhead grid locator.
-     * @param[in] power_dbm    dBm value for WSPR message (ignored if tone).
-     * @param[in] use_offset   True to apply a small random offset within band.
+     *   The caller provides the fully selected execution request for the next
+     *   run. This method does not decide policy such as tone vs WSPR, paired
+     *   planning, GPIO selection, or in-band offset selection.
      */
-    void configureTone(
-        double frequency,
-        int power,
-        double ppm);
-
-    void configureWspr(
-        double frequency,
-        int power,
-        double ppm,
-        const PreparedWsprTransmission &plan,
-        bool use_offset = false);
-
-    void setTransmitGpio(int gpio) noexcept;
+    void configureExecution(const WsprTransmissionRequest &request);
 
     /**
      * @brief Rebuild the DMA tuning-word table with a fresh PPM correction.
@@ -333,7 +302,7 @@ public:
      * @brief Start transmission, either immediately or via the scheduler.
      *
      * @details
-     *   If `trans_params_.is_tone == true`, this will spawn the transmit
+     *   If the active request is tone mode, this will spawn the transmit
      *   thread right away (bypassing the scheduler). Otherwise it launches
      *   the background scheduler, which will fire at the next WSPR window
      *   and then spawn the transmit thread.
@@ -681,24 +650,6 @@ private:
     std::mutex stop_mutex_;
 
     /**
-     * @brief Random frequency offset for standard WSPR transmissions.
-     *
-     * This constant defines the range, in Hertz, for random frequency offsets
-     * applied to standard WSPR transmissions. The offset is applied
-     * symmetrically around the target frequency, resulting in a random
-     * variation of +/-80 Hz.
-     *
-     * This helps distribute transmissions within the WSPR band, reducing the
-     * likelihood of overlapping signals.
-     *
-     * @note This offset is applicable for standard WSPR transmissions
-     *       (2-minute cycles).
-     *
-     * @see WSPR15_RAND_OFFSET
-     */
-    static constexpr int WSPR_RAND_OFFSET = 80;
-
-    /**
      * @brief Nominal symbol duration for WSPR transmissions.
      *
      * This constant represents the nominal time duration of a WSPR symbol,
@@ -714,87 +665,13 @@ private:
     static constexpr double WSPR_SYMTIME = 8192.0 / 12000.0;
 
     /**
-     * @struct WsprTransmissionParams
-     * @brief Aggregate of parameters used for a single transmission run.
+     * @brief Active execution request.
      *
      * @details
-     *   Holds all derived and user-supplied parameters required to perform
-     *   either a tone transmission or an encoded WSPR message transmission.
-     *   The contents of this structure are populated by configuration calls and are
-     *   treated as read-only during an active transmission.
+     *   This instance holds the currently configured execution request used by
+     *   the scheduler and transmit thread.
      */
-    struct WsprTransmissionParams
-    {
-        /**
-         * @brief Prepared WSPR transmission plan containing one or more frames.
-         */
-        PreparedWsprTransmission wspr_plan;
-
-        /**
-         * @brief Center RF frequency in Hz.
-         */
-        double frequency;
-
-        /**
-         * @brief Parts-per-million correction applied to the clock.
-         */
-        double ppm;
-
-        /**
-         * @brief True when operating in tone (unmodulated) mode.
-         */
-        bool is_tone;
-
-        /**
-         * @brief Output power level index.
-         */
-        int power;
-
-        /**
-         * @brief BCM GPIO used to route the GPCLK0 RF output.
-         */
-        int tx_gpio;
-
-        /**
-         * @brief Symbol duration in seconds.
-         */
-        double symtime;
-
-        /**
-         * @brief Tone spacing in Hz between adjacent WSPR symbols.
-         */
-        double tone_spacing;
-
-        /**
-         * @brief Enable randomized in-band frequency offset.
-         */
-        bool use_offset;
-
-        /**
-         * @brief Construct parameters with safe defaults.
-         */
-        WsprTransmissionParams()
-            : wspr_plan{},
-              frequency(0.0),
-              ppm(0.0),
-              is_tone(false),
-              power(0),
-              tx_gpio(4),
-              symtime(0.0),
-              tone_spacing(0.0),
-              use_offset(false)
-        {
-        }
-    };
-
-    /**
-     * @brief Active transmission parameter set.
-     *
-     * @details
-     *   This instance holds the currently configured transmission parameters
-     *   used by the scheduler and transmit thread.
-     */
-    WsprTransmissionParams trans_params_;
+    WsprTransmissionRequest current_request_{};
 
     /**
      * @brief Invoke the configured transmission callback.

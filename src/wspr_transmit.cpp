@@ -346,10 +346,8 @@ std::string WsprTransmitter::formatFrequencyMHz(double frequency_hz)
     return oss.str();
 }
 
-void WsprTransmitter::configureTone(
-    double frequency,
-    int power,
-    double ppm)
+void WsprTransmitter::configureExecution(
+    const WsprTransmissionRequest &request)
 {
     // Reconfiguration is only safe when the transmit thread is not actively
     // feeding DMA. If a transmission is in progress, stop it first.
@@ -363,83 +361,15 @@ void WsprTransmitter::configureTone(
 
     stop_requested_.store(false);
 
-    trans_params_.wspr_plan = PreparedWsprTransmission{};
-    trans_params_.frequency = frequency;
-    trans_params_.ppm = ppm;
-    trans_params_.power = power;
-    trans_params_.use_offset = false;
-    trans_params_.is_tone = true;
-    trans_params_.symtime = WSPR_SYMTIME;
-    trans_params_.tone_spacing = 1.0 / trans_params_.symtime;
-
-    try
-    {
-        prepareTransmissionBackend();
-
-        const auto configure_result = configureTransmissionBackend();
-
-        if (trans_params_.frequency != 0.0)
-            trans_params_.frequency = configure_result.applied_frequency_hz;
-
-        state_.store(State::ENABLED, std::memory_order_release);
-    }
-    catch (...)
-    {
-        try
-        {
-            shutdown();
-            cleanupTransmissionBackend();
-        }
-        catch (...)
-        {
-        }
-        throw;
-    }
-}
-
-// Remember: Planning policy must happen above the transmitter layer
-void WsprTransmitter::configureWspr(
-    double frequency,
-    int power,
-    double ppm,
-    const PreparedWsprTransmission &plan,
-    bool use_offset)
-{
-    if (plan.frames.empty())
+    if (!request.isTone() && request.wspr_plan.frames.empty())
     {
         throw std::invalid_argument(
-            "WSPR transmission plan contains no frames.");
+            "WSPR transmission request contains no frames.");
     }
 
-    if (state_.load(std::memory_order_acquire) == State::TRANSMITTING)
-    {
-        requestStopTx();
-    }
+    current_request_ = request;
 
-    shutdown();
-    cleanupTransmissionBackend();
-
-    stop_requested_.store(false);
-
-    trans_params_.wspr_plan = plan;
-    trans_params_.frequency = frequency;
-    trans_params_.ppm = ppm;
-    trans_params_.power = power;
-    trans_params_.use_offset = use_offset;
-    trans_params_.is_tone = false;
-    trans_params_.symtime = WSPR_SYMTIME;
-    trans_params_.tone_spacing = 1.0 / trans_params_.symtime;
-
-    if (trans_params_.use_offset)
-    {
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_real_distribution<> dis(-1.0, 1.0);
-        if (trans_params_.frequency != 0.0)
-            trans_params_.frequency += dis(gen) * WSPR_RAND_OFFSET;
-    }
-
-    if (trans_params_.frequency == 0.0)
+    if (current_request_.isSkipWindow())
     {
         // A zero WSPR frequency designates an intentional skipped window.
         // Do not initialize DMA or mailbox resources for this cycle.
@@ -454,8 +384,8 @@ void WsprTransmitter::configureWspr(
 
         const auto configure_result = configureTransmissionBackend();
 
-        if (trans_params_.frequency != 0.0)
-            trans_params_.frequency = configure_result.applied_frequency_hz;
+        if (current_request_.actual_rf_frequency_hz != 0.0)
+            current_request_.actual_rf_frequency_hz = configure_result.applied_frequency_hz;
 
         state_.store(State::ENABLED, std::memory_order_release);
     }
@@ -473,11 +403,6 @@ void WsprTransmitter::configureWspr(
     }
 }
 
-void WsprTransmitter::setTransmitGpio(int gpio) noexcept
-{
-    trans_params_.tx_gpio = gpio;
-}
-
 void WsprTransmitter::applyPpmCorrection(double ppm_new)
 {
     // Reconfiguration is only safe when the transmit thread is not actively
@@ -487,14 +412,16 @@ void WsprTransmitter::applyPpmCorrection(double ppm_new)
         requestStopTx();
     }
 
-    if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
+    current_request_.ppm = ppm_new;
+
+    if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
     {
         return;
     }
 
     const auto configure_result = configureTransmissionBackend();
-    if (trans_params_.frequency != 0.0)
-        trans_params_.frequency = configure_result.applied_frequency_hz;
+    if (current_request_.actual_rf_frequency_hz != 0.0)
+        current_request_.actual_rf_frequency_hz = configure_result.applied_frequency_hz;
 }
 
 void WsprTransmitter::setThreadScheduling(int policy, int priority)
@@ -528,7 +455,7 @@ void WsprTransmitter::startAsync()
 {
     stop_requested_.store(false, std::memory_order_release);
 
-    if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
+    if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
     {
         // Intended skip window. Do not initialize DMA, but still let the
         // normal scheduler/thread path advance to the scheduled window so the
@@ -561,7 +488,7 @@ void WsprTransmitter::startAsync()
     }
 
     // If the application has requested a soft-off, do not start scheduling.
-    if (!trans_params_.is_tone && soft_off_.load(std::memory_order_acquire))
+    if (!current_request_.isTone() && soft_off_.load(std::memory_order_acquire))
     {
         return;
     }
@@ -579,7 +506,7 @@ void WsprTransmitter::startAsync()
         }
     }
 
-    const bool immediate = trans_params_.is_tone ||
+    const bool immediate = current_request_.isTone() ||
                            transmit_now_.load(std::memory_order_acquire);
 
     if (immediate)
@@ -588,7 +515,7 @@ void WsprTransmitter::startAsync()
         // boundary. This emulates the final timer stage used by the normal
         // window scheduler (which sleeps to an absolute CLOCK_REALTIME
         // boundary).
-        if (!trans_params_.is_tone &&
+        if (!current_request_.isTone() &&
             transmit_now_.load(std::memory_order_acquire))
         {
             struct timespec now_rt{};
@@ -638,7 +565,7 @@ void WsprTransmitter::shutdown()
     //
     // soft_off_ is an application-level "no new scheduling" latch (used
     // for Ctrl-C / graceful shutdown). shutdown() is also used
-    // internally during reconfiguration (e.g., configureWspr()), and
+    // internally during reconfiguration (e.g., configureExecution()), and
     // must not permanently prevent future enableTransmission() calls.
     scheduler_.stop();
 
@@ -761,19 +688,19 @@ void WsprTransmitter::dumpParameters()
     std::ostringstream oss;
 
     oss << "Call Sign:         "
-        << (trans_params_.is_tone ? "N/A" : trans_params_.wspr_plan.callsign);
+        << (current_request_.isTone() ? "N/A" : current_request_.wspr_plan.callsign);
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "Grid Square:       "
-        << (trans_params_.is_tone ? "N/A" : trans_params_.wspr_plan.locator);
+        << (current_request_.isTone() ? "N/A" : current_request_.wspr_plan.locator);
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "Actual RF Freq:    "
-        << formatFrequencyMHz(trans_params_.frequency)
+        << formatFrequencyMHz(current_request_.actual_rf_frequency_hz)
         << " MHz";
     log_line(oss.str());
     oss.str("");
@@ -782,36 +709,36 @@ void WsprTransmitter::dumpParameters()
     oss << "GPIO Power:        "
         << std::fixed
         << std::setprecision(1)
-        << convert_mw_dbm(getOutputPowerMilliwatts(trans_params_.power))
+        << convert_mw_dbm(getOutputPowerMilliwatts(current_request_.power_level))
         << " dBm";
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "Transmit GPIO:     "
-        << trans_params_.tx_gpio;
+        << current_request_.tx_gpio;
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "Test Tone:         "
-        << (trans_params_.is_tone ? "True" : "False");
+        << (current_request_.isTone() ? "True" : "False");
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "WSPR Symbol Time:  "
-        << (trans_params_.is_tone
+        << (current_request_.isTone()
                 ? "N/A"
-                : (std::to_string(trans_params_.symtime) + " s"));
+                : (std::to_string(WSPR_SYMTIME) + " s"));
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "WSPR Tone Spacing: "
-        << (trans_params_.is_tone
+        << (current_request_.isTone()
                 ? "N/A"
-                : (std::to_string(trans_params_.tone_spacing) + " Hz"));
+                : (std::to_string(1.0 / WSPR_SYMTIME) + " Hz"));
     log_line(oss.str());
     oss.str("");
     oss.clear();
@@ -822,7 +749,7 @@ void WsprTransmitter::dumpParameters()
     oss.str("");
     oss.clear();
 
-    if (trans_params_.is_tone)
+    if (current_request_.isTone())
     {
         log_line("WSPR Symbols:      N/A");
     }
@@ -831,11 +758,11 @@ void WsprTransmitter::dumpParameters()
         log_line("WSPR Symbols:");
 
         const int frame_count =
-            static_cast<int>(trans_params_.wspr_plan.frameCount());
+            static_cast<int>(current_request_.wspr_plan.frameCount());
         const int symbols_per_frame =
-            static_cast<int>(trans_params_.wspr_plan.symbolCountPerFrame());
+            static_cast<int>(current_request_.wspr_plan.symbolCountPerFrame());
         const int symbol_count =
-            static_cast<int>(trans_params_.wspr_plan.totalSymbolCount());
+            static_cast<int>(current_request_.wspr_plan.totalSymbolCount());
 
         std::string line;
         line.reserve(128);
@@ -846,7 +773,7 @@ void WsprTransmitter::dumpParameters()
             const int symbol_index = i % symbols_per_frame;
             line += std::to_string(
                 static_cast<int>(
-                    trans_params_.wspr_plan.frames[frame_index]
+                    current_request_.wspr_plan.frames[frame_index]
                         .symbols[symbol_index]));
 
             if (i < symbol_count - 1)
@@ -929,21 +856,12 @@ void WsprTransmitter::backendFireTransmitCallback(
 
 bool WsprTransmitter::backendRestartCurrentConfiguration()
 {
-    const double frequency = trans_params_.frequency;
-    const int power = trans_params_.power;
-    const double ppm = trans_params_.ppm;
-    const bool use_offset = trans_params_.use_offset;
-    const PreparedWsprTransmission plan = trans_params_.wspr_plan;
-    const bool is_tone = trans_params_.is_tone;
+    const WsprTransmissionRequest request = current_request_;
 
     shutdown();
     cleanupTransmissionBackend();
 
-    if (is_tone)
-        configureTone(frequency, power, ppm);
-    else
-        configureWspr(frequency, power, ppm, plan, use_offset);
-
+    configureExecution(request);
     startAsync();
     return true;
 }
@@ -951,11 +869,11 @@ bool WsprTransmitter::backendRestartCurrentConfiguration()
 WsprTransmissionPlan WsprTransmitter::buildTransmissionPlan() const noexcept
 {
     return WsprTransmissionPlan{
-        trans_params_.frequency,
-        trans_params_.tone_spacing,
-        trans_params_.power,
-        trans_params_.tx_gpio,
-        trans_params_.is_tone ? 0U : trans_params_.wspr_plan.totalSymbolCount()};
+        current_request_.actual_rf_frequency_hz,
+        1.0 / WSPR_SYMTIME,
+        current_request_.power_level,
+        current_request_.tx_gpio,
+        current_request_.totalSymbolCount()};
 }
 
 bool WsprTransmitter::shouldStop() const noexcept
@@ -1067,7 +985,7 @@ void WsprTransmitter::throwIfStopRequested(const char *context)
 
 void WsprTransmitter::transmit()
 {
-    if (!trans_params_.is_tone && trans_params_.frequency == 0.0)
+    if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
     {
         const std::int64_t start_rt_ns =
             scheduled_start_rt_ns_.load(std::memory_order_acquire);
@@ -1149,13 +1067,13 @@ void WsprTransmitter::transmit()
         }
     };
 
-    if (trans_params_.is_tone)
+    if (current_request_.isTone())
     {
         // Fire callback as close to the first symbol as possible.
         fire_transmit_cb(TransmissionCallbackEvent::STARTING,
                          LogLevel::INFO,
                          "",
-                         trans_params_.frequency);
+                         current_request_.actual_rf_frequency_hz);
 
         const auto t0_chrono = std::chrono::steady_clock::now();
 
@@ -1259,15 +1177,15 @@ void WsprTransmitter::transmit()
         }
 
         // Fire callback as close to the first symbol as possible.
-        fire_transmit_cb(TransmissionCallbackEvent::STARTING, LogLevel::INFO, "", trans_params_.frequency);
+        fire_transmit_cb(TransmissionCallbackEvent::STARTING, LogLevel::INFO, "", current_request_.actual_rf_frequency_hz);
 
         const int frame_count =
-            static_cast<int>(trans_params_.wspr_plan.frameCount());
+            static_cast<int>(current_request_.wspr_plan.frameCount());
         const int symbols_per_frame =
-            static_cast<int>(trans_params_.wspr_plan.symbolCountPerFrame());
+            static_cast<int>(current_request_.wspr_plan.symbolCountPerFrame());
         const int symbol_count =
-            static_cast<int>(trans_params_.wspr_plan.totalSymbolCount());
-        const double symtime = trans_params_.symtime;
+            static_cast<int>(current_request_.wspr_plan.totalSymbolCount());
+        const double symtime = WSPR_SYMTIME;
 
         if (frame_count > 1)
         {
@@ -1304,7 +1222,7 @@ void WsprTransmitter::transmit()
         int i = 0;
         if (symbol_count > 0 && !shouldStop())
         {
-            const auto &first_frame = trans_params_.wspr_plan.frames.front();
+            const auto &first_frame = current_request_.wspr_plan.frames.front();
             emitSymbol(
                 static_cast<int>(first_frame.symbols[0]),
                 symtime,
@@ -1367,7 +1285,7 @@ void WsprTransmitter::transmit()
 
             emitSymbol(
                 static_cast<int>(
-                    trans_params_.wspr_plan.frames[frame_index]
+                    current_request_.wspr_plan.frames[frame_index]
                         .symbols[symbol_index]),
                 symtime,
                 i);
