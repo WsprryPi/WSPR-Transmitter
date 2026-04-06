@@ -1,6 +1,6 @@
 /**
  * @file wspr_transmit_backend_rpi.hpp
- * @brief Raspberry Pi DMA/PWM/mailbox WSPR transmission backend.
+ * @brief Raspberry Pi backend that realizes committed execution in hardware.
  *
  * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
@@ -52,9 +52,10 @@
  * - GPIO drive-strength based output power control
  * - DMA watchdog monitoring and backend-private recovery
  *
- * The controller provides transmission intent and timing decisions. This
- * backend translates that intent into Raspberry Pi hardware actions while
- * keeping DMA, mailbox, watchdog, and recovery state private.
+ * The transmitter provides the backend-neutral execution plan and timing.
+ * This backend translates that committed execution into Raspberry Pi
+ * hardware actions while keeping DMA, mailbox, watchdog, and recovery state
+ * private. It does not own WSPR planning or orchestration policy.
  */
 class WsprRpiBackend : public WsprTransmitBackend
 {
@@ -88,7 +89,7 @@ public:
     void prepareTransmission() override;
 
     /**
-     * @brief Apply the requested transmission plan to Raspberry Pi hardware.
+     * @brief Apply the committed transmission plan to Raspberry Pi hardware.
      *
      * @param plan Backend-neutral transmission snapshot.
      * @return Applied configuration result including the actual RF center

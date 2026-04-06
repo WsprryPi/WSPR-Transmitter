@@ -1,6 +1,6 @@
 /**
  * @file wspr_transmit.hpp
- * @brief Controller/facade API for configured WSPR transmission.
+ * @brief Transmitter boundary for executing committed requests.
  *
  * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
@@ -70,12 +70,12 @@ public:
 
 /**
  * @class WsprTransmitter
- * @brief Controller/facade for configured WSPR transmission.
+ * @brief Controller/facade for executing committed WSPR or tone requests.
  *
  * @details
- *   `WsprTransmitter` owns the public API, configured transmission state,
- *   scheduling policy, and transmit timing loop. Hardware-specific work is
- *   delegated to an active `WsprTransmitBackend` implementation.
+ *   `WsprTransmitter` owns the public API, committed execution state, and
+ *   transmit timing loop. Hardware-specific work is delegated to an active
+ *   `WsprTransmitBackend` implementation.
  *
  *   Responsibilities of the controller include:
  *   - Accepting a fully selected execution request from the orchestration
@@ -85,6 +85,12 @@ public:
  *   - Managing scheduler, worker threads, stop requests, and high-level
  *     transmission state.
  *   - Forwarding logging and lifecycle callbacks.
+ *
+ *   Responsibilities intentionally excluded from the transmitter include:
+ *   - WSPR planning policy such as Auto versus RequirePaired.
+ *   - Tone versus WSPR mode selection.
+ *   - Random WSPR offset selection.
+ *   - Per-frequency selector GPIO choice and preparation.
  *
  *   Responsibilities intentionally left to the backend include:
  *   - Hardware setup and teardown
@@ -234,12 +240,12 @@ public:
     static std::string formatFrequencyMHz(double frequency_hz);
 
     /**
-     * @brief Configure one execution request.
+     * @brief Configure one committed execution request.
      *
      * @details
      *   The caller provides the fully selected execution request for the next
-     *   run. This method does not decide policy such as tone vs WSPR, paired
-     *   planning, GPIO selection, or in-band offset selection.
+     *   run. This method does not decide policy such as tone versus WSPR,
+     *   paired planning, GPIO selection, or in-band offset selection.
      */
     void configureExecution(const WsprTransmissionRequest &request);
 
@@ -263,16 +269,16 @@ public:
     /**
      * @brief Enable or disable one-shot scheduling for WSPR mode.
      *
-     * When enabled, the scheduler will launch exactly one WSPR transmission
-     * and then stop without scheduling further windows.
+     * When enabled, the internal timing scheduler will launch exactly one
+     * already-committed WSPR request and then stop.
      */
     void setOneShot(bool enable) noexcept;
 
     /**
      * @brief Enable or disable immediate transmission for WSPR mode.
      *
-     * When enabled, WSPR mode bypasses the next-window scheduler and starts
-     * immediately (useful for testing).
+     * When enabled, WSPR mode bypasses the next-window wait and starts the
+     * already-committed request immediately.
      */
     void setTransmitNow(bool enable) noexcept;
 
@@ -321,8 +327,8 @@ public:
      * @details
      *   Sets the internal stop flag, wakes any interruptible waits, and
      *   waits for the transmit thread to exit. After this returns, it is
-     *   safe to call configureExecution() and then restart
-     *   with startAsync().
+     *   safe to call configureExecution() with a new committed request and
+     *   then restart with startAsync().
      */
     void requestStopTx();
 
@@ -369,8 +375,8 @@ public:
      *
      * @details
      *   When enabled, the watchdog thread will request a full hardware reset
-     *   (DMA/PWM/clock teardown and re-init) and will restart the scheduler
-     *   using the last configured parameters.
+     *   (DMA/PWM/clock teardown and re-init) and will restart execution
+     *   using the last committed request.
      *
      *   Recovery runs on a dedicated internal worker thread so the watchdog
      *   can exit promptly without risking deadlocks.
@@ -390,8 +396,8 @@ public:
      * @details
      *   This is a synchronous recovery helper. It stops the scheduler and
      *   transmit thread, resets DMA/PWM/clock state, reinitializes DMA state
-     *   with the last configured parameters, clears the watchdog fault latch,
-     *   and restarts scheduling via startAsync().
+     *   with the last committed request, clears the watchdog fault latch,
+     *   and restarts execution via startAsync().
      *
      * @return True if recovery succeeded, false otherwise.
      */
@@ -660,8 +666,8 @@ private:
      * @brief Active execution request.
      *
      * @details
-     *   This instance holds the currently configured execution request used by
-     *   the scheduler and transmit thread.
+     *   This instance holds the committed execution request used by the
+     *   internal timing scheduler and transmit thread.
      */
     WsprTransmissionRequest current_request_{};
 
@@ -686,6 +692,13 @@ private:
                           const std::string &msg,
                           double value);
 
+    /**
+     * @brief Derive the backend-neutral execution plan for the active request.
+     *
+     * @details
+     *   This converts the committed request into the reduced hardware-facing
+     *   plan consumed by the backend. It does not perform planning policy.
+     */
     WsprTransmissionPlan buildTransmissionPlan() const noexcept;
 
     /**

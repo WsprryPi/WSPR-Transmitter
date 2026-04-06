@@ -94,8 +94,8 @@ enum class WsprTransmissionCallbackEvent
 
 enum class WsprTransmissionMode
 {
-    WSPR,
-    TONE
+    WSPR, ///< Prepared WSPR frame execution for one committed slot.
+    TONE  ///< Direct RF tone execution for one committed runtime request.
 };
 
 inline constexpr int kWsprTransmitControlGpioUnset = -1;
@@ -113,17 +113,86 @@ inline constexpr int kWsprRandomOffsetHz = 80;
  */
 struct WsprTransmissionRequest
 {
+    /**
+     * @brief Execution mode already chosen by the scheduler.
+     *
+     * This is an execution-time choice, not a backend or transmitter policy
+     * decision. Tone mode is transient runtime behavior.
+     */
     WsprTransmissionMode mode = WsprTransmissionMode::WSPR;
+
+    /**
+     * @brief Prepared WSPR frame data for this committed slot.
+     *
+     * This is empty for tone mode. For paired WSPR, the scheduler commits
+     * one slot at a time even if the saved scheduler plan spans two slots.
+     */
     PreparedWsprTransmission wspr_plan{};
+
+    /**
+     * @brief Scheduler-selected dial frequency in hertz (Hz).
+     *
+     * This remains the user-facing dial frequency even when the actual RF
+     * execution frequency differs because of audio offset or random offset.
+     */
     double dial_frequency_hz = 0.0;
+
+    /**
+     * @brief Committed RF frequency to realize in hertz (Hz).
+     *
+     * This is the execution frequency after scheduler-side audio-offset and
+     * optional random-offset handling.
+     */
     double actual_rf_frequency_hz = 0.0;
+
+    /**
+     * @brief PPM correction committed for this execution.
+     *
+     * Backends consume this value directly and must not fetch PPM through a
+     * separate policy path.
+     */
     double ppm = 0.0;
     int power_level = 0;
+
+    /**
+     * @brief BCM GPIO used for RF output.
+     *
+     * This is the transmit-output GPIO consumed by the backend, not the
+     * scheduler-owned per-frequency selector GPIO.
+     */
     int tx_gpio = 4;
+
+    /**
+     * @brief Whether the scheduler enabled random WSPR offset for this slot.
+     *
+     * This is informative metadata describing how the committed RF frequency
+     * was chosen. It is not a request for the backend to add offset.
+     */
     bool use_offset = false;
+
+    /**
+     * @brief Scheduler-applied WSPR random offset in hertz (Hz).
+     *
+     * Zero means no random offset was committed for this request.
+     */
     double applied_offset_hz = 0.0;
+
+    /**
+     * @brief Optional per-frequency control GPIO prepared by the scheduler.
+     *
+     * This represents transient runtime selector state tied to the currently
+     * selected frequency entry, not persistent transmit GPIO configuration.
+     */
     int frequency_control_gpio = kWsprTransmitControlGpioUnset;
+
+    /**
+     * @brief Polarity for the per-frequency control GPIO.
+     */
     bool frequency_control_active_high = false;
+
+    /**
+     * @brief Original user-facing frequency token for logs and diagnostics.
+     */
     std::string frequency_entry_label{};
 
     bool isTone() const noexcept
@@ -147,11 +216,12 @@ struct WsprTransmissionRequest
  * @brief Backend-neutral snapshot of transmission intent and configuration.
  *
  * @details
- * The controller constructs this lightweight plan from its active
- * configuration and passes it to a backend when preparing, configuring, or
- * emitting a transmission. It contains only the data a backend should need to
- * render RF, without exposing backend-private runtime state such as DMA
- * cursors, watchdog state, mailbox handles, or recovery bookkeeping.
+ * The transmitter constructs this lightweight plan from the committed
+ * execution request and passes it to a backend when preparing, configuring,
+ * or emitting a transmission. It contains only the data a backend should
+ * need to render RF, without exposing scheduler metadata or backend-private
+ * runtime state such as DMA cursors, watchdog state, mailbox handles, or
+ * recovery bookkeeping.
  */
 struct WsprTransmissionPlan
 {

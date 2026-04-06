@@ -1,6 +1,6 @@
 /**
  * @file wspr_transmit_backend_rpi.cpp
- * @brief Raspberry Pi DMA/PWM/mailbox WSPR backend implementation.
+ * @brief Raspberry Pi hardware realization for committed transmission plans.
  *
  * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
@@ -225,6 +225,8 @@ void WsprRpiBackend::stopFaultMonitoring()
 
 void WsprRpiBackend::prepareTransmission()
 {
+    // Hardware resource allocation only. Planning and request selection
+    // remain in higher layers.
     setup_dma();
 }
 

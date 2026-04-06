@@ -1,6 +1,6 @@
 /**
  * @file wspr_transmit.cpp
- * @brief Controller/facade implementation for configured WSPR transmission.
+ * @brief Transmitter implementation for executing committed requests.
  *
  * Copyright © 2025 - 2026 Lee C. Bussy (@LBussy). All rights reserved.
  *
@@ -367,6 +367,8 @@ void WsprTransmitter::configureExecution(
             "WSPR transmission request contains no frames.");
     }
 
+    // Store the committed execution snapshot exactly as provided by the
+    // orchestration layer. Recovery paths reuse this request verbatim.
     current_request_ = request;
 
     if (current_request_.isSkipWindow())
@@ -847,6 +849,8 @@ bool WsprTransmitter::backendRestartCurrentConfiguration()
 
 WsprTransmissionPlan WsprTransmitter::buildTransmissionPlan() const noexcept
 {
+    // Reduce the committed request to the hardware-facing fields consumed by
+    // the backend. Policy and scheduler metadata stay out of the backend.
     return WsprTransmissionPlan{
         current_request_.actual_rf_frequency_hz,
         1.0 / WSPR_SYMTIME,
