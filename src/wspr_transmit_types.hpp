@@ -176,6 +176,16 @@ struct WsprTransmissionPlan
     int power_level = 0;
 
     /**
+     * @brief Applied frequency correction in parts per million (PPM).
+     *
+     * @details
+     * The controller commits this as part of the execution request so the
+     * backend can derive hardware clocking for the active transmission
+     * without relying on an out-of-band mutation path.
+     */
+    double ppm = 0.0;
+
+    /**
      * @brief BCM GPIO used to emit the GPCLK0-based RF output.
      */
     int tx_gpio = 4;

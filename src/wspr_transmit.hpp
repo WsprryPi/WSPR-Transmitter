@@ -244,14 +244,6 @@ public:
     void configureExecution(const WsprTransmissionRequest &request);
 
     /**
-     * @brief Rebuild the DMA tuning-word table with a fresh PPM correction.
-     *
-     * @param ppm_new The new parts-per-million offset (e.g. +11.135).
-     * @throws std::runtime_error if peripherals are not mapped.
-     */
-    void applyPpmCorrection(double ppm_new);
-
-    /**
      * @brief Configure POSIX scheduling policy and priority for future
      *        transmissions.
      *
@@ -329,7 +321,7 @@ public:
      * @details
      *   Sets the internal stop flag, wakes any interruptible waits, and
      *   waits for the transmit thread to exit. After this returns, it is
-     *   safe to call configure() or applyPpmCorrection() and then restart
+     *   safe to call configureExecution() and then restart
      *   with startAsync().
      */
     void requestStopTx();

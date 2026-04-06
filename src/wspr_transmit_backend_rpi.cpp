@@ -1701,6 +1701,28 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
 
     configure_transmit_gpio(plan.tx_gpio);
 
+    dma_config_.plld_clock_frequency =
+        dma_config_.plld_nominal_freq * (1.0 - (plan.ppm * 1.0e-6));
+
+    if (!std::isfinite(dma_config_.plld_clock_frequency) ||
+        dma_config_.plld_clock_frequency <= 0.0)
+    {
+        throw std::runtime_error(
+            "configureTransmission(): invalid PLLD frequency after PPM correction.");
+    }
+
+    uint32_t div_reg = static_cast<uint32_t>(
+        access_bus_address(CLK_BUS_BASE + 41 * 4));
+    uint32_t divisor = (div_reg >> 12) & 0xFFF;
+
+    if (divisor == 0)
+    {
+        throw std::runtime_error(
+            "configureTransmission(): PWM clock divisor read back as 0.");
+    }
+
+    pwm_clock_init_ = dma_config_.plld_clock_frequency / double(divisor);
+
     double div_lo = bit_trunc(
                         dma_config_.plld_clock_frequency /
                             (plan.frequency_hz - 1.5 * plan.tone_spacing_hz),

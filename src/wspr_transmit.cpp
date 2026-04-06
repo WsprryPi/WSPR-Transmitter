@@ -403,27 +403,6 @@ void WsprTransmitter::configureExecution(
     }
 }
 
-void WsprTransmitter::applyPpmCorrection(double ppm_new)
-{
-    // Reconfiguration is only safe when the transmit thread is not actively
-    // feeding DMA. If a transmission is in progress, stop it first.
-    if (state_.load(std::memory_order_acquire) == State::TRANSMITTING)
-    {
-        requestStopTx();
-    }
-
-    current_request_.ppm = ppm_new;
-
-    if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
-    {
-        return;
-    }
-
-    const auto configure_result = configureTransmissionBackend();
-    if (current_request_.actual_rf_frequency_hz != 0.0)
-        current_request_.actual_rf_frequency_hz = configure_result.applied_frequency_hz;
-}
-
 void WsprTransmitter::setThreadScheduling(int policy, int priority)
 {
     thread_policy_ = policy;
@@ -872,6 +851,7 @@ WsprTransmissionPlan WsprTransmitter::buildTransmissionPlan() const noexcept
         current_request_.actual_rf_frequency_hz,
         1.0 / WSPR_SYMTIME,
         current_request_.power_level,
+        current_request_.ppm,
         current_request_.tx_gpio,
         current_request_.totalSymbolCount()};
 }
