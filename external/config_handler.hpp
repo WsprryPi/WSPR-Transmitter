@@ -71,9 +71,6 @@ struct ArgParserConfig
     /** @brief Number of transmission iterations (0=infinite). */
     int tx_iterations = 0;
 
-    /** @brief Continuous test‐tone frequency in Hz (0=disabled). */
-    double test_tone = 0.0;
-
     /** @brief Load configuration from an INI file. */
     bool use_ini = false;
 
