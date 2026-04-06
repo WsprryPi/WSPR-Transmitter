@@ -37,6 +37,7 @@ PreparedWsprFrame to_frame(const std::string& symbols)
 }
 } // namespace
 
+// Remember: Top-level wsprrypi should not call it directly outside scheduler/orchestration logic
 PreparedWsprTransmission build_prepared_wspr_transmission(
     const std::string& callsign,
     const std::string& locator,

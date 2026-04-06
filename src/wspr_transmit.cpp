@@ -397,6 +397,7 @@ void WsprTransmitter::configureTone(
     }
 }
 
+// Remember: Planning policy must happen above the transmitter layer
 void WsprTransmitter::configureWspr(
     double frequency,
     int power,
