@@ -272,6 +272,8 @@ public:
         const PreparedWsprTransmission &plan,
         bool use_offset = false);
 
+    void setTransmitGpio(int gpio) noexcept;
+
     /**
      * @brief Rebuild the DMA tuning-word table with a fresh PPM correction.
      *
@@ -749,6 +751,11 @@ private:
         int power;
 
         /**
+         * @brief BCM GPIO used to route the GPCLK0 RF output.
+         */
+        int tx_gpio;
+
+        /**
          * @brief Symbol duration in seconds.
          */
         double symtime;
@@ -772,6 +779,7 @@ private:
               ppm(0.0),
               is_tone(false),
               power(0),
+              tx_gpio(4),
               symtime(0.0),
               tone_spacing(0.0),
               use_offset(false)

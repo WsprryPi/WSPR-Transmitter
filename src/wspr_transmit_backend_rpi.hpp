@@ -191,6 +191,9 @@ private:
         volatile uint8_t *peripheral_base_virtual;
         uint32_t orig_gp0ctl;
         uint32_t orig_gp0div;
+        uint32_t orig_gpfsel0;
+        uint32_t orig_gpfsel1;
+        uint32_t orig_gpfsel2;
         uint32_t orig_pwm_ctl;
         uint32_t orig_pwm_sta;
         uint32_t orig_pwm_rng1;
@@ -250,6 +253,7 @@ private:
     inline volatile int &access_bus_address(std::uintptr_t bus_addr);
     inline void set_bit_bus_address(std::uintptr_t base, unsigned int bit);
     inline void clear_bit_bus_address(std::uintptr_t base, unsigned int bit);
+    void configure_transmit_gpio(int gpio);
     void start_watchdog();
     void stop_watchdog();
     void setup_dma();
@@ -305,6 +309,7 @@ private:
     std::uint32_t dma_buf_ptr_{0};
     double pwm_clock_init_{0};
     int watchdog_cpu_{1};
+    int configured_tx_gpio_{4};
     PageInfo const_page_{};
     PageInfo instr_page_{};
     PageInfo instructions_[1024]{};

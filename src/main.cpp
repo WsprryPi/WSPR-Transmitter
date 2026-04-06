@@ -650,6 +650,7 @@ void configure_transmitter(bool isWspr)
                 std::string(GRID),
                 POWER_DBM);
 
+        wsprTransmitter.setTransmitGpio(config.tx_pin);
         wsprTransmitter.configureWspr(
             WSPR_FREQ,
             POWER,
@@ -659,6 +660,7 @@ void configure_transmitter(bool isWspr)
     }
     else
     {
+        wsprTransmitter.setTransmitGpio(config.tx_pin);
         wsprTransmitter.configureTone(WSPR_FREQ, 0, config.ppm);
     }
 

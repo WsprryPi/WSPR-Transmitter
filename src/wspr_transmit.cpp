@@ -473,6 +473,11 @@ void WsprTransmitter::configureWspr(
     }
 }
 
+void WsprTransmitter::setTransmitGpio(int gpio) noexcept
+{
+    trans_params_.tx_gpio = gpio;
+}
+
 void WsprTransmitter::applyPpmCorrection(double ppm_new)
 {
     // Reconfiguration is only safe when the transmit thread is not actively
@@ -783,6 +788,12 @@ void WsprTransmitter::dumpParameters()
     oss.str("");
     oss.clear();
 
+    oss << "Transmit GPIO:     "
+        << trans_params_.tx_gpio;
+    log_line(oss.str());
+    oss.str("");
+    oss.clear();
+
     oss << "Test Tone:         "
         << (trans_params_.is_tone ? "True" : "False");
     log_line(oss.str());
@@ -943,6 +954,7 @@ WsprTransmissionPlan WsprTransmitter::buildTransmissionPlan() const noexcept
         trans_params_.frequency,
         trans_params_.tone_spacing,
         trans_params_.power,
+        trans_params_.tx_gpio,
         trans_params_.is_tone ? 0U : trans_params_.wspr_plan.totalSymbolCount()};
 }
 

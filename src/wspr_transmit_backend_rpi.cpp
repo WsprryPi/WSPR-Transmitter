@@ -178,6 +178,9 @@ WsprRpiBackend::DMAConfig::DMAConfig()
       peripheral_base_virtual(nullptr),
       orig_gp0ctl(0),
       orig_gp0div(0),
+      orig_gpfsel0(0),
+      orig_gpfsel1(0),
+      orig_gpfsel2(0),
       orig_pwm_ctl(0),
       orig_pwm_sta(0),
       orig_pwm_rng1(0),
@@ -937,6 +940,9 @@ void WsprRpiBackend::dma_cleanup()
 
     access_bus_address(CM_GP0DIV_BUS) = dma_config_.orig_gp0div;
     access_bus_address(CM_GP0CTL_BUS) = dma_config_.orig_gp0ctl;
+    access_bus_address(GPIO_BUS_BASE + 0) = dma_config_.orig_gpfsel0;
+    access_bus_address(GPIO_BUS_BASE + 4) = dma_config_.orig_gpfsel1;
+    access_bus_address(GPIO_BUS_BASE + 8) = dma_config_.orig_gpfsel2;
     access_bus_address(PWM_BUS_BASE + 0x00) = dma_config_.orig_pwm_ctl;
     access_bus_address(PWM_BUS_BASE + 0x04) = dma_config_.orig_pwm_sta;
     access_bus_address(PWM_BUS_BASE + 0x10) = dma_config_.orig_pwm_rng1;
@@ -984,6 +990,39 @@ inline void WsprRpiBackend::set_bit_bus_address(std::uintptr_t base, unsigned in
 inline void WsprRpiBackend::clear_bit_bus_address(std::uintptr_t base, unsigned int bit)
 {
     access_bus_address(base) &= ~(1 << bit);
+}
+
+void WsprRpiBackend::configure_transmit_gpio(int gpio)
+{
+    std::uintptr_t register_offset = 0;
+    unsigned shift = 0;
+    std::uint32_t function_bits = 0;
+
+    switch (gpio)
+    {
+    case 4:
+        register_offset = 0;
+        shift = 12;
+        function_bits = 0b100u; // ALT0 -> GPCLK0 on GPIO4
+        break;
+    case 20:
+        register_offset = 8;
+        shift = 0;
+        function_bits = 0b010u; // ALT5 -> GPCLK0 on GPIO20
+        break;
+    default:
+        throw std::invalid_argument(
+            "Unsupported transmit GPIO. GPCLK0 output is supported on BCM GPIO 4 or 20.");
+    }
+
+    volatile int &gpfsel =
+        access_bus_address(GPIO_BUS_BASE + register_offset);
+    const std::uint32_t mask = static_cast<std::uint32_t>(0b111u << shift);
+    const std::uint32_t current_value = static_cast<std::uint32_t>(gpfsel);
+    const std::uint32_t updated_value =
+        (current_value & ~mask) | (function_bits << shift);
+    gpfsel = static_cast<int>(updated_value);
+    configured_tx_gpio_ = gpio;
 }
 
 void WsprRpiBackend::get_plld()
@@ -1188,9 +1227,7 @@ void WsprRpiBackend::disable_clock()
 
 void WsprRpiBackend::transmit_on(const WsprTransmissionPlan &plan)
 {
-    set_bit_bus_address(GPIO_BUS_BASE, 14);
-    clear_bit_bus_address(GPIO_BUS_BASE, 13);
-    clear_bit_bus_address(GPIO_BUS_BASE, 12);
+    configure_transmit_gpio(plan.tx_gpio);
 
     access_bus_address(PADS_GPIO_0_27_BUS) = 0x5a000018 + plan.power_level;
 
@@ -1553,6 +1590,9 @@ void WsprRpiBackend::setup_dma()
 
     dma_config_.orig_gp0ctl = access_bus_address(CM_GP0CTL_BUS);
     dma_config_.orig_gp0div = access_bus_address(CM_GP0DIV_BUS);
+    dma_config_.orig_gpfsel0 = access_bus_address(GPIO_BUS_BASE + 0);
+    dma_config_.orig_gpfsel1 = access_bus_address(GPIO_BUS_BASE + 4);
+    dma_config_.orig_gpfsel2 = access_bus_address(GPIO_BUS_BASE + 8);
     dma_config_.orig_pwm_ctl = access_bus_address(PWM_BUS_BASE + 0x00);
     dma_config_.orig_pwm_sta = access_bus_address(PWM_BUS_BASE + 0x04);
     dma_config_.orig_pwm_rng1 = access_bus_address(PWM_BUS_BASE + 0x10);
@@ -1658,6 +1698,8 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
 {
     WsprTransmissionConfigureResult result{};
     result.applied_frequency_hz = plan.frequency_hz;
+
+    configure_transmit_gpio(plan.tx_gpio);
 
     double div_lo = bit_trunc(
                         dma_config_.plld_clock_frequency /

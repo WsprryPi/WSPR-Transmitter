@@ -124,6 +124,11 @@ struct WsprTransmissionPlan
     int power_level = 0;
 
     /**
+     * @brief BCM GPIO used to emit the GPCLK0-based RF output.
+     */
+    int tx_gpio = 4;
+
+    /**
      * @brief Total number of symbols that will be emitted for this transmission.
      *
      * @details
@@ -136,7 +141,6 @@ struct WsprTransmissionPlan
     {
         return total_symbol_count;
     }
-
 };
 
 /**
