@@ -549,6 +549,25 @@ void transmitter_cb(
         g_end_cv.notify_one();
         break;
     }
+    case WsprTransmissionCallbackEvent::CANCELLED:
+    {
+        const double elapsed = value;
+
+        std::cout << log_tag
+                  << "Transmission cancelled after "
+                  << std::fixed
+                  << std::setprecision(6)
+                  << elapsed
+                  << " seconds."
+                  << std::endl;
+
+        {
+            std::lock_guard<std::mutex> lk(g_end_mtx);
+            g_transmission_done = true;
+        }
+        g_end_cv.notify_one();
+        break;
+    }
     case WsprTransmissionCallbackEvent::LOGGING:
     {
         std::ostream &base =

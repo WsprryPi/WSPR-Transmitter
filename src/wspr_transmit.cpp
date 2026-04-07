@@ -985,10 +985,10 @@ void WsprTransmitter::transmit()
                 state_.store(canceled ? State::CANCELLED : State::COMPLETE,
                              std::memory_order_release);
                 fire_transmit_cb(canceled
-                                     ? TransmissionCallbackEvent::COMPLETE
+                                     ? TransmissionCallbackEvent::CANCELLED
                                      : TransmissionCallbackEvent::SKIPPED,
                                  LogLevel::INFO,
-                                 canceled ? "canceled" : "Skipping transmission",
+                                 canceled ? "" : "Skipping transmission",
                                  0.0);
                 return;
             }
@@ -998,10 +998,10 @@ void WsprTransmitter::transmit()
         state_.store(canceled ? State::CANCELLED : State::COMPLETE,
                      std::memory_order_release);
         fire_transmit_cb(canceled
-                             ? TransmissionCallbackEvent::COMPLETE
+                             ? TransmissionCallbackEvent::CANCELLED
                              : TransmissionCallbackEvent::SKIPPED,
                          LogLevel::INFO,
-                         canceled ? "canceled" : "Skipping transmission",
+                         canceled ? "" : "Skipping transmission",
                          0.0);
         return;
     }
@@ -1097,9 +1097,11 @@ void WsprTransmitter::transmit()
 
         const double actual =
             std::chrono::duration<double>(t_end_chrono - t0_chrono).count();
-        fire_transmit_cb(TransmissionCallbackEvent::COMPLETE,
+        fire_transmit_cb(canceled
+                             ? TransmissionCallbackEvent::CANCELLED
+                             : TransmissionCallbackEvent::COMPLETE,
                          LogLevel::INFO,
-                         canceled ? "canceled" : "",
+                         "",
                          actual);
     }
     else
@@ -1303,7 +1305,12 @@ void WsprTransmitter::transmit()
 
         const double actual =
             std::chrono::duration<double>(t_end_chrono - t0_chrono).count();
-        fire_transmit_cb(TransmissionCallbackEvent::COMPLETE, LogLevel::INFO, canceled ? "canceled" : "", actual);
+        fire_transmit_cb(canceled
+                             ? TransmissionCallbackEvent::CANCELLED
+                             : TransmissionCallbackEvent::COMPLETE,
+                         LogLevel::INFO,
+                         "",
+                         actual);
     }
 }
 

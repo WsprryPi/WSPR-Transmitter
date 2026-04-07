@@ -207,7 +207,7 @@ public:
      * @param level Log level for the message.
      * @param msg   Descriptor string for the transmission; may be empty.
      * @param value For STARTING, the active transmit frequency in Hz.
-     *              For COMPLETE, the elapsed transmission time in seconds.
+     *              For COMPLETE or CANCELLED, the elapsed transmission time in seconds.
      *              For SKIPPED, this value is ignored.
      *              For LOGGING, this value is ignored.
      */
@@ -684,7 +684,7 @@ private:
      * @param level Log level for the callback.
      * @param msg   Message string describing the transmission.
      * @param value For STARTING, the transmit frequency in Hz.
-     *              For COMPLETE, the elapsed transmission time in seconds.
+     *              For COMPLETE or CANCELLED, the elapsed transmission time in seconds.
      *              For SKIPPED and LOGGING, this value is ignored.
      */
     void fire_transmit_cb(TransmissionCallbackEvent event,

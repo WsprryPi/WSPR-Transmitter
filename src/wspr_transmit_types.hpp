@@ -88,6 +88,7 @@ enum class WsprTransmissionCallbackEvent
 {
     STARTING,
     COMPLETE,
+    CANCELLED,
     SKIPPED,
     LOGGING
 };
