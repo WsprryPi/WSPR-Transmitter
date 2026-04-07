@@ -196,6 +196,14 @@ struct WsprTransmissionRequest
      */
     std::string frequency_entry_label{};
 
+    /**
+     * @brief True only when the scheduler intentionally commits a skipped slot.
+     *
+     * This must not be inferred from a zero RF frequency because waiting and
+     * logging paths are not scheduling skips.
+     */
+    bool skip_window = false;
+
     bool isTone() const noexcept
     {
         return mode == WsprTransmissionMode::TONE;
@@ -203,7 +211,7 @@ struct WsprTransmissionRequest
 
     bool isSkipWindow() const noexcept
     {
-        return !isTone() && actual_rf_frequency_hz == 0.0;
+        return !isTone() && skip_window;
     }
 
     std::size_t totalSymbolCount() const noexcept

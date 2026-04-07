@@ -32,6 +32,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -449,6 +450,14 @@ public:
     bool backendRestartCurrentConfiguration() override;
 
 private:
+    struct PendingTransmitCallback
+    {
+        TransmissionCallbackEvent event;
+        LogLevel level;
+        std::string msg;
+        double value;
+    };
+
     void startFaultMonitoring();
 
     void stopFaultMonitoring();
@@ -500,6 +509,11 @@ private:
      * perform setup, logging, or cleanup work tied to these events.
      */
     TransmissionCallback on_transmit_cb_{};
+    std::thread callback_thread_;
+    std::mutex callback_mtx_;
+    std::condition_variable callback_cv_;
+    std::deque<PendingTransmitCallback> callback_queue_{};
+    bool callback_stop_{false};
 
     /**
      * @brief Background thread for carrying out the transmission.
@@ -691,6 +705,8 @@ private:
                           LogLevel level,
                           const std::string &msg,
                           double value);
+    void callback_worker_loop();
+    void stop_callback_worker();
 
     /**
      * @brief Derive the backend-neutral execution plan for the active request.

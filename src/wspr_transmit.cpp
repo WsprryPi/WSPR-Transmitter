@@ -321,12 +321,14 @@ WsprTransmitter::WsprTransmitter()
         spin_ns_ = 0; // or 50'000 if you want a tiny spin
     }
     backend_ = std::make_unique<WsprRpiBackend>(*this);
+    callback_thread_ = std::thread(&WsprTransmitter::callback_worker_loop, this);
 }
 
 WsprTransmitter::~WsprTransmitter()
 {
     shutdown();
     cleanupTransmissionBackend();
+    stop_callback_worker();
 }
 
 void WsprTransmitter::setTransmissionCallbacks(TransmissionCallback cb)
@@ -373,11 +375,17 @@ void WsprTransmitter::configureExecution(
 
     if (current_request_.isSkipWindow())
     {
-        // A zero WSPR frequency designates an intentional skipped window.
+        // The scheduler explicitly marked this as a skipped window.
         // Do not initialize DMA or mailbox resources for this cycle.
         scheduled_start_rt_ns_.store(0, std::memory_order_release);
         state_.store(State::ENABLED, std::memory_order_release);
         return;
+    }
+
+    if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
+    {
+        throw std::invalid_argument(
+            "WSPR execution request missing actual RF frequency.");
     }
 
     try
@@ -438,9 +446,15 @@ void WsprTransmitter::startAsync()
 
     if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
     {
-        // Intended skip window. Do not initialize DMA, but still let the
-        // normal scheduler/thread path advance to the scheduled window so the
-        // caller receives a completion event at the correct time.
+        // Only explicit skip-window requests are allowed to use this path.
+        // Zero RF frequency alone is not sufficient because ordinary waiting
+        // and debug logging are not scheduling outcomes.
+        if (!current_request_.isSkipWindow())
+        {
+            throw std::logic_error(
+                "Non-skip WSPR request reached zero-frequency startAsync() path.");
+        }
+
         const State prior = state_.load(std::memory_order_acquire);
         if (prior == State::DISABLED || prior == State::COMPLETE ||
             prior == State::CANCELLED)
@@ -782,11 +796,67 @@ inline void WsprTransmitter::fire_transmit_cb(
     const std::string &msg,
     double value)
 {
-    if (on_transmit_cb_)
     {
-        std::thread([cb = on_transmit_cb_, event, level, msg, value]()
-                    { cb(event, level, msg, value); })
-            .detach();
+        std::lock_guard<std::mutex> lk(callback_mtx_);
+        if (!on_transmit_cb_ || callback_stop_)
+        {
+            return;
+        }
+
+        callback_queue_.push_back(PendingTransmitCallback{
+            event,
+            level,
+            msg,
+            value});
+    }
+
+    callback_cv_.notify_one();
+}
+
+void WsprTransmitter::callback_worker_loop()
+{
+    for (;;)
+    {
+        PendingTransmitCallback pending{};
+        TransmissionCallback cb;
+
+        {
+            std::unique_lock<std::mutex> lk(callback_mtx_);
+            callback_cv_.wait(lk,
+                              [this]
+                              {
+                                  return callback_stop_ || !callback_queue_.empty();
+                              });
+
+            if (callback_stop_ && callback_queue_.empty())
+            {
+                return;
+            }
+
+            pending = std::move(callback_queue_.front());
+            callback_queue_.pop_front();
+            cb = on_transmit_cb_;
+        }
+
+        if (cb)
+        {
+            cb(pending.event, pending.level, pending.msg, pending.value);
+        }
+    }
+}
+
+void WsprTransmitter::stop_callback_worker()
+{
+    {
+        std::lock_guard<std::mutex> lk(callback_mtx_);
+        callback_stop_ = true;
+    }
+    callback_cv_.notify_all();
+
+    if (callback_thread_.joinable() &&
+        callback_thread_.get_id() != std::this_thread::get_id())
+    {
+        callback_thread_.join();
     }
 }
 
@@ -971,6 +1041,12 @@ void WsprTransmitter::transmit()
 {
     if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
     {
+        if (!current_request_.isSkipWindow())
+        {
+            throw std::logic_error(
+                "Non-skip WSPR request reached zero-frequency transmit() path.");
+        }
+
         const std::int64_t start_rt_ns =
             scheduled_start_rt_ns_.load(std::memory_order_acquire);
         if (start_rt_ns != 0)
