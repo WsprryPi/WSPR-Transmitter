@@ -210,7 +210,6 @@ release: build/bin/$(OUT)
 debug: build/bin/$(TEST_OUT)
 	$(Q)echo "Debug build completed successfully."
 
-# TODO: Make --now and --oneshot an env trigger
 test: debug
 	$(Q)$(SUDO) ./build/bin/$(TEST_OUT) --now --oneshot
 
