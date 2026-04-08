@@ -1378,11 +1378,13 @@ void WsprRpiBackend::transmit_symbol(
             << " n_pwmclk_per_sym=" << n_pwmclk_per_sym
             << " pwm_clocks_per_iter=" << pwm_clocks_per_iter;
 
+#ifdef DEBUG_TRANS_SYMBOL
         owner_.backendFireTransmitCallback(
                     WsprTransmissionCallbackEvent::LOGGING,
                     WsprTransmitLogLevel::DEBUG,
                     oss.str(),
                     0.0);
+#endif
     }
 
     if (n_pwmclk_per_sym <= 0 || n_pwmclk_per_sym > 5'000'000'000LL)
