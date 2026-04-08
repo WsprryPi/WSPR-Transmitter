@@ -73,6 +73,14 @@ PreparedWsprTransmission build_prepared_wspr_transmission(
     plan.plan_type = result.type;
     plan.callsign = result.callsign;
     plan.locator = result.locator;
+    plan.callsign_raw = result.callsign_raw;
+    plan.locator_raw = result.locator_raw;
+    plan.callsign_normalized =
+        result.callsign_normalized.empty() ? result.callsign : result.callsign_normalized;
+    plan.locator_normalized =
+        result.locator_normalized.empty() ? result.locator : result.locator_normalized;
+    plan.frame_callsigns = result.frame_callsigns;
+    plan.frame_locators = result.frame_locators;
     plan.power_dbm = result.power_dbm;
 
     if (!result.symbols_list.empty())
@@ -87,6 +95,17 @@ PreparedWsprTransmission build_prepared_wspr_transmission(
 
     if (plan.frames.empty())
         throw std::runtime_error("WSPR encoding returned no frames.");
+
+    plan.total_frame_count = plan.frames.size();
+    plan.current_frame = 1U;
+    if (!plan.frame_callsigns.empty())
+        plan.frame_callsign = plan.frame_callsigns.front();
+    else
+        plan.frame_callsign = plan.callsign_normalized;
+    if (!plan.frame_locators.empty())
+        plan.frame_locator = plan.frame_locators.front();
+    else
+        plan.frame_locator = plan.locator_normalized;
 
     return plan;
 }

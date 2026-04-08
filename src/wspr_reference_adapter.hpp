@@ -46,6 +46,16 @@ struct PreparedWsprTransmission
     std::vector<PreparedWsprFrame> frames;
     std::string callsign;
     std::string locator;
+    std::string callsign_raw;
+    std::string locator_raw;
+    std::string callsign_normalized;
+    std::string locator_normalized;
+    std::vector<std::string> frame_callsigns;
+    std::vector<std::string> frame_locators;
+    std::size_t total_frame_count = 0;
+    std::size_t current_frame = 0;
+    std::string frame_callsign;
+    std::string frame_locator;
     int power_dbm = 0;
 
     [[nodiscard]] bool empty() const noexcept
