@@ -144,6 +144,8 @@ public:
      * @return Lowercase string describing the state.
      */
     std::string stateToStringLower(State state);
+    bool activeExecutionIsTone() const noexcept;
+    bool activeExecutionIsWspr() const noexcept;
 
     /**
      * @brief Constructs a WSPR transmitter with default settings.
@@ -690,6 +692,8 @@ private:
      */
     TransmissionRequest current_request_{};
     wsprrypi::ExecutionPlan current_execution_plan_{};
+    wsprrypi::TransmissionMode current_execution_mode_{
+        wsprrypi::TransmissionMode::WSPR};
 
     /**
      * @brief Invoke the configured transmission callback.

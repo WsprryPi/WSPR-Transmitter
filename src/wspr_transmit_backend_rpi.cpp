@@ -253,10 +253,11 @@ wsprrypi::BackendCapabilities WsprRpiBackend::capabilities() const
 }
 
 wsprrypi::BackendCompileResult WsprRpiBackend::configure(
-    const wsprrypi::ExecutionPlan &plan)
+    const wsprrypi::ExecutionPlan &plan,
+    const wsprrypi::BackendExecutionInputs &inputs)
 {
     wsprrypi::BackendCompileResult result;
-    auto compat = build_execution_plan_config(plan, &result);
+    auto compat = build_execution_plan_config(plan, inputs, &result);
     if (!compat.has_value())
     {
         if (result.error.empty())
@@ -289,22 +290,16 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
     const wsprrypi::ExecutionPlan &plan)
 {
     wsprrypi::ExecutionResult result;
-    auto compat = configured_plan_;
-    if (!compat.has_value())
+    if (!configured_plan_.has_value())
     {
-        compat = build_execution_plan_config(plan, nullptr);
-    }
-
-    if (!compat.has_value())
-    {
-        result.error = "Unsupported execution plan.";
+        result.error = "No configured execution plan.";
         return result;
     }
+    const auto& compat = configured_plan_;
 
     try
     {
         dma_buf_ptr_ = 0;
-        transmit_on(compat->compatibility_plan);
 
         struct TxOffGuard
         {
@@ -318,6 +313,7 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
 
         struct timespec t0_ts{};
         clock_gettime(CLOCK_MONOTONIC, &t0_ts);
+        bool rf_enabled = false;
 
         for (std::size_t i = 0; i < plan.events.size(); ++i)
         {
@@ -325,8 +321,6 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
                 break;
 
             const auto &event = plan.events[i];
-            if (!event.rf_on)
-                continue;
 
             if (i > 0)
             {
@@ -349,18 +343,33 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
                 }
             }
 
-            const auto symbol = reconstruct_wspr_symbol(
-                event,
-                compat->compatibility_plan);
+            if (plan.mode == wsprrypi::TransmissionMode::QRSS)
+            {
+                execute_qrss_event(
+                    event,
+                    compat->compatibility_plan,
+                    rf_enabled,
+                    static_cast<int>(i));
+            }
+            else
+            {
+                const auto symbol = reconstruct_wspr_symbol(
+                    event,
+                    compat->compatibility_plan);
 
-            transmit_symbol(
-                compat->compatibility_plan,
-                symbol,
-                std::chrono::duration<double>(event.duration).count(),
-                static_cast<int>(i));
+                if (!rf_enabled)
+                {
+                    transmit_on(compat->compatibility_plan);
+                    start_watchdog();
+                    rf_enabled = true;
+                }
 
-            if (i == 0 && !owner_.backendShouldStop())
-                start_watchdog();
+                transmit_symbol(
+                    compat->compatibility_plan,
+                    symbol,
+                    std::chrono::duration<double>(event.duration).count(),
+                    static_cast<int>(i));
+            }
         }
 
         if (!owner_.backendShouldStop() && !plan.events.empty())
@@ -402,12 +411,14 @@ void WsprRpiBackend::cleanup() noexcept
 std::optional<WsprRpiBackend::ExecutionPlanConfig>
 WsprRpiBackend::build_execution_plan_config(
     const wsprrypi::ExecutionPlan &plan,
+    const wsprrypi::BackendExecutionInputs &inputs,
     wsprrypi::BackendCompileResult *result) const
 {
-    if (plan.mode != wsprrypi::TransmissionMode::WSPR)
+    if (plan.mode != wsprrypi::TransmissionMode::WSPR &&
+        plan.mode != wsprrypi::TransmissionMode::QRSS)
     {
         if (result)
-            result->error = "Only WSPR execution plans are currently supported.";
+            result->error = "Only WSPR and QRSS execution plans are currently supported.";
         return std::nullopt;
     }
 
@@ -421,10 +432,15 @@ WsprRpiBackend::build_execution_plan_config(
     ExecutionPlanConfig config;
     config.compatibility_plan.frequency_hz = plan.reference_frequency_hz;
     config.compatibility_plan.tone_spacing_hz = kWsprToneSpacingHz;
-    config.compatibility_plan.power_level = plan.power_level;
+    config.compatibility_plan.power_level = inputs.power_level;
     config.compatibility_plan.ppm = plan.calibration.ppm;
-    config.compatibility_plan.tx_gpio = plan.tx_gpio;
-    config.compatibility_plan.total_symbol_count = plan.events.size();
+    config.compatibility_plan.tx_gpio = inputs.tx_gpio;
+    config.compatibility_plan.total_symbol_count = 0;
+    for (const auto& event : plan.events)
+    {
+        if (event.rf_on)
+            ++config.compatibility_plan.total_symbol_count;
+    }
     return config;
 }
 
@@ -454,6 +470,38 @@ std::uint32_t WsprRpiBackend::reconstruct_wspr_symbol(
     }
 
     return static_cast<std::uint32_t>(symbol);
+}
+
+void WsprRpiBackend::execute_qrss_event(
+    const wsprrypi::RfEvent& event,
+    const WsprTransmissionPlan& plan,
+    bool& rf_enabled,
+    int symbol_index)
+{
+    if (!event.rf_on)
+    {
+        if (rf_enabled)
+        {
+            transmit_off();
+            rf_enabled = false;
+        }
+        return;
+    }
+
+    if (!rf_enabled)
+    {
+        transmit_on(plan);
+        start_watchdog();
+        rf_enabled = true;
+    }
+
+    // QRSS currently reuses the legacy WSPR 4-tone DMA table by placing the
+    // desired fixed QRSS frequency at symbol 0 in the compatibility plan.
+    transmit_symbol(
+        plan,
+        0U,
+        std::chrono::duration<double>(event.duration).count(),
+        symbol_index);
 }
 
 void WsprRpiBackend::startFaultMonitoring()

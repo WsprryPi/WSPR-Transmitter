@@ -33,6 +33,9 @@ public:
 
 private:
     void apply_adjustments(const BackendCompileResult& configure_result);
+    BackendExecutionInputs build_backend_inputs(
+        const TransmissionRequest& request,
+        const TransmissionPrepareOptions& options) const noexcept;
 
     IExecutionPlanCompiler& compiler_;
     ITransmissionBackend& backend_;

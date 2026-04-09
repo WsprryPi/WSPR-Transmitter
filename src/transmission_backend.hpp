@@ -46,6 +46,12 @@ struct BackendCompileResult
     std::string error;
 };
 
+struct BackendExecutionInputs
+{
+    int power_level{0};
+    int tx_gpio{0};
+};
+
 struct ExecutionResult
 {
     bool ok{false};
@@ -62,7 +68,9 @@ public:
     virtual BackendInfo info() const = 0;
     virtual BackendCapabilities capabilities() const = 0;
 
-    virtual BackendCompileResult configure(const ExecutionPlan& plan) = 0;
+    virtual BackendCompileResult configure(
+        const ExecutionPlan& plan,
+        const BackendExecutionInputs& inputs) = 0;
     virtual ExecutionResult execute(const ExecutionPlan& plan) = 0;
 
     virtual void stop() noexcept = 0;

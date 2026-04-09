@@ -16,8 +16,9 @@ BackendCompileResult TransmissionController::prepare(
     const TransmissionPrepareOptions& options)
 {
     prepared_plan_ = compiler_.compile(request);
-    prepared_plan_->power_level = options.power_level;
-    const BackendCompileResult configure_result = backend_.configure(*prepared_plan_);
+    const BackendCompileResult configure_result = backend_.configure(
+        *prepared_plan_,
+        build_backend_inputs(request, options));
     if (!configure_result.ok)
     {
         prepared_plan_.reset();
@@ -89,6 +90,16 @@ void TransmissionController::apply_adjustments(
     }
     prepared_plan_->summary.min_frequency_hz += delta_hz;
     prepared_plan_->summary.max_frequency_hz += delta_hz;
+}
+
+BackendExecutionInputs TransmissionController::build_backend_inputs(
+    const TransmissionRequest& request,
+    const TransmissionPrepareOptions& options) const noexcept
+{
+    BackendExecutionInputs inputs;
+    inputs.power_level = options.power_level;
+    inputs.tx_gpio = request.output.gpio;
+    return inputs;
 }
 
 void TransmissionController::stop() noexcept

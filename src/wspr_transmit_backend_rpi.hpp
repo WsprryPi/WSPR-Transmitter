@@ -79,7 +79,8 @@ public:
     wsprrypi::BackendInfo info() const override;
     wsprrypi::BackendCapabilities capabilities() const override;
     wsprrypi::BackendCompileResult configure(
-        const wsprrypi::ExecutionPlan &plan) override;
+        const wsprrypi::ExecutionPlan &plan,
+        const wsprrypi::BackendExecutionInputs &inputs) override;
     wsprrypi::ExecutionResult execute(
         const wsprrypi::ExecutionPlan &plan) override;
     void stop() noexcept override;
@@ -303,10 +304,16 @@ private:
     bool recover_from_watchdog_fault_locked();
     std::optional<ExecutionPlanConfig> build_execution_plan_config(
         const wsprrypi::ExecutionPlan &plan,
+        const wsprrypi::BackendExecutionInputs &inputs,
         wsprrypi::BackendCompileResult *result = nullptr) const;
     std::uint32_t reconstruct_wspr_symbol(
         const wsprrypi::RfEvent &event,
         const WsprTransmissionPlan &plan) const;
+    void execute_qrss_event(
+        const wsprrypi::RfEvent& event,
+        const WsprTransmissionPlan& plan,
+        bool& rf_enabled,
+        int symbol_index);
 
     IControllerBridge &owner_;
 

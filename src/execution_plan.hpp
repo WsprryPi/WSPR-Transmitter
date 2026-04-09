@@ -53,8 +53,6 @@ struct ExecutionPlan
     TransmissionMode mode{TransmissionMode::WSPR};
     BackendKind backend{BackendKind::RPI_CLOCK_GPIO};
     double reference_frequency_hz{0.0};
-    int power_level{0};
-    int tx_gpio{0};
 
     CalibrationSnapshot calibration{};
     ExecutionPolicy policy{};

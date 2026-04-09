@@ -351,6 +351,16 @@ std::string WsprTransmitter::formatFrequencyMHz(double frequency_hz)
     return oss.str();
 }
 
+bool WsprTransmitter::activeExecutionIsTone() const noexcept
+{
+    return current_execution_mode_ == wsprrypi::TransmissionMode::TONE;
+}
+
+bool WsprTransmitter::activeExecutionIsWspr() const noexcept
+{
+    return current_execution_mode_ == wsprrypi::TransmissionMode::WSPR;
+}
+
 void WsprTransmitter::configureExecution(
     const TransmissionRequest &request)
 {
@@ -395,6 +405,9 @@ void WsprTransmitter::configureExecution(
     // orchestration layer. Recovery paths reuse this request verbatim.
     current_request_ = request;
     current_execution_plan_ = wsprrypi::ExecutionPlan{};
+    current_execution_mode_ =
+        request.isTone() ? wsprrypi::TransmissionMode::TONE
+                         : wsprrypi::TransmissionMode::WSPR;
     transmission_controller_->reset();
 
     if (current_request_.isSkipWindow())
@@ -406,7 +419,7 @@ void WsprTransmitter::configureExecution(
         return;
     }
 
-    if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
+    if (activeExecutionIsWspr() && current_request_.actual_rf_frequency_hz == 0.0)
     {
         throw std::invalid_argument(
             "WSPR execution request missing actual RF frequency.");
@@ -441,13 +454,14 @@ void WsprTransmitter::configureExecution(
     const wsprrypi::TransmissionRequest& request,
     const TransmissionRequest& legacy_request)
 {
-    if (request.mode != wsprrypi::TransmissionMode::WSPR)
+    if (request.mode == wsprrypi::TransmissionMode::TONE)
     {
         throw std::invalid_argument(
-            "Canonical transmitter request currently only supports WSPR.");
+            "Canonical transmitter request currently does not use TONE mode.");
     }
 
-    if (legacy_request.isTone())
+    if (request.mode == wsprrypi::TransmissionMode::WSPR &&
+        legacy_request.isTone())
     {
         throw std::invalid_argument(
             "Canonical WSPR configuration received tone legacy context.");
@@ -465,7 +479,8 @@ void WsprTransmitter::configureExecution(
 
     stop_requested_.store(false);
 
-    if (legacy_request.payload.frames.empty())
+    if (request.mode == wsprrypi::TransmissionMode::WSPR &&
+        legacy_request.payload.frames.empty())
     {
         throw std::invalid_argument(
             "WSPR transmission request contains no frames.");
@@ -473,6 +488,7 @@ void WsprTransmitter::configureExecution(
 
     current_request_ = legacy_request;
     current_execution_plan_ = wsprrypi::ExecutionPlan{};
+    current_execution_mode_ = request.mode;
     transmission_controller_->reset();
 
     if (current_request_.isSkipWindow())
@@ -485,7 +501,7 @@ void WsprTransmitter::configureExecution(
     if (current_request_.actual_rf_frequency_hz == 0.0)
     {
         throw std::invalid_argument(
-            "WSPR execution request missing actual RF frequency.");
+            "Execution request missing actual RF frequency.");
     }
 
     try
@@ -565,7 +581,7 @@ void WsprTransmitter::startAsync()
 {
     stop_requested_.store(false, std::memory_order_release);
 
-    if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
+    if (!activeExecutionIsTone() && current_request_.actual_rf_frequency_hz == 0.0)
     {
         // Only explicit skip-window requests are allowed to use this path.
         // Zero RF frequency alone is not sufficient because ordinary waiting
@@ -573,7 +589,7 @@ void WsprTransmitter::startAsync()
         if (!current_request_.isSkipWindow())
         {
             throw std::logic_error(
-                "Non-skip WSPR request reached zero-frequency startAsync() path.");
+                "Non-skip non-tone request reached zero-frequency startAsync() path.");
         }
 
         const State prior = state_.load(std::memory_order_acquire);
@@ -604,7 +620,7 @@ void WsprTransmitter::startAsync()
     }
 
     // If the application has requested a soft-off, do not start scheduling.
-    if (!current_request_.isTone() && soft_off_.load(std::memory_order_acquire))
+    if (activeExecutionIsWspr() && soft_off_.load(std::memory_order_acquire))
     {
         return;
     }
@@ -622,7 +638,7 @@ void WsprTransmitter::startAsync()
         }
     }
 
-    const bool immediate = current_request_.isTone() ||
+    const bool immediate = !activeExecutionIsWspr() ||
                            transmit_now_.load(std::memory_order_acquire);
 
     if (immediate)
@@ -631,7 +647,7 @@ void WsprTransmitter::startAsync()
         // boundary. This emulates the final timer stage used by the normal
         // window scheduler (which sleeps to an absolute CLOCK_REALTIME
         // boundary).
-        if (!current_request_.isTone() &&
+        if (activeExecutionIsWspr() &&
             transmit_now_.load(std::memory_order_acquire))
         {
             struct timespec now_rt{};
@@ -804,13 +820,13 @@ void WsprTransmitter::dumpParameters()
     std::ostringstream oss;
 
     oss << "Call Sign:         "
-        << (current_request_.isTone() ? "N/A" : current_request_.payload.callsign);
+        << (activeExecutionIsWspr() ? current_request_.payload.callsign : "N/A");
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "Grid Square:       "
-        << (current_request_.isTone() ? "N/A" : current_request_.payload.locator);
+        << (activeExecutionIsWspr() ? current_request_.payload.locator : "N/A");
     log_line(oss.str());
     oss.str("");
     oss.clear();
@@ -838,13 +854,13 @@ void WsprTransmitter::dumpParameters()
     oss.clear();
 
     oss << "Test Tone:         "
-        << (current_request_.isTone() ? "True" : "False");
+        << (activeExecutionIsTone() ? "True" : "False");
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "WSPR Symbol Time:  "
-        << (current_request_.isTone()
+        << (!activeExecutionIsWspr()
                 ? "N/A"
                 : (std::to_string(WSPR_SYMTIME) + " s"));
     log_line(oss.str());
@@ -852,7 +868,7 @@ void WsprTransmitter::dumpParameters()
     oss.clear();
 
     oss << "WSPR Tone Spacing: "
-        << (current_request_.isTone()
+        << (!activeExecutionIsWspr()
                 ? "N/A"
                 : (std::to_string(1.0 / WSPR_SYMTIME) + " Hz"));
     log_line(oss.str());
@@ -865,7 +881,7 @@ void WsprTransmitter::dumpParameters()
     oss.str("");
     oss.clear();
 
-    if (current_request_.isTone())
+    if (!activeExecutionIsWspr())
     {
         log_line("WSPR Symbols:      N/A");
     }
@@ -1160,12 +1176,12 @@ void WsprTransmitter::throwIfStopRequested(const char *context)
 
 void WsprTransmitter::transmit()
 {
-    if (!current_request_.isTone() && current_request_.actual_rf_frequency_hz == 0.0)
+    if (!activeExecutionIsTone() && current_request_.actual_rf_frequency_hz == 0.0)
     {
         if (!current_request_.isSkipWindow())
         {
             throw std::logic_error(
-                "Non-skip WSPR request reached zero-frequency transmit() path.");
+                "Non-skip non-tone request reached zero-frequency transmit() path.");
         }
 
         const std::int64_t start_rt_ns =
@@ -1248,7 +1264,7 @@ void WsprTransmitter::transmit()
         }
     };
 
-    if (current_request_.isTone())
+    if (activeExecutionIsTone())
     {
         // Fire callback as close to the first symbol as possible.
         fire_transmit_cb(TransmissionCallbackEvent::STARTING,
@@ -1362,21 +1378,25 @@ void WsprTransmitter::transmit()
         // Fire callback as close to the first symbol as possible.
         fire_transmit_cb(TransmissionCallbackEvent::STARTING, LogLevel::INFO, "", current_request_.actual_rf_frequency_hz);
 
-        const int frame_count =
-            static_cast<int>(current_request_.payload.frameCount());
         const int symbol_count =
             static_cast<int>(current_execution_plan_.events.size());
 
-        if (frame_count > 1)
+        if (activeExecutionIsWspr())
         {
-            std::ostringstream oss;
-            oss << "Transmitting " << frame_count
-                << " WSPR frames back-to-back.";
-            fire_transmit_cb(
-                TransmissionCallbackEvent::LOGGING,
-                LogLevel::DEBUG,
-                oss.str(),
-                0.0);
+            const int frame_count =
+                static_cast<int>(current_request_.payload.frameCount());
+
+            if (frame_count > 1)
+            {
+                std::ostringstream oss;
+                oss << "Transmitting " << frame_count
+                    << " WSPR frames back-to-back.";
+                fire_transmit_cb(
+                    TransmissionCallbackEvent::LOGGING,
+                    LogLevel::DEBUG,
+                    oss.str(),
+                    0.0);
+            }
         }
 
         auto t0_chrono = std::chrono::steady_clock::now();

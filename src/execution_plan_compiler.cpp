@@ -1,6 +1,8 @@
 #include "execution_plan_compiler.hpp"
 
+#include <cctype>
 #include <stdexcept>
+#include <string_view>
 #include <variant>
 
 namespace wsprrypi
@@ -10,6 +12,96 @@ namespace
 
 constexpr double kWsprSymbolPeriodSeconds = 8192.0 / 12000.0;
 constexpr double kWsprToneSpacingHz = 1.0 / kWsprSymbolPeriodSeconds;
+
+std::string_view morse_code_for(char ch)
+{
+    switch (std::toupper(static_cast<unsigned char>(ch)))
+    {
+    case 'A': return ".-";
+    case 'B': return "-...";
+    case 'C': return "-.-.";
+    case 'D': return "-..";
+    case 'E': return ".";
+    case 'F': return "..-.";
+    case 'G': return "--.";
+    case 'H': return "....";
+    case 'I': return "..";
+    case 'J': return ".---";
+    case 'K': return "-.-";
+    case 'L': return ".-..";
+    case 'M': return "--";
+    case 'N': return "-.";
+    case 'O': return "---";
+    case 'P': return ".--.";
+    case 'Q': return "--.-";
+    case 'R': return ".-.";
+    case 'S': return "...";
+    case 'T': return "-";
+    case 'U': return "..-";
+    case 'V': return "...-";
+    case 'W': return ".--";
+    case 'X': return "-..-";
+    case 'Y': return "-.--";
+    case 'Z': return "--..";
+    case '0': return "-----";
+    case '1': return ".----";
+    case '2': return "..---";
+    case '3': return "...--";
+    case '4': return "....-";
+    case '5': return ".....";
+    case '6': return "-....";
+    case '7': return "--...";
+    case '8': return "---..";
+    case '9': return "----.";
+    case '/': return "-..-.";
+    case '?': return "..--..";
+    case '.': return ".-.-.-";
+    case ',': return "--..--";
+    case '-': return "-....-";
+    case '+': return ".-.-.";
+    case '=': return "-...-";
+    default: return {};
+    }
+}
+
+bool is_space_like(char ch)
+{
+    return std::isspace(static_cast<unsigned char>(ch)) != 0;
+}
+
+void validate_positive_duration(
+    std::chrono::nanoseconds duration,
+    const char* field_name)
+{
+    if (duration <= std::chrono::nanoseconds::zero())
+    {
+        throw std::runtime_error(
+            std::string("QRSS timing field is invalid: ") + field_name);
+    }
+}
+
+void append_event(
+    ExecutionPlan& plan,
+    std::chrono::nanoseconds& offset,
+    RfEventType type,
+    bool rf_on,
+    double frequency_hz,
+    std::chrono::nanoseconds duration,
+    const EnvelopeSettings& envelope)
+{
+    if (duration <= std::chrono::nanoseconds::zero())
+        return;
+
+    RfEvent event;
+    event.offset_from_start = offset;
+    event.duration = duration;
+    event.type = type;
+    event.frequency_hz = frequency_hz;
+    event.rf_on = rf_on;
+    event.envelope = envelope;
+    plan.events.push_back(event);
+    offset += duration;
+}
 
 std::size_t resolve_wspr_frame_index(const PreparedWsprTransmission& prepared)
 {
@@ -123,7 +215,6 @@ ExecutionPlan ExecutionPlanCompiler::compile_wspr(
     plan.mode = request.mode;
     plan.backend = request.output.backend;
     plan.reference_frequency_hz = payload.base_frequency_hz;
-    plan.tx_gpio = request.output.gpio;
     plan.calibration = request.calibration;
     plan.policy = request.policy;
     plan.events.reserve(frame.symbols.size());
@@ -152,10 +243,102 @@ ExecutionPlan ExecutionPlanCompiler::compile_wspr(
 }
 
 ExecutionPlan ExecutionPlanCompiler::compile_qrss(
-    const TransmissionRequest&,
-    const QrssPayload&) const
+    const TransmissionRequest& request,
+    const QrssPayload& payload) const
 {
-    throw std::runtime_error("QRSS execution-plan compilation is not implemented.");
+    if (payload.message.empty())
+        throw std::runtime_error("QRSS payload message is empty.");
+
+    if (payload.frequency_hz <= 0.0)
+        throw std::runtime_error("QRSS payload frequency is invalid.");
+
+    validate_positive_duration(payload.timing.dot, "dot");
+    validate_positive_duration(payload.timing.dash, "dash");
+    validate_positive_duration(payload.timing.intra_element_gap, "intra_element_gap");
+    validate_positive_duration(payload.timing.inter_character_gap, "inter_character_gap");
+    validate_positive_duration(payload.timing.inter_word_gap, "inter_word_gap");
+
+    ExecutionPlan plan;
+    plan.request_id = request.id;
+    plan.mode = request.mode;
+    plan.backend = request.output.backend;
+    // The current Raspberry Pi backend compatibility path still configures a
+    // WSPR-style 4-tone table. QRSS execution uses symbol 0 from that table,
+    // so the backend reference stays offset by 1.5 tone spacings while the
+    // emitted events carry the fixed user-requested frequency.
+    plan.reference_frequency_hz = payload.frequency_hz + 1.5 * kWsprToneSpacingHz;
+    plan.calibration = request.calibration;
+    plan.policy = request.policy;
+
+    std::chrono::nanoseconds offset{0};
+
+    for (std::size_t i = 0; i < payload.message.size(); ++i)
+    {
+        const char ch = payload.message[i];
+
+        if (is_space_like(ch))
+        {
+            continue;
+        }
+
+        const std::string_view morse = morse_code_for(ch);
+        if (morse.empty())
+        {
+            throw std::runtime_error("QRSS payload contains unsupported character.");
+        }
+
+        for (std::size_t j = 0; j < morse.size(); ++j)
+        {
+            const auto duration =
+                (morse[j] == '.') ? payload.timing.dot : payload.timing.dash;
+
+            append_event(
+                plan,
+                offset,
+                RfEventType::RF_ON,
+                true,
+                payload.frequency_hz,
+                duration,
+                payload.envelope);
+
+            if (j + 1U < morse.size())
+            {
+                append_event(
+                    plan,
+                    offset,
+                    RfEventType::RF_OFF,
+                    false,
+                    payload.frequency_hz,
+                    payload.timing.intra_element_gap,
+                    payload.envelope);
+            }
+        }
+
+        std::size_t next = i + 1U;
+        while (next < payload.message.size() && is_space_like(payload.message[next]))
+            ++next;
+
+        if (next >= payload.message.size())
+            continue;
+
+        const auto gap =
+            (next > (i + 1U)) ? payload.timing.inter_word_gap
+                              : payload.timing.inter_character_gap;
+        append_event(
+            plan,
+            offset,
+            RfEventType::RF_OFF,
+            false,
+            payload.frequency_hz,
+            gap,
+            payload.envelope);
+    }
+
+    if (plan.events.empty())
+        throw std::runtime_error("QRSS payload produced no execution events.");
+
+    plan.summary = build_summary(plan.events);
+    return plan;
 }
 
 ExecutionPlan ExecutionPlanCompiler::compile_fskcw(
