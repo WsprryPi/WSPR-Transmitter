@@ -359,6 +359,14 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
                     rf_enabled,
                     static_cast<int>(i));
             }
+            else if (plan.mode == wsprrypi::TransmissionMode::DFCW)
+            {
+                execute_dfcw_event(
+                    event,
+                    compat->compatibility_plan,
+                    rf_enabled,
+                    static_cast<int>(i));
+            }
             else
             {
                 const auto symbol = reconstruct_wspr_symbol(
@@ -424,10 +432,11 @@ WsprRpiBackend::build_execution_plan_config(
 {
     if (plan.mode != wsprrypi::TransmissionMode::WSPR &&
         plan.mode != wsprrypi::TransmissionMode::QRSS &&
-        plan.mode != wsprrypi::TransmissionMode::FSKCW)
+        plan.mode != wsprrypi::TransmissionMode::FSKCW &&
+        plan.mode != wsprrypi::TransmissionMode::DFCW)
     {
         if (result)
-            result->error = "Only WSPR, QRSS, and FSKCW execution plans are currently supported.";
+            result->error = "Only WSPR, QRSS, FSKCW, and DFCW execution plans are currently supported.";
         return std::nullopt;
     }
 
@@ -441,14 +450,18 @@ WsprRpiBackend::build_execution_plan_config(
     ExecutionPlanConfig config;
     config.compatibility_plan.frequency_hz = plan.reference_frequency_hz;
     config.compatibility_plan.tone_spacing_hz = kWsprToneSpacingHz;
-    if (plan.mode == wsprrypi::TransmissionMode::FSKCW)
+    if (plan.mode == wsprrypi::TransmissionMode::FSKCW ||
+        plan.mode == wsprrypi::TransmissionMode::DFCW)
     {
         if (plan.summary.max_frequency_hz <= 0.0 ||
             plan.summary.min_frequency_hz <= 0.0 ||
             plan.summary.max_frequency_hz <= plan.summary.min_frequency_hz)
         {
             if (result)
-                result->error = "FSKCW execution plan has invalid tone frequencies.";
+                result->error =
+                    plan.mode == wsprrypi::TransmissionMode::FSKCW
+                        ? "FSKCW execution plan has invalid tone frequencies."
+                        : "DFCW execution plan has invalid tone frequencies.";
             return std::nullopt;
         }
 
@@ -557,6 +570,67 @@ void WsprRpiBackend::execute_fskcw_event(
 
     const auto symbol =
         reconstruct_compatibility_symbol(event, plan, 0L, 1L);
+    {
+        std::ostringstream oss;
+        oss << "FSKCW event idx=" << symbol_index
+            << " freq=" << std::fixed << std::setprecision(6)
+            << event.frequency_hz
+            << " symbol=" << symbol
+            << " rf_on=" << (event.rf_on ? "true" : "false");
+        owner_.backendFireTransmitCallback(
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
+            oss.str(),
+            0.0);
+    }
+    transmit_symbol(
+        plan,
+        symbol,
+        std::chrono::duration<double>(event.duration).count(),
+        symbol_index);
+}
+
+void WsprRpiBackend::execute_dfcw_event(
+    const wsprrypi::RfEvent& event,
+    const WsprTransmissionPlan& plan,
+    bool& rf_enabled,
+    int symbol_index)
+{
+    if (!event.rf_on)
+    {
+        if (rf_enabled)
+        {
+            throw std::runtime_error(
+                "DFCW execution-plan event unexpectedly disables RF.");
+        }
+        throw std::runtime_error(
+            "DFCW execution-plan event unexpectedly disables RF.");
+    }
+
+    if (!rf_enabled)
+    {
+        transmit_on(plan);
+        start_watchdog();
+        rf_enabled = true;
+    }
+
+    const auto symbol =
+        reconstruct_compatibility_symbol(event, plan, 0L, 1L);
+
+    {
+        std::ostringstream oss;
+        oss << "DFCW event idx=" << symbol_index
+            << " freq=" << std::fixed << std::setprecision(6)
+            << event.frequency_hz
+            << " symbol=" << symbol
+            << " rf_on=" << (event.rf_on ? "true" : "false");
+        owner_.backendFireTransmitCallback(
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
+            oss.str(),
+            0.0);
+    }
+
     transmit_symbol(
         plan,
         symbol,

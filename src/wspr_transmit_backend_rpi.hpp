@@ -324,6 +324,11 @@ private:
         const WsprTransmissionPlan& plan,
         bool& rf_enabled,
         int symbol_index);
+    void execute_dfcw_event(
+        const wsprrypi::RfEvent& event,
+        const WsprTransmissionPlan& plan,
+        bool& rf_enabled,
+        int symbol_index);
 
     IControllerBridge &owner_;
 

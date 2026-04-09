@@ -448,10 +448,79 @@ ExecutionPlan ExecutionPlanCompiler::compile_fskcw(
 }
 
 ExecutionPlan ExecutionPlanCompiler::compile_dfcw(
-    const TransmissionRequest&,
-    const DfcwPayload&) const
+    const TransmissionRequest& request,
+    const DfcwPayload& payload) const
 {
-    throw std::runtime_error("DFCW execution-plan compilation is not implemented.");
+    if (payload.message.empty())
+        throw std::runtime_error("DFCW payload message is empty.");
+
+    if (payload.dot_frequency_hz <= 0.0)
+        throw std::runtime_error("DFCW payload dot frequency is invalid.");
+
+    if (payload.dash_frequency_hz <= 0.0)
+        throw std::runtime_error("DFCW payload dash frequency is invalid.");
+
+    if (payload.dot_frequency_hz == payload.dash_frequency_hz)
+        throw std::runtime_error("DFCW dot and dash frequencies must differ.");
+
+    validate_positive_duration(payload.timing.dot, "dot");
+    validate_positive_duration(payload.timing.dash, "dash");
+    validate_positive_duration(payload.timing.intra_element_gap, "intra_element_gap");
+    validate_positive_duration(payload.timing.inter_character_gap, "inter_character_gap");
+    validate_positive_duration(payload.timing.inter_word_gap, "inter_word_gap");
+
+    ExecutionPlan plan;
+    plan.request_id = request.id;
+    plan.mode = request.mode;
+    plan.backend = request.output.backend;
+    plan.reference_frequency_hz =
+        std::min(payload.dot_frequency_hz, payload.dash_frequency_hz) +
+        1.5 * std::abs(payload.dash_frequency_hz - payload.dot_frequency_hz);
+    plan.calibration = request.calibration;
+    plan.policy = request.policy;
+
+    std::chrono::nanoseconds offset{0};
+
+    try
+    {
+        expand_morse_message(
+            payload.message,
+            [&](char element)
+            {
+                append_event(
+                    plan,
+                    offset,
+                    RfEventType::HOLD,
+                    true,
+                    element == '.'
+                        ? payload.dot_frequency_hz
+                        : payload.dash_frequency_hz,
+                    payload.timing.dot,
+                    payload.envelope);
+            },
+            [&](auto)
+            {
+                // First-pass DFCW keeps the carrier continuous with no
+                // explicit RF-off spacing events. Information is carried by
+                // the frequency of equal-duration Morse elements.
+            });
+    }
+    catch (const std::runtime_error& e)
+    {
+        if (std::string_view(e.what()) == "Payload contains unsupported character.")
+            throw std::runtime_error("DFCW payload contains unsupported character.");
+        throw;
+    }
+
+    if (plan.events.empty())
+        throw std::runtime_error("DFCW payload produced no execution events.");
+
+    plan.summary = build_summary(plan.events);
+    plan.summary.min_frequency_hz =
+        std::min(payload.dot_frequency_hz, payload.dash_frequency_hz);
+    plan.summary.max_frequency_hz =
+        std::max(payload.dot_frequency_hz, payload.dash_frequency_hz);
+    return plan;
 }
 
 ExecutionPlan ExecutionPlanCompiler::compile_cw(
