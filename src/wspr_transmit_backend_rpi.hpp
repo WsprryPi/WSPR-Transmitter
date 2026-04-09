@@ -33,9 +33,11 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
+#include "transmission_backend.hpp"
 #include "wspr_transmit_backend.hpp"
 #include "wspr_transmit.hpp"
 
@@ -57,7 +59,8 @@
  * hardware actions while keeping DMA, mailbox, watchdog, and recovery state
  * private. It does not own WSPR planning or orchestration policy.
  */
-class WsprRpiBackend : public WsprTransmitBackend
+class WsprRpiBackend : public WsprTransmitBackend,
+                       public wsprrypi::ITransmissionBackend
 {
 public:
     /**
@@ -72,6 +75,15 @@ public:
      * @brief Destroy the backend and release backend-owned resources.
      */
     ~WsprRpiBackend() override;
+
+    wsprrypi::BackendInfo info() const override;
+    wsprrypi::BackendCapabilities capabilities() const override;
+    wsprrypi::BackendCompileResult configure(
+        const wsprrypi::ExecutionPlan &plan) override;
+    wsprrypi::ExecutionResult execute(
+        const wsprrypi::ExecutionPlan &plan) override;
+    void stop() noexcept override;
+    void cleanup() noexcept override;
 
     /**
      * @brief Start the Raspberry Pi DMA watchdog.
@@ -179,6 +191,14 @@ public:
     bool recoveryInProgress() const noexcept override;
 
 private:
+    struct ExecutionPlanConfig
+    {
+        // Temporary bridge for the legacy DMA/tuning pipeline. The public
+        // backend path is ExecutionPlan-based, but the low-level emitter still
+        // consumes this reduced WSPR-specific shape.
+        WsprTransmissionPlan compatibility_plan{};
+    };
+
     struct PageInfo
     {
         std::uintptr_t b = 0;
@@ -281,6 +301,12 @@ private:
     void request_watchdog_recovery() noexcept;
     void recovery_worker();
     bool recover_from_watchdog_fault_locked();
+    std::optional<ExecutionPlanConfig> build_execution_plan_config(
+        const wsprrypi::ExecutionPlan &plan,
+        wsprrypi::BackendCompileResult *result = nullptr) const;
+    std::uint32_t reconstruct_wspr_symbol(
+        const wsprrypi::RfEvent &event,
+        const WsprTransmissionPlan &plan) const;
 
     IControllerBridge &owner_;
 
@@ -311,6 +337,7 @@ private:
     double pwm_clock_init_{0};
     int watchdog_cpu_{1};
     int configured_tx_gpio_{4};
+    std::optional<ExecutionPlanConfig> configured_plan_{};
     PageInfo const_page_{};
     PageInfo instr_page_{};
     PageInfo instructions_[1024]{};

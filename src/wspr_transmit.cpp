@@ -321,6 +321,9 @@ WsprTransmitter::WsprTransmitter()
         spin_ns_ = 0; // or 50'000 if you want a tiny spin
     }
     backend_ = std::make_unique<WsprRpiBackend>(*this);
+    transmission_controller_ = std::make_unique<wsprrypi::TransmissionController>(
+        execution_plan_compiler_,
+        *backend_);
     callback_thread_ = std::thread(&WsprTransmitter::callback_worker_loop, this);
 }
 
@@ -349,8 +352,27 @@ std::string WsprTransmitter::formatFrequencyMHz(double frequency_hz)
 }
 
 void WsprTransmitter::configureExecution(
-    const WsprTransmissionRequest &request)
+    const TransmissionRequest &request)
 {
+    if (!request.isTone() && !request.isSkipWindow())
+    {
+        wsprrypi::TransmissionRequest controller_request;
+        controller_request.mode = wsprrypi::TransmissionMode::WSPR;
+        controller_request.output.backend = wsprrypi::BackendKind::RPI_CLOCK_GPIO;
+        controller_request.output.output = wsprrypi::ClockSource::GPIO_CLK;
+        controller_request.output.gpio = request.tx_gpio;
+        controller_request.calibration.ppm = request.ppm;
+        controller_request.id.value = 1;
+
+        wsprrypi::WsprPayload payload;
+        payload.prepared = request.payload;
+        payload.base_frequency_hz = request.actual_rf_frequency_hz;
+        controller_request.payload = payload;
+
+        configureExecution(controller_request, request);
+        return;
+    }
+
     // Reconfiguration is only safe when the transmit thread is not actively
     // feeding DMA. If a transmission is in progress, stop it first.
     if (state_.load(std::memory_order_acquire) == State::TRANSMITTING)
@@ -363,7 +385,7 @@ void WsprTransmitter::configureExecution(
 
     stop_requested_.store(false);
 
-    if (!request.isTone() && request.wspr_plan.frames.empty())
+    if (!request.isTone() && request.payload.frames.empty())
     {
         throw std::invalid_argument(
             "WSPR transmission request contains no frames.");
@@ -372,6 +394,8 @@ void WsprTransmitter::configureExecution(
     // Store the committed execution snapshot exactly as provided by the
     // orchestration layer. Recovery paths reuse this request verbatim.
     current_request_ = request;
+    current_execution_plan_ = wsprrypi::ExecutionPlan{};
+    transmission_controller_->reset();
 
     if (current_request_.isSkipWindow())
     {
@@ -396,6 +420,103 @@ void WsprTransmitter::configureExecution(
 
         if (current_request_.actual_rf_frequency_hz != 0.0)
             current_request_.actual_rf_frequency_hz = configure_result.applied_frequency_hz;
+
+        state_.store(State::ENABLED, std::memory_order_release);
+    }
+    catch (...)
+    {
+        try
+        {
+            shutdown();
+            cleanupTransmissionBackend();
+        }
+        catch (...)
+        {
+        }
+        throw;
+    }
+}
+
+void WsprTransmitter::configureExecution(
+    const wsprrypi::TransmissionRequest& request,
+    const TransmissionRequest& legacy_request)
+{
+    if (request.mode != wsprrypi::TransmissionMode::WSPR)
+    {
+        throw std::invalid_argument(
+            "Canonical transmitter request currently only supports WSPR.");
+    }
+
+    if (legacy_request.isTone())
+    {
+        throw std::invalid_argument(
+            "Canonical WSPR configuration received tone legacy context.");
+    }
+
+    // Reconfiguration is only safe when the transmit thread is not actively
+    // feeding DMA. If a transmission is in progress, stop it first.
+    if (state_.load(std::memory_order_acquire) == State::TRANSMITTING)
+    {
+        requestStopTx();
+    }
+
+    shutdown();
+    cleanupTransmissionBackend();
+
+    stop_requested_.store(false);
+
+    if (legacy_request.payload.frames.empty())
+    {
+        throw std::invalid_argument(
+            "WSPR transmission request contains no frames.");
+    }
+
+    current_request_ = legacy_request;
+    current_execution_plan_ = wsprrypi::ExecutionPlan{};
+    transmission_controller_->reset();
+
+    if (current_request_.isSkipWindow())
+    {
+        scheduled_start_rt_ns_.store(0, std::memory_order_release);
+        state_.store(State::ENABLED, std::memory_order_release);
+        return;
+    }
+
+    if (current_request_.actual_rf_frequency_hz == 0.0)
+    {
+        throw std::invalid_argument(
+            "WSPR execution request missing actual RF frequency.");
+    }
+
+    try
+    {
+        prepareTransmissionBackend();
+
+        const auto configure_result =
+            transmission_controller_->prepare(
+                request,
+                wsprrypi::TransmissionPrepareOptions{
+                    current_request_.power_level});
+
+        if (!configure_result.ok)
+        {
+            throw std::runtime_error(
+                configure_result.error.empty()
+                    ? "Execution-plan backend configuration failed."
+                    : configure_result.error);
+        }
+
+        const wsprrypi::ExecutionPlan* prepared_plan =
+            transmission_controller_->prepared_plan();
+        if (prepared_plan == nullptr)
+        {
+            throw std::runtime_error(
+                "Execution-plan controller did not retain the prepared plan.");
+        }
+
+        current_execution_plan_ = *prepared_plan;
+        current_request_.actual_rf_frequency_hz =
+            current_execution_plan_.reference_frequency_hz;
 
         state_.store(State::ENABLED, std::memory_order_release);
     }
@@ -683,13 +804,13 @@ void WsprTransmitter::dumpParameters()
     std::ostringstream oss;
 
     oss << "Call Sign:         "
-        << (current_request_.isTone() ? "N/A" : current_request_.wspr_plan.callsign);
+        << (current_request_.isTone() ? "N/A" : current_request_.payload.callsign);
     log_line(oss.str());
     oss.str("");
     oss.clear();
 
     oss << "Grid Square:       "
-        << (current_request_.isTone() ? "N/A" : current_request_.wspr_plan.locator);
+        << (current_request_.isTone() ? "N/A" : current_request_.payload.locator);
     log_line(oss.str());
     oss.str("");
     oss.clear();
@@ -753,11 +874,11 @@ void WsprTransmitter::dumpParameters()
         log_line("WSPR Symbols:");
 
         const int frame_count =
-            static_cast<int>(current_request_.wspr_plan.frameCount());
+            static_cast<int>(current_request_.payload.frameCount());
         const int symbols_per_frame =
-            static_cast<int>(current_request_.wspr_plan.symbolCountPerFrame());
+            static_cast<int>(current_request_.payload.symbolCountPerFrame());
         const int symbol_count =
-            static_cast<int>(current_request_.wspr_plan.totalSymbolCount());
+            static_cast<int>(current_request_.payload.totalSymbolCount());
 
         std::string line;
         line.reserve(128);
@@ -768,7 +889,7 @@ void WsprTransmitter::dumpParameters()
             const int symbol_index = i % symbols_per_frame;
             line += std::to_string(
                 static_cast<int>(
-                    current_request_.wspr_plan.frames[frame_index]
+                    current_request_.payload.frames[frame_index]
                         .symbols[symbol_index]));
 
             if (i < symbol_count - 1)
@@ -907,7 +1028,7 @@ void WsprTransmitter::backendFireTransmitCallback(
 
 bool WsprTransmitter::backendRestartCurrentConfiguration()
 {
-    const WsprTransmissionRequest request = current_request_;
+    const TransmissionRequest request = current_request_;
 
     shutdown();
     cleanupTransmissionBackend();
@@ -1242,12 +1363,9 @@ void WsprTransmitter::transmit()
         fire_transmit_cb(TransmissionCallbackEvent::STARTING, LogLevel::INFO, "", current_request_.actual_rf_frequency_hz);
 
         const int frame_count =
-            static_cast<int>(current_request_.wspr_plan.frameCount());
-        const int symbols_per_frame =
-            static_cast<int>(current_request_.wspr_plan.symbolCountPerFrame());
+            static_cast<int>(current_request_.payload.frameCount());
         const int symbol_count =
-            static_cast<int>(current_request_.wspr_plan.totalSymbolCount());
-        const double symtime = WSPR_SYMTIME;
+            static_cast<int>(current_execution_plan_.events.size());
 
         if (frame_count > 1)
         {
@@ -1261,12 +1379,6 @@ void WsprTransmitter::transmit()
                 0.0);
         }
 
-        beginTransmissionOutput();
-        TxOffGuard tx_guard(this);
-
-        // Anchor symbol timing to monotonic clock AFTER TX is enabled.
-        struct timespec t0_ts{};
-        clock_gettime(CLOCK_MONOTONIC, &t0_ts);
         auto t0_chrono = std::chrono::steady_clock::now();
 
         if (::mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
@@ -1281,100 +1393,21 @@ void WsprTransmitter::transmit()
                 0.0);
         }
 
-        int i = 0;
-        if (symbol_count > 0 && !shouldStop())
+        const auto execute_result = transmission_controller_->execute_prepared();
+        const bool canceled = execute_result.stopped ||
+                              (shouldStop() && symbol_count > 0);
+        if (!execute_result.ok && execute_result.faulted)
         {
-            const auto &first_frame = current_request_.wspr_plan.frames.front();
-            emitSymbol(
-                static_cast<int>(first_frame.symbols[0]),
-                symtime,
-                0);
-
-            if (!shouldStop())
-            {
-                startFaultMonitoring();
-                i = 1;
-            }
-            else
-            {
-                i = 1;
-            }
-        }
-
-        for (; i < symbol_count && !shouldStop(); ++i)
-        {
-            const int64_t offset_ns =
-                static_cast<int64_t>(
-                    std::llround(static_cast<double>(i) * symtime * 1e9));
-
-            timespec target = add_ns(t0_ts, offset_ns);
-
-            if (!sleepUntilAbsTightInterruptible(CLOCK_MONOTONIC, target, 200'000))
-            {
-                break;
-            }
-
-            {
-                struct timespec now{};
-                clock_gettime(CLOCK_MONOTONIC, &now);
-
-                const int64_t late_ns =
-                    (now.tv_sec - target.tv_sec) * 1'000'000'000LL +
-                    (now.tv_nsec - target.tv_nsec);
-
-                if (late_ns > 1'000'000) // >1 ms late
-                {
-                    {
-                        std::ostringstream oss;
-                        oss << "Symbol overrun: "
-                            << late_ns / 1e6
-                            << " ms late";
-                        fire_transmit_cb(
-                            TransmissionCallbackEvent::LOGGING,
-                            LogLevel::DEBUG,
-                            oss.str(),
-                            0.0);
-                    }
-                }
-            }
-            if (shouldStop())
-            {
-                break;
-            }
-
-            const int frame_index = i / symbols_per_frame;
-            const int symbol_index = i % symbols_per_frame;
-
-            emitSymbol(
-                static_cast<int>(
-                    current_request_.wspr_plan.frames[frame_index]
-                        .symbols[symbol_index]),
-                symtime,
-                i);
-        }
-
-        const bool canceled = shouldStop() && (i < symbol_count);
-
-        // Allow the final symbol's queued DMA work to drain before turning off
-        // the clock. Without this, we can cut the last symbol short by roughly
-        // one symbol period.
-        if (!canceled)
-        {
-            const int64_t end_ns =
-                static_cast<int64_t>(std::llround(
-                    static_cast<double>(symbol_count) * symtime * 1e9));
-
-            const timespec end_target = add_ns(t0_ts, end_ns);
-            (void)sleepUntilAbsTightInterruptible(CLOCK_MONOTONIC, end_target, 200'000);
+            throw std::runtime_error(
+                execute_result.error.empty()
+                    ? "Execution-plan backend fault."
+                    : execute_result.error);
         }
 
         // Capture the end time immediately after the symbol-period drain.
         // transmit_off() can take non-trivial time on some platforms, and that
         // shutdown overhead should not be counted against the on-air duration.
         const auto t_end_chrono = std::chrono::steady_clock::now();
-
-        endTransmissionOutput();
-        tx_guard.dismiss();
 
         state_.store(canceled ? State::CANCELLED : State::COMPLETE,
                      std::memory_order_release);

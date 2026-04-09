@@ -93,7 +93,7 @@ enum class WsprTransmissionCallbackEvent
     LOGGING
 };
 
-enum class WsprTransmissionMode
+enum class TransmissionMode
 {
     WSPR, ///< Prepared WSPR frame execution for one committed slot.
     TONE  ///< Direct RF tone execution for one committed runtime request.
@@ -103,7 +103,7 @@ inline constexpr int kWsprTransmitControlGpioUnset = -1;
 inline constexpr int kWsprRandomOffsetHz = 80;
 
 /**
- * @struct WsprTransmissionRequest
+ * @struct TransmissionRequest
  * @brief Complete execution-time request for one transmitter run.
  *
  * @details
@@ -112,7 +112,7 @@ inline constexpr int kWsprRandomOffsetHz = 80;
  * data and orchestration metadata for the currently selected slot so callers
  * can keep one coherent snapshot for scheduling, logging, and GPIO control.
  */
-struct WsprTransmissionRequest
+struct TransmissionRequest
 {
     /**
      * @brief Execution mode already chosen by the scheduler.
@@ -120,7 +120,7 @@ struct WsprTransmissionRequest
      * This is an execution-time choice, not a backend or transmitter policy
      * decision. Tone mode is transient runtime behavior.
      */
-    WsprTransmissionMode mode = WsprTransmissionMode::WSPR;
+    TransmissionMode mode = TransmissionMode::WSPR;
 
     /**
      * @brief Prepared WSPR frame data for this committed slot.
@@ -128,7 +128,7 @@ struct WsprTransmissionRequest
      * This is empty for tone mode. For paired WSPR, the scheduler commits
      * one slot at a time even if the saved scheduler plan spans two slots.
      */
-    PreparedWsprTransmission wspr_plan{};
+    PreparedWsprTransmission payload{};
 
     /**
      * @brief Scheduler-selected dial frequency in hertz (Hz).
@@ -206,7 +206,7 @@ struct WsprTransmissionRequest
 
     bool isTone() const noexcept
     {
-        return mode == WsprTransmissionMode::TONE;
+        return mode == TransmissionMode::TONE;
     }
 
     bool isSkipWindow() const noexcept
@@ -216,7 +216,7 @@ struct WsprTransmissionRequest
 
     std::size_t totalSymbolCount() const noexcept
     {
-        return isTone() ? 0U : wspr_plan.totalSymbolCount();
+        return isTone() ? 0U : payload.totalSymbolCount();
     }
 };
 

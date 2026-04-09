@@ -46,6 +46,9 @@
 #include <sys/time.h> // for struct timeval
 
 // Project headers
+#include "execution_plan.hpp"
+#include "execution_plan_compiler.hpp"
+#include "transmission_controller.hpp"
 #include "wspr_reference_adapter.hpp"
 #include "wspr_transmit_types.hpp"
 
@@ -248,7 +251,9 @@ public:
      *   run. This method does not decide policy such as tone versus WSPR,
      *   paired planning, GPIO selection, or in-band offset selection.
      */
-    void configureExecution(const WsprTransmissionRequest &request);
+    void configureExecution(const TransmissionRequest &request);
+    void configureExecution(const wsprrypi::TransmissionRequest& request,
+                            const TransmissionRequest& legacy_request);
 
     /**
      * @brief Configure POSIX scheduling policy and priority for future
@@ -683,7 +688,8 @@ private:
      *   This instance holds the committed execution request used by the
      *   internal timing scheduler and transmit thread.
      */
-    WsprTransmissionRequest current_request_{};
+    TransmissionRequest current_request_{};
+    wsprrypi::ExecutionPlan current_execution_plan_{};
 
     /**
      * @brief Invoke the configured transmission callback.
@@ -716,7 +722,6 @@ private:
      *   plan consumed by the backend. It does not perform planning policy.
      */
     WsprTransmissionPlan buildTransmissionPlan() const noexcept;
-
     /**
      * @brief Execute the transmission loop.
      *
@@ -957,7 +962,9 @@ private:
     /**
      * @brief Pi-specific transmission backend.
      */
-    std::unique_ptr<WsprTransmitBackend> backend_;
+    wsprrypi::ExecutionPlanCompiler execution_plan_compiler_{};
+    std::unique_ptr<WsprRpiBackend> backend_;
+    std::unique_ptr<wsprrypi::TransmissionController> transmission_controller_;
 };
 
 /**

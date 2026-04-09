@@ -51,6 +51,8 @@
 namespace
 {
     static constexpr size_t NUM_PAGES = 4096;
+    static constexpr double kWsprSymbolPeriodSeconds = 8192.0 / 12000.0;
+    static constexpr double kWsprToneSpacingHz = 1.0 / kWsprSymbolPeriodSeconds;
 
     static inline int cpu_count() noexcept
     {
@@ -170,6 +172,25 @@ namespace
 
         (void)gpclk0_wait_not_busy(gp0ctl_reg, 200000);
     }
+
+    static inline timespec add_ns(timespec t, int64_t ns)
+    {
+        int64_t sec = ns / 1000000000LL;
+        int64_t rem = ns % 1000000000LL;
+        t.tv_sec += sec;
+        t.tv_nsec += rem;
+        if (t.tv_nsec >= 1000000000L)
+        {
+            t.tv_sec += 1;
+            t.tv_nsec -= 1000000000L;
+        }
+        else if (t.tv_nsec < 0)
+        {
+            t.tv_sec -= 1;
+            t.tv_nsec += 1000000000L;
+        }
+        return t;
+    }
 }
 
 WsprRpiBackend::DMAConfig::DMAConfig()
@@ -213,6 +234,228 @@ WsprRpiBackend::~WsprRpiBackend()
     stop_watchdog();
 }
 
+wsprrypi::BackendInfo WsprRpiBackend::info() const
+{
+    return wsprrypi::BackendInfo{
+        wsprrypi::BackendKind::RPI_CLOCK_GPIO,
+        "rpi-clock-gpio",
+        "Raspberry Pi GPCLK0/PWM DMA backend"};
+}
+
+wsprrypi::BackendCapabilities WsprRpiBackend::capabilities() const
+{
+    wsprrypi::BackendCapabilities caps;
+    caps.supports_frequency_switching = true;
+    caps.supports_rf_gating = true;
+    caps.supports_precomputed_execution = true;
+    caps.nominal_frequency_resolution_hz = std::pow(2.0, -12);
+    return caps;
+}
+
+wsprrypi::BackendCompileResult WsprRpiBackend::configure(
+    const wsprrypi::ExecutionPlan &plan)
+{
+    wsprrypi::BackendCompileResult result;
+    auto compat = build_execution_plan_config(plan, &result);
+    if (!compat.has_value())
+    {
+        if (result.error.empty())
+            result.error = "Unsupported execution plan.";
+        return result;
+    }
+
+    const WsprTransmissionConfigureResult applied =
+        setup_dma_freq_table(compat->compatibility_plan);
+
+    configured_plan_ = compat;
+    result.ok = true;
+
+    if (applied.applied_frequency_hz !=
+        compat->compatibility_plan.frequency_hz)
+    {
+        result.adjustments.push_back(wsprrypi::BackendAdjustment{
+            0,
+            compat->compatibility_plan.frequency_hz,
+            applied.applied_frequency_hz,
+            "Center frequency quantized by Raspberry Pi clock divisor."});
+        configured_plan_->compatibility_plan.frequency_hz =
+            applied.applied_frequency_hz;
+    }
+
+    return result;
+}
+
+wsprrypi::ExecutionResult WsprRpiBackend::execute(
+    const wsprrypi::ExecutionPlan &plan)
+{
+    wsprrypi::ExecutionResult result;
+    auto compat = configured_plan_;
+    if (!compat.has_value())
+    {
+        compat = build_execution_plan_config(plan, nullptr);
+    }
+
+    if (!compat.has_value())
+    {
+        result.error = "Unsupported execution plan.";
+        return result;
+    }
+
+    try
+    {
+        dma_buf_ptr_ = 0;
+        transmit_on(compat->compatibility_plan);
+
+        struct TxOffGuard
+        {
+            WsprRpiBackend *self;
+            ~TxOffGuard()
+            {
+                if (self)
+                    self->transmit_off();
+            }
+        } tx_guard{this};
+
+        struct timespec t0_ts{};
+        clock_gettime(CLOCK_MONOTONIC, &t0_ts);
+
+        for (std::size_t i = 0; i < plan.events.size(); ++i)
+        {
+            if (owner_.backendShouldStop())
+                break;
+
+            const auto &event = plan.events[i];
+            if (!event.rf_on)
+                continue;
+
+            if (i > 0)
+            {
+                const timespec target =
+                    add_ns(t0_ts, event.offset_from_start.count());
+                while (!owner_.backendShouldStop())
+                {
+                    const int rc = clock_nanosleep(
+                        CLOCK_MONOTONIC,
+                        TIMER_ABSTIME,
+                        &target,
+                        nullptr);
+                    if (rc == 0)
+                        break;
+                    if (rc != EINTR)
+                        throw std::system_error(
+                            rc,
+                            std::generic_category(),
+                            "clock_nanosleep");
+                }
+            }
+
+            const auto symbol = reconstruct_wspr_symbol(
+                event,
+                compat->compatibility_plan);
+
+            transmit_symbol(
+                compat->compatibility_plan,
+                symbol,
+                std::chrono::duration<double>(event.duration).count(),
+                static_cast<int>(i));
+
+            if (i == 0 && !owner_.backendShouldStop())
+                start_watchdog();
+        }
+
+        if (!owner_.backendShouldStop() && !plan.events.empty())
+        {
+            const auto &last = plan.events.back();
+            const timespec end_target =
+                add_ns(
+                    t0_ts,
+                    (last.offset_from_start + last.duration).count());
+            (void)clock_nanosleep(
+                CLOCK_MONOTONIC,
+                TIMER_ABSTIME,
+                &end_target,
+                nullptr);
+        }
+
+        result.ok = true;
+        result.stopped = owner_.backendShouldStop();
+        return result;
+    }
+    catch (const std::exception &e)
+    {
+        result.faulted = true;
+        result.error = e.what();
+        return result;
+    }
+}
+
+void WsprRpiBackend::stop() noexcept
+{
+    owner_.backendRequestStopTxNoJoin();
+}
+
+void WsprRpiBackend::cleanup() noexcept
+{
+    cleanupTransmission();
+}
+
+std::optional<WsprRpiBackend::ExecutionPlanConfig>
+WsprRpiBackend::build_execution_plan_config(
+    const wsprrypi::ExecutionPlan &plan,
+    wsprrypi::BackendCompileResult *result) const
+{
+    if (plan.mode != wsprrypi::TransmissionMode::WSPR)
+    {
+        if (result)
+            result->error = "Only WSPR execution plans are currently supported.";
+        return std::nullopt;
+    }
+
+    if (plan.events.empty())
+    {
+        if (result)
+            result->error = "Execution plan has no events.";
+        return std::nullopt;
+    }
+
+    ExecutionPlanConfig config;
+    config.compatibility_plan.frequency_hz = plan.reference_frequency_hz;
+    config.compatibility_plan.tone_spacing_hz = kWsprToneSpacingHz;
+    config.compatibility_plan.power_level = plan.power_level;
+    config.compatibility_plan.ppm = plan.calibration.ppm;
+    config.compatibility_plan.tx_gpio = plan.tx_gpio;
+    config.compatibility_plan.total_symbol_count = plan.events.size();
+    return config;
+}
+
+std::uint32_t WsprRpiBackend::reconstruct_wspr_symbol(
+    const wsprrypi::RfEvent &event,
+    const WsprTransmissionPlan &plan) const
+{
+    if (plan.tone_spacing_hz <= 0.0)
+    {
+        throw std::runtime_error(
+            "Execution-plan compatibility plan has invalid WSPR tone spacing.");
+    }
+
+    // The current DMA emitter still expects 4-FSK WSPR symbols. Reconstruct
+    // the symbol index from the event frequency rather than widening the
+    // low-level path during this refactor.
+    const double tone0_frequency_hz =
+        plan.frequency_hz - 1.5 * plan.tone_spacing_hz;
+    const double symbol_position =
+        (event.frequency_hz - tone0_frequency_hz) / plan.tone_spacing_hz;
+    const long symbol = std::lround(symbol_position);
+
+    if (symbol < 0L || symbol > 3L)
+    {
+        throw std::runtime_error(
+            "Execution-plan event frequency does not map to a valid WSPR symbol.");
+    }
+
+    return static_cast<std::uint32_t>(symbol);
+}
+
 void WsprRpiBackend::startFaultMonitoring()
 {
     start_watchdog();
@@ -238,6 +481,7 @@ WsprTransmissionConfigureResult WsprRpiBackend::configureTransmission(
 
 void WsprRpiBackend::cleanupTransmission()
 {
+    configured_plan_.reset();
     dma_cleanup();
 }
 

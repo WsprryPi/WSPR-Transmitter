@@ -669,9 +669,9 @@ void configure_transmitter(bool isWspr)
                 std::string(GRID),
                 POWER_DBM);
 
-        WsprTransmissionRequest request;
-        request.mode = WsprTransmissionMode::WSPR;
-        request.wspr_plan = plan;
+        TransmissionRequest request;
+        request.mode = TransmissionMode::WSPR;
+        request.payload = plan;
         request.dial_frequency_hz = WSPR_FREQ;
         request.actual_rf_frequency_hz = WSPR_FREQ;
         request.ppm = config.ppm;
@@ -682,8 +682,8 @@ void configure_transmitter(bool isWspr)
     }
     else
     {
-        WsprTransmissionRequest request;
-        request.mode = WsprTransmissionMode::TONE;
+        TransmissionRequest request;
+        request.mode = TransmissionMode::TONE;
         request.dial_frequency_hz = WSPR_FREQ;
         request.actual_rf_frequency_hz = WSPR_FREQ;
         request.ppm = config.ppm;
