@@ -76,7 +76,7 @@ void validate_positive_duration(
     if (duration <= std::chrono::nanoseconds::zero())
     {
         throw std::runtime_error(
-            std::string("QRSS timing field is invalid: ") + field_name);
+            std::string("Morse timing field is invalid: ") + field_name);
     }
 }
 
@@ -101,6 +101,50 @@ void append_event(
     event.envelope = envelope;
     plan.events.push_back(event);
     offset += duration;
+}
+
+template <typename MarkFn, typename GapFn>
+void expand_morse_message(
+    const std::string& message,
+    MarkFn&& emit_mark,
+    GapFn&& emit_gap)
+{
+    enum class GapKind
+    {
+        IntraElement,
+        InterCharacter,
+        InterWord
+    };
+
+    for (std::size_t i = 0; i < message.size(); ++i)
+    {
+        const char ch = message[i];
+
+        if (is_space_like(ch))
+            continue;
+
+        const std::string_view morse = morse_code_for(ch);
+        if (morse.empty())
+            throw std::runtime_error("Payload contains unsupported character.");
+
+        for (std::size_t j = 0; j < morse.size(); ++j)
+        {
+            emit_mark(morse[j]);
+
+            if (j + 1U < morse.size())
+                emit_gap(GapKind::IntraElement);
+        }
+
+        std::size_t next = i + 1U;
+        while (next < message.size() && is_space_like(message[next]))
+            ++next;
+
+        if (next >= message.size())
+            continue;
+
+        emit_gap(next > (i + 1U) ? GapKind::InterWord
+                                 : GapKind::InterCharacter);
+    }
 }
 
 std::size_t resolve_wspr_frame_index(const PreparedWsprTransmission& prepared)
@@ -272,36 +316,24 @@ ExecutionPlan ExecutionPlanCompiler::compile_qrss(
 
     std::chrono::nanoseconds offset{0};
 
-    for (std::size_t i = 0; i < payload.message.size(); ++i)
+    try
     {
-        const char ch = payload.message[i];
-
-        if (is_space_like(ch))
-        {
-            continue;
-        }
-
-        const std::string_view morse = morse_code_for(ch);
-        if (morse.empty())
-        {
-            throw std::runtime_error("QRSS payload contains unsupported character.");
-        }
-
-        for (std::size_t j = 0; j < morse.size(); ++j)
-        {
-            const auto duration =
-                (morse[j] == '.') ? payload.timing.dot : payload.timing.dash;
-
-            append_event(
-                plan,
-                offset,
-                RfEventType::RF_ON,
-                true,
-                payload.frequency_hz,
-                duration,
-                payload.envelope);
-
-            if (j + 1U < morse.size())
+        expand_morse_message(
+            payload.message,
+            [&](char element)
+            {
+                const auto duration =
+                    (element == '.') ? payload.timing.dot : payload.timing.dash;
+                append_event(
+                    plan,
+                    offset,
+                    RfEventType::RF_ON,
+                    true,
+                    payload.frequency_hz,
+                    duration,
+                    payload.envelope);
+            },
+            [&](auto gap_kind)
             {
                 append_event(
                     plan,
@@ -309,29 +341,19 @@ ExecutionPlan ExecutionPlanCompiler::compile_qrss(
                     RfEventType::RF_OFF,
                     false,
                     payload.frequency_hz,
-                    payload.timing.intra_element_gap,
+                    gap_kind == decltype(gap_kind)::IntraElement
+                        ? payload.timing.intra_element_gap
+                        : (gap_kind == decltype(gap_kind)::InterWord
+                               ? payload.timing.inter_word_gap
+                               : payload.timing.inter_character_gap),
                     payload.envelope);
-            }
-        }
-
-        std::size_t next = i + 1U;
-        while (next < payload.message.size() && is_space_like(payload.message[next]))
-            ++next;
-
-        if (next >= payload.message.size())
-            continue;
-
-        const auto gap =
-            (next > (i + 1U)) ? payload.timing.inter_word_gap
-                              : payload.timing.inter_character_gap;
-        append_event(
-            plan,
-            offset,
-            RfEventType::RF_OFF,
-            false,
-            payload.frequency_hz,
-            gap,
-            payload.envelope);
+            });
+    }
+    catch (const std::runtime_error& e)
+    {
+        if (std::string_view(e.what()) == "Payload contains unsupported character.")
+            throw std::runtime_error("QRSS payload contains unsupported character.");
+        throw;
     }
 
     if (plan.events.empty())
@@ -342,10 +364,87 @@ ExecutionPlan ExecutionPlanCompiler::compile_qrss(
 }
 
 ExecutionPlan ExecutionPlanCompiler::compile_fskcw(
-    const TransmissionRequest&,
-    const FskcwPayload&) const
+    const TransmissionRequest& request,
+    const FskcwPayload& payload) const
 {
-    throw std::runtime_error("FSKCW execution-plan compilation is not implemented.");
+    if (payload.message.empty())
+        throw std::runtime_error("FSKCW payload message is empty.");
+
+    if (payload.mark_frequency_hz <= 0.0)
+        throw std::runtime_error("FSKCW payload mark frequency is invalid.");
+
+    if (payload.space_frequency_hz <= 0.0)
+        throw std::runtime_error("FSKCW payload space frequency is invalid.");
+
+    if (payload.mark_frequency_hz <= payload.space_frequency_hz)
+        throw std::runtime_error("FSKCW mark frequency must be greater than space frequency.");
+
+    validate_positive_duration(payload.timing.dot, "dot");
+    validate_positive_duration(payload.timing.dash, "dash");
+    validate_positive_duration(payload.timing.intra_element_gap, "intra_element_gap");
+    validate_positive_duration(payload.timing.inter_character_gap, "inter_character_gap");
+    validate_positive_duration(payload.timing.inter_word_gap, "inter_word_gap");
+
+    ExecutionPlan plan;
+    plan.request_id = request.id;
+    plan.mode = request.mode;
+    plan.backend = request.output.backend;
+    const double tone_spacing_hz =
+        payload.mark_frequency_hz - payload.space_frequency_hz;
+    plan.reference_frequency_hz =
+        payload.space_frequency_hz + 1.5 * tone_spacing_hz;
+    plan.calibration = request.calibration;
+    plan.policy = request.policy;
+
+    std::chrono::nanoseconds offset{0};
+
+    try
+    {
+        expand_morse_message(
+            payload.message,
+            [&](char element)
+            {
+                const auto duration =
+                    (element == '.') ? payload.timing.dot : payload.timing.dash;
+                append_event(
+                    plan,
+                    offset,
+                    RfEventType::HOLD,
+                    true,
+                    payload.mark_frequency_hz,
+                    duration,
+                    payload.envelope);
+            },
+            [&](auto gap_kind)
+            {
+                append_event(
+                    plan,
+                    offset,
+                    RfEventType::HOLD,
+                    true,
+                    payload.space_frequency_hz,
+                    gap_kind == decltype(gap_kind)::IntraElement
+                        ? payload.timing.intra_element_gap
+                        : (gap_kind == decltype(gap_kind)::InterWord
+                               ? payload.timing.inter_word_gap
+                               : payload.timing.inter_character_gap),
+                    payload.envelope);
+            });
+    }
+    catch (const std::runtime_error& e)
+    {
+        if (std::string_view(e.what()) == "Payload contains unsupported character.")
+            throw std::runtime_error("FSKCW payload contains unsupported character.");
+        throw;
+    }
+
+    if (plan.events.empty())
+        throw std::runtime_error("FSKCW payload produced no execution events.");
+
+    plan.summary = build_summary(plan.events);
+    plan.summary.min_frequency_hz = payload.space_frequency_hz;
+    plan.summary.max_frequency_hz = payload.mark_frequency_hz;
+    return plan;
 }
 
 ExecutionPlan ExecutionPlanCompiler::compile_dfcw(

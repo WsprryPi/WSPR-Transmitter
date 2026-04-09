@@ -309,7 +309,17 @@ private:
     std::uint32_t reconstruct_wspr_symbol(
         const wsprrypi::RfEvent &event,
         const WsprTransmissionPlan &plan) const;
+    std::uint32_t reconstruct_compatibility_symbol(
+        const wsprrypi::RfEvent &event,
+        const WsprTransmissionPlan &plan,
+        long min_symbol,
+        long max_symbol) const;
     void execute_qrss_event(
+        const wsprrypi::RfEvent& event,
+        const WsprTransmissionPlan& plan,
+        bool& rf_enabled,
+        int symbol_index);
+    void execute_fskcw_event(
         const wsprrypi::RfEvent& event,
         const WsprTransmissionPlan& plan,
         bool& rf_enabled,

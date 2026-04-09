@@ -351,6 +351,14 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
                     rf_enabled,
                     static_cast<int>(i));
             }
+            else if (plan.mode == wsprrypi::TransmissionMode::FSKCW)
+            {
+                execute_fskcw_event(
+                    event,
+                    compat->compatibility_plan,
+                    rf_enabled,
+                    static_cast<int>(i));
+            }
             else
             {
                 const auto symbol = reconstruct_wspr_symbol(
@@ -415,10 +423,11 @@ WsprRpiBackend::build_execution_plan_config(
     wsprrypi::BackendCompileResult *result) const
 {
     if (plan.mode != wsprrypi::TransmissionMode::WSPR &&
-        plan.mode != wsprrypi::TransmissionMode::QRSS)
+        plan.mode != wsprrypi::TransmissionMode::QRSS &&
+        plan.mode != wsprrypi::TransmissionMode::FSKCW)
     {
         if (result)
-            result->error = "Only WSPR and QRSS execution plans are currently supported.";
+            result->error = "Only WSPR, QRSS, and FSKCW execution plans are currently supported.";
         return std::nullopt;
     }
 
@@ -432,6 +441,22 @@ WsprRpiBackend::build_execution_plan_config(
     ExecutionPlanConfig config;
     config.compatibility_plan.frequency_hz = plan.reference_frequency_hz;
     config.compatibility_plan.tone_spacing_hz = kWsprToneSpacingHz;
+    if (plan.mode == wsprrypi::TransmissionMode::FSKCW)
+    {
+        if (plan.summary.max_frequency_hz <= 0.0 ||
+            plan.summary.min_frequency_hz <= 0.0 ||
+            plan.summary.max_frequency_hz <= plan.summary.min_frequency_hz)
+        {
+            if (result)
+                result->error = "FSKCW execution plan has invalid tone frequencies.";
+            return std::nullopt;
+        }
+
+        config.compatibility_plan.tone_spacing_hz =
+            plan.summary.max_frequency_hz - plan.summary.min_frequency_hz;
+        config.compatibility_plan.frequency_hz =
+            plan.summary.min_frequency_hz + 1.5 * config.compatibility_plan.tone_spacing_hz;
+    }
     config.compatibility_plan.power_level = inputs.power_level;
     config.compatibility_plan.ppm = plan.calibration.ppm;
     config.compatibility_plan.tx_gpio = inputs.tx_gpio;
@@ -444,32 +469,39 @@ WsprRpiBackend::build_execution_plan_config(
     return config;
 }
 
-std::uint32_t WsprRpiBackend::reconstruct_wspr_symbol(
+std::uint32_t WsprRpiBackend::reconstruct_compatibility_symbol(
     const wsprrypi::RfEvent &event,
-    const WsprTransmissionPlan &plan) const
+    const WsprTransmissionPlan &plan,
+    long min_symbol,
+    long max_symbol) const
 {
     if (plan.tone_spacing_hz <= 0.0)
     {
         throw std::runtime_error(
-            "Execution-plan compatibility plan has invalid WSPR tone spacing.");
+            "Execution-plan compatibility plan has invalid tone spacing.");
     }
 
-    // The current DMA emitter still expects 4-FSK WSPR symbols. Reconstruct
-    // the symbol index from the event frequency rather than widening the
-    // low-level path during this refactor.
     const double tone0_frequency_hz =
         plan.frequency_hz - 1.5 * plan.tone_spacing_hz;
     const double symbol_position =
         (event.frequency_hz - tone0_frequency_hz) / plan.tone_spacing_hz;
     const long symbol = std::lround(symbol_position);
 
-    if (symbol < 0L || symbol > 3L)
+    if (symbol < min_symbol || symbol > max_symbol)
     {
         throw std::runtime_error(
-            "Execution-plan event frequency does not map to a valid WSPR symbol.");
+            "Execution-plan event frequency does not map to a valid compatibility symbol.");
     }
 
     return static_cast<std::uint32_t>(symbol);
+}
+
+std::uint32_t WsprRpiBackend::reconstruct_wspr_symbol(
+    const wsprrypi::RfEvent &event,
+    const WsprTransmissionPlan &plan) const
+{
+    // The current DMA emitter still expects compatibility-table symbols.
+    return reconstruct_compatibility_symbol(event, plan, 0L, 3L);
 }
 
 void WsprRpiBackend::execute_qrss_event(
@@ -500,6 +532,34 @@ void WsprRpiBackend::execute_qrss_event(
     transmit_symbol(
         plan,
         0U,
+        std::chrono::duration<double>(event.duration).count(),
+        symbol_index);
+}
+
+void WsprRpiBackend::execute_fskcw_event(
+    const wsprrypi::RfEvent& event,
+    const WsprTransmissionPlan& plan,
+    bool& rf_enabled,
+    int symbol_index)
+{
+    if (!event.rf_on)
+    {
+        throw std::runtime_error(
+            "FSKCW execution-plan event unexpectedly disables RF.");
+    }
+
+    if (!rf_enabled)
+    {
+        transmit_on(plan);
+        start_watchdog();
+        rf_enabled = true;
+    }
+
+    const auto symbol =
+        reconstruct_compatibility_symbol(event, plan, 0L, 1L);
+    transmit_symbol(
+        plan,
+        symbol,
         std::chrono::duration<double>(event.duration).count(),
         symbol_index);
 }
