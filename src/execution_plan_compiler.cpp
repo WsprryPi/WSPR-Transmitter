@@ -11,6 +11,24 @@ namespace
 constexpr double kWsprSymbolPeriodSeconds = 8192.0 / 12000.0;
 constexpr double kWsprToneSpacingHz = 1.0 / kWsprSymbolPeriodSeconds;
 
+std::size_t resolve_wspr_frame_index(const PreparedWsprTransmission& prepared)
+{
+    if (prepared.frames.empty())
+        throw std::runtime_error("WSPR payload has no prepared frames.");
+
+    // PreparedWsprTransmission.current_frame is carried through scheduling as
+    // a 1-based "current frame" ordinal for runtime status. Execution needs a
+    // zero-based index into frames.
+    if (prepared.current_frame == 0U)
+        return 0U;
+
+    const std::size_t frame_index = prepared.current_frame - 1U;
+    if (frame_index >= prepared.frames.size())
+        throw std::runtime_error("WSPR payload current frame index is out of range.");
+
+    return frame_index;
+}
+
 double wspr_symbol_frequency(
     double base_frequency_hz,
     double tone_spacing_hz,
@@ -89,11 +107,7 @@ ExecutionPlan ExecutionPlanCompiler::compile_wspr(
     const TransmissionRequest& request,
     const WsprPayload& payload) const
 {
-    if (payload.prepared.frames.empty())
-        throw std::runtime_error("WSPR payload has no prepared frames.");
-
-    if (payload.prepared.current_frame >= payload.prepared.frames.size())
-        throw std::runtime_error("WSPR payload current frame index is out of range.");
+    const std::size_t frame_index = resolve_wspr_frame_index(payload.prepared);
 
     if (payload.base_frequency_hz <= 0.0)
         throw std::runtime_error("WSPR payload base frequency is invalid.");
@@ -102,7 +116,7 @@ ExecutionPlan ExecutionPlanCompiler::compile_wspr(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::duration<double>(kWsprSymbolPeriodSeconds));
 
-    const auto& frame = payload.prepared.frames[payload.prepared.current_frame];
+    const auto& frame = payload.prepared.frames[frame_index];
 
     ExecutionPlan plan;
     plan.request_id = request.id;

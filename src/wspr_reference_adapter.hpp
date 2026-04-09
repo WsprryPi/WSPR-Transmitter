@@ -53,6 +53,8 @@ struct PreparedWsprTransmission
     std::vector<std::string> frame_callsigns;
     std::vector<std::string> frame_locators;
     std::size_t total_frame_count = 0;
+    // 1-based frame ordinal for scheduler/runtime status. Execution paths
+    // must convert this to a zero-based index when selecting from `frames`.
     std::size_t current_frame = 0;
     std::string frame_callsign;
     std::string frame_locator;
