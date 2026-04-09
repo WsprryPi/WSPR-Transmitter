@@ -570,19 +570,6 @@ void WsprRpiBackend::execute_fskcw_event(
 
     const auto symbol =
         reconstruct_compatibility_symbol(event, plan, 0L, 1L);
-    {
-        std::ostringstream oss;
-        oss << "FSKCW event idx=" << symbol_index
-            << " freq=" << std::fixed << std::setprecision(6)
-            << event.frequency_hz
-            << " symbol=" << symbol
-            << " rf_on=" << (event.rf_on ? "true" : "false");
-        owner_.backendFireTransmitCallback(
-            WsprTransmissionCallbackEvent::LOGGING,
-            WsprTransmitLogLevel::DEBUG,
-            oss.str(),
-            0.0);
-    }
     transmit_symbol(
         plan,
         symbol,
@@ -616,21 +603,6 @@ void WsprRpiBackend::execute_dfcw_event(
 
     const auto symbol =
         reconstruct_compatibility_symbol(event, plan, 0L, 1L);
-
-    {
-        std::ostringstream oss;
-        oss << "DFCW event idx=" << symbol_index
-            << " freq=" << std::fixed << std::setprecision(6)
-            << event.frequency_hz
-            << " symbol=" << symbol
-            << " rf_on=" << (event.rf_on ? "true" : "false");
-        owner_.backendFireTransmitCallback(
-            WsprTransmissionCallbackEvent::LOGGING,
-            WsprTransmitLogLevel::DEBUG,
-            oss.str(),
-            0.0);
-    }
-
     transmit_symbol(
         plan,
         symbol,
