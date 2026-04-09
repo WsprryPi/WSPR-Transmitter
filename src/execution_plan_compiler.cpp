@@ -498,11 +498,21 @@ ExecutionPlan ExecutionPlanCompiler::compile_dfcw(
                     payload.timing.dot,
                     payload.envelope);
             },
-            [&](auto)
+            [&](auto gap_kind)
             {
-                // First-pass DFCW keeps the carrier continuous with no
-                // explicit RF-off spacing events. Information is carried by
-                // the frequency of equal-duration Morse elements.
+                append_event(
+                    plan,
+                    offset,
+                    RfEventType::RF_OFF,
+                    false,
+                    0.0,
+                    gap_kind == decltype(gap_kind)::IntraElement
+                        ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              payload.timing.dot / 3)
+                        : (gap_kind == decltype(gap_kind)::InterWord
+                               ? payload.timing.dot * 2
+                               : payload.timing.dot),
+                    payload.envelope);
             });
     }
     catch (const std::runtime_error& e)

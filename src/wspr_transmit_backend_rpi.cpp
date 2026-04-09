@@ -587,11 +587,11 @@ void WsprRpiBackend::execute_dfcw_event(
     {
         if (rf_enabled)
         {
-            throw std::runtime_error(
-                "DFCW execution-plan event unexpectedly disables RF.");
+            stop_watchdog();
+            disable_clock();
+            rf_enabled = false;
         }
-        throw std::runtime_error(
-            "DFCW execution-plan event unexpectedly disables RF.");
+        return;
     }
 
     if (!rf_enabled)
