@@ -257,6 +257,8 @@ public:
     void configureExecution(const wsprrypi::TransmissionRequest& request,
                             const TransmissionRequest& legacy_request);
 
+    void selectBackend(wsprrypi::BackendKind backend_kind);
+
     /**
      * @brief Configure POSIX scheduling policy and priority for future
      *        transmissions.
@@ -964,10 +966,12 @@ private:
     TransmissionScheduler scheduler_{this};
 
     /**
-     * @brief Pi-specific transmission backend.
+     * @brief Selected transmission backend and controller.
      */
     wsprrypi::ExecutionPlanCompiler execution_plan_compiler_{};
-    std::unique_ptr<WsprRpiBackend> backend_;
+    std::unique_ptr<wsprrypi::ITransmissionBackend> backend_;
+    WsprRpiBackend *rpi_backend_{nullptr};
+    wsprrypi::BackendKind selected_backend_{wsprrypi::BackendKind::RPI_CLOCK_GPIO};
     std::unique_ptr<wsprrypi::TransmissionController> transmission_controller_;
 };
 
