@@ -151,10 +151,11 @@ WsprSi5351Backend::WsprSi5351Backend(
       si5351_plan_(),
       configured_(false),
       stop_requested_(false),
-      active_power_level_(config.power_level),
+      active_power_level_(1),
       active_drive_strength_(Si5351Device::DriveStrength::MA_2),
       current_tone_index_(invalid_tone_index())
 {
+    resetActiveDriveStrengthFromConfig();
 }
 
 /**
@@ -342,7 +343,14 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
             WsprTransmitLogLevel::DEBUG,
             "Si5351 execution starting.");
 
-        if (!device_.open())
+        if (config_.dry_run)
+        {
+            log_si5351(
+                owner_,
+                WsprTransmitLogLevel::INFO,
+                "Si5351 dry-run: skipping I2C open and initialization.");
+        }
+        else if (!device_.open())
         {
             result.error = device_error_or(
                 device_,
@@ -350,12 +358,15 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
             log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
             return result;
         }
-        log_si5351(
-            owner_,
-            WsprTransmitLogLevel::DEBUG,
-            "Si5351 device opened.");
+        else
+        {
+            log_si5351(
+                owner_,
+                WsprTransmitLogLevel::DEBUG,
+                "Si5351 device opened.");
+        }
 
-        if (!device_.initialize())
+        if (!config_.dry_run && !device_.initialize())
         {
             result.error = device_error_or(
                 device_,
@@ -364,10 +375,13 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
             idle_device();
             return result;
         }
-        log_si5351(
-            owner_,
-            WsprTransmitLogLevel::DEBUG,
-            "Si5351 device initialized.");
+        if (!config_.dry_run)
+        {
+            log_si5351(
+                owner_,
+                WsprTransmitLogLevel::DEBUG,
+                "Si5351 device initialized.");
+        }
 
         if (!applyStartupProgramming())
         {
@@ -383,7 +397,14 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
             WsprTransmitLogLevel::DEBUG,
             "Si5351 startup programming applied.");
 
-        if (!device_.setDriveStrength(
+        if (config_.dry_run)
+        {
+            log_si5351(
+                owner_,
+                WsprTransmitLogLevel::INFO,
+                "Si5351 dry-run: skipping drive-strength programming.");
+        }
+        else if (!device_.setDriveStrength(
                 config_.planner.tx_output,
                 active_drive_strength_))
         {
@@ -394,10 +415,13 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
             idle_device();
             return result;
         }
-        log_si5351(
-            owner_,
-            WsprTransmitLogLevel::DEBUG,
-            "Si5351 drive strength applied.");
+        else
+        {
+            log_si5351(
+                owner_,
+                WsprTransmitLogLevel::DEBUG,
+                "Si5351 drive strength applied.");
+        }
 
         struct timespec start_time{};
         if (::clock_gettime(CLOCK_MONOTONIC, &start_time) != 0)
@@ -474,10 +498,20 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
                     return result;
                 }
                 rf_enabled = true;
-                log_si5351(
-                    owner_,
-                    WsprTransmitLogLevel::DEBUG,
-                    "Si5351 TX output enabled.");
+                if (config_.dry_run)
+                {
+                    log_si5351(
+                        owner_,
+                        WsprTransmitLogLevel::INFO,
+                        "Si5351 dry-run: TX output enable skipped.");
+                }
+                else
+                {
+                    log_si5351(
+                        owner_,
+                        WsprTransmitLogLevel::DEBUG,
+                        "Si5351 TX output enabled.");
+                }
             }
             else if (!event.rf_on && rf_enabled)
             {
@@ -494,10 +528,20 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
                     return result;
                 }
                 rf_enabled = false;
-                log_si5351(
-                    owner_,
-                    WsprTransmitLogLevel::DEBUG,
-                    "Si5351 TX output disabled.");
+                if (config_.dry_run)
+                {
+                    log_si5351(
+                        owner_,
+                        WsprTransmitLogLevel::INFO,
+                        "Si5351 dry-run: TX output disable skipped.");
+                }
+                else
+                {
+                    log_si5351(
+                        owner_,
+                        WsprTransmitLogLevel::DEBUG,
+                        "Si5351 TX output disabled.");
+                }
             }
         }
 
@@ -727,6 +771,17 @@ bool WsprSi5351Backend::mapPowerLevelToDriveStrength(
     return false;
 }
 
+void WsprSi5351Backend::resetActiveDriveStrengthFromConfig() noexcept
+{
+    active_power_level_ = config_.power_level;
+    if (!mapPowerLevelToDriveStrength(
+            active_power_level_,
+            active_drive_strength_))
+    {
+        active_drive_strength_ = Si5351Device::DriveStrength::MA_2;
+    }
+}
+
 std::size_t WsprSi5351Backend::expectedToneCount(
     Si5351Planner::Mode mode) const noexcept
 {
@@ -753,18 +808,29 @@ void WsprSi5351Backend::resetState()
     si5351_plan_ = Si5351Planner::Plan{};
     configured_ = false;
     stop_requested_ = false;
-    active_power_level_ = config_.power_level;
-    active_drive_strength_ = Si5351Device::DriveStrength::MA_2;
+    resetActiveDriveStrengthFromConfig();
     current_tone_index_ = invalid_tone_index();
 }
 
 bool WsprSi5351Backend::applyStartupProgramming()
 {
+    if (config_.dry_run)
+    {
+        log_si5351(
+            owner_,
+            WsprTransmitLogLevel::INFO,
+            "Si5351 dry-run: startup register writes skipped.");
+        return true;
+    }
+
     return device_.writeRegisters(si5351_plan_.startup_writes);
 }
 
 bool WsprSi5351Backend::applyIdleProgramming()
 {
+    if (config_.dry_run)
+        return true;
+
     return device_.writeRegisters(si5351_plan_.idle_writes);
 }
 
@@ -778,7 +844,7 @@ bool WsprSi5351Backend::applyTone(std::size_t tone_index)
     if (tone.writes.empty())
         return false;
 
-    if (!device_.writeRegisters(tone.writes))
+    if (!config_.dry_run && !device_.writeRegisters(tone.writes))
         return false;
 
     current_tone_index_ = tone_index;
@@ -794,10 +860,16 @@ bool WsprSi5351Backend::applyTone(std::size_t tone_index)
 
 bool WsprSi5351Backend::enableTransmitOutput()
 {
+    if (config_.dry_run)
+        return true;
+
     return device_.enableOutput(config_.planner.tx_output);
 }
 
 bool WsprSi5351Backend::disableTransmitOutput()
 {
+    if (config_.dry_run)
+        return true;
+
     return device_.disableOutput(config_.planner.tx_output);
 }

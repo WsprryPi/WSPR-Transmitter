@@ -45,8 +45,13 @@ public:
          */
         int power_level = 1;
 
-        Si5351Device::DriveStrength drive_strength =
-            Si5351Device::DriveStrength::MA_2;
+        /**
+         * @brief Skip hardware access for harness and CI validation.
+         *
+         * Dry-run mode still executes backend planning, timing, and callback
+         * flow, but it does not open I2C or enable RF output.
+         */
+        bool dry_run = false;
     };
 
     /**
@@ -180,6 +185,11 @@ private:
     bool mapPowerLevelToDriveStrength(
         int power_level,
         Si5351Device::DriveStrength& drive_strength) const noexcept;
+
+    /**
+     * @brief Reset active drive strength from configured power level.
+     */
+    void resetActiveDriveStrengthFromConfig() noexcept;
 
     /**
      * @brief Return the expected unique tone count for a planner mode.

@@ -53,6 +53,7 @@ namespace
         int power_level = 1;
         int i2c_bus = 1;
         std::uint8_t i2c_address = 0x60;
+        bool dry_run = false;
     };
 
     static const char *log_level_name(WsprTransmitLogLevel level) noexcept
@@ -87,7 +88,8 @@ namespace
             << "  --duration-ms <ms>\n"
             << "  --power-level <1..4>\n"
             << "  --i2c-bus <n>\n"
-            << "  --i2c-address <addr>\n";
+            << "  --i2c-address <addr>\n"
+            << "  --dry-run\n";
     }
 
     static double parse_double_arg(
@@ -194,6 +196,10 @@ namespace
                     throw std::invalid_argument("I2C address out of range.");
                 options.i2c_address = static_cast<std::uint8_t>(address);
             }
+            else if (arg == "--dry-run")
+            {
+                options.dry_run = true;
+            }
             else
             {
                 throw std::invalid_argument("Unknown option: " + arg);
@@ -265,8 +271,8 @@ namespace
         {
             (void)event;
             (void)value;
-            std::cerr << "[si5351][" << log_level_name(level) << "] "
-                      << msg << "\n";
+            std::cout << "[si5351][" << log_level_name(level) << "] "
+                      << msg << std::endl;
         }
 
         bool backendRestartCurrentConfiguration() override
@@ -377,6 +383,7 @@ namespace
         config.planner.reference_hz = 27000000;
         config.planner.tx_output = Si5351Device::Output::CLK0;
         config.power_level = options.power_level;
+        config.dry_run = options.dry_run;
         return config;
     }
 
@@ -391,10 +398,17 @@ namespace
         std::cout << " Hz\n";
         std::cout << "  Duration:    " << options.duration_ms << " ms\n";
         std::cout << "  Power level: " << options.power_level << "\n";
+        std::cout << "  Dry run:     "
+                  << (options.dry_run ? "yes" : "no") << "\n";
         std::cout << "  I2C:         /dev/i2c-" << options.i2c_bus
                   << " addr 0x" << std::hex
                   << static_cast<unsigned>(options.i2c_address)
                   << std::dec << "\n";
+        if (options.dry_run)
+        {
+            std::cout << "  Hardware:    I2C and RF output disabled\n";
+        }
+        std::cout << std::flush;
     }
 }
 
@@ -404,6 +418,11 @@ int main(int argc, char **argv)
     {
         const HarnessOptions options = parse_options(argc, argv);
         print_summary(options);
+        if (options.dry_run)
+        {
+            std::cout << "[si5351][info] Harness dry-run mode enabled; "
+                      << "hardware access will be skipped." << std::endl;
+        }
 
         HarnessBridge bridge;
         WsprSi5351Backend backend(
@@ -423,6 +442,7 @@ int main(int argc, char **argv)
             std::cout << "  Error: " << configure_result.error << "\n";
         if (!configure_result.ok)
             return 2;
+        std::cout << std::flush;
 
         const wsprrypi::ExecutionResult execute_result =
             backend.execute(plan);
