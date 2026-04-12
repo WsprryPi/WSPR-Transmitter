@@ -1,0 +1,803 @@
+#include "wspr_transmit_backend_si5351.hpp"
+
+#include "wspr_transmit.hpp"
+
+#include <cmath>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <string>
+#include <system_error>
+#include <vector>
+
+#include <cerrno>
+
+#include <time.h>
+
+namespace
+{
+    static constexpr double kFrequencyMatchToleranceHz = 0.000001;
+
+    static bool is_frequency_event(const wsprrypi::RfEvent& event)
+    {
+        return event.frequency_hz > 0.0 &&
+            (event.rf_on ||
+             event.type == wsprrypi::RfEventType::SET_FREQUENCY);
+    }
+
+    static std::size_t invalid_tone_index() noexcept
+    {
+        return std::numeric_limits<std::size_t>::max();
+    }
+
+    static void log_si5351(
+        IControllerBridge& owner,
+        WsprTransmitLogLevel level,
+        const std::string& message)
+    {
+        owner.backendFireTransmitCallback(
+            WsprTransmissionCallbackEvent::LOGGING,
+            level,
+            message,
+            0.0);
+    }
+
+    static const char *mode_name(wsprrypi::TransmissionMode mode) noexcept
+    {
+        switch (mode)
+        {
+            case wsprrypi::TransmissionMode::WSPR:
+                return "WSPR";
+            case wsprrypi::TransmissionMode::QRSS:
+                return "QRSS";
+            case wsprrypi::TransmissionMode::FSKCW:
+                return "FSKCW";
+            case wsprrypi::TransmissionMode::DFCW:
+                return "DFCW";
+            case wsprrypi::TransmissionMode::CW:
+                return "CW";
+            case wsprrypi::TransmissionMode::TONE:
+                return "TONE";
+        }
+
+        return "UNKNOWN";
+    }
+
+    static std::string format_frequency(double frequency_hz)
+    {
+        std::ostringstream stream;
+        stream << std::fixed << std::setprecision(3)
+               << frequency_hz << " Hz";
+        return stream.str();
+    }
+
+    static const char *drive_strength_name(
+        Si5351Device::DriveStrength strength) noexcept
+    {
+        switch (strength)
+        {
+            case Si5351Device::DriveStrength::MA_2:
+                return "2 mA";
+            case Si5351Device::DriveStrength::MA_4:
+                return "4 mA";
+            case Si5351Device::DriveStrength::MA_6:
+                return "6 mA";
+            case Si5351Device::DriveStrength::MA_8:
+                return "8 mA";
+        }
+
+        return "unknown";
+    }
+
+    static std::string device_error_or(
+        const Si5351Device& device,
+        const std::string& fallback)
+    {
+        return device.getLastError().empty() ?
+            fallback :
+            device.getLastError();
+    }
+
+    static timespec add_ns(timespec time, std::int64_t ns)
+    {
+        const std::int64_t sec = ns / 1000000000LL;
+        const std::int64_t rem = ns % 1000000000LL;
+        time.tv_sec += sec;
+        time.tv_nsec += rem;
+
+        if (time.tv_nsec >= 1000000000L)
+        {
+            time.tv_sec += 1;
+            time.tv_nsec -= 1000000000L;
+        }
+        else if (time.tv_nsec < 0)
+        {
+            time.tv_sec -= 1;
+            time.tv_nsec += 1000000000L;
+        }
+
+        return time;
+    }
+
+    static bool same_event(
+        const wsprrypi::RfEvent& lhs,
+        const wsprrypi::RfEvent& rhs) noexcept
+    {
+        return lhs.offset_from_start == rhs.offset_from_start &&
+            lhs.duration == rhs.duration &&
+            lhs.type == rhs.type &&
+            lhs.rf_on == rhs.rf_on &&
+            std::fabs(lhs.frequency_hz - rhs.frequency_hz) <=
+                kFrequencyMatchToleranceHz;
+    }
+}
+
+/**
+ * @brief Construct the backend
+ *
+ * @param owner Controller bridge used for callbacks and stop requests.
+ * @param config Backend configuration
+ */
+WsprSi5351Backend::WsprSi5351Backend(
+    IControllerBridge& owner,
+    const Config& config)
+    : owner_(owner),
+      config_(config),
+      device_(config.device),
+      planner_(config.planner),
+      current_plan_(),
+      unique_tone_frequencies_(),
+      event_tone_indexes_(),
+      si5351_plan_(),
+      configured_(false),
+      stop_requested_(false),
+      active_power_level_(config.power_level),
+      active_drive_strength_(Si5351Device::DriveStrength::MA_2),
+      current_tone_index_(invalid_tone_index())
+{
+}
+
+/**
+ * @brief Destroy the backend
+ */
+WsprSi5351Backend::~WsprSi5351Backend()
+{
+    cleanup();
+}
+
+wsprrypi::BackendInfo WsprSi5351Backend::info() const
+{
+    return wsprrypi::BackendInfo{
+        wsprrypi::BackendKind::SI5351,
+        "si5351",
+        "Si5351A I2C clock-generator backend"};
+}
+
+wsprrypi::BackendCapabilities WsprSi5351Backend::capabilities() const
+{
+    wsprrypi::BackendCapabilities caps;
+    caps.supports_frequency_switching = true;
+    caps.supports_rf_gating = true;
+    caps.supports_precomputed_execution = true;
+    caps.min_frequency_hz = 0.0;
+    caps.max_frequency_hz = 0.0;
+    caps.nominal_frequency_resolution_hz = 0.0;
+    return caps;
+}
+
+wsprrypi::BackendCompileResult WsprSi5351Backend::configure(
+    const wsprrypi::ExecutionPlan& plan,
+    const wsprrypi::BackendExecutionInputs& inputs)
+{
+    resetState();
+    current_plan_ = plan;
+
+    {
+        std::ostringstream stream;
+        stream << "Si5351 configure: mode=" << mode_name(plan.mode)
+               << ", events=" << plan.events.size() << ".";
+        log_si5351(owner_, WsprTransmitLogLevel::DEBUG, stream.str());
+    }
+
+    wsprrypi::BackendCompileResult result;
+    result.ok = false;
+
+    const int requested_power_level =
+        (inputs.power_level == 0) ? config_.power_level : inputs.power_level;
+    if (!mapPowerLevelToDriveStrength(
+            requested_power_level,
+            active_drive_strength_))
+    {
+        result.error = "Si5351 power level must be in the range 1..4.";
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+        return result;
+    }
+    active_power_level_ = requested_power_level;
+
+    if (plan.backend != wsprrypi::BackendKind::SI5351)
+    {
+        result.error = "Execution plan is not targeted for the Si5351 "
+                       "backend.";
+        return result;
+    }
+
+    Si5351Planner::Mode planner_mode = Si5351Planner::Mode::TONE;
+    if (!mapPlannerMode(plan.mode, planner_mode))
+    {
+        result.error = "Execution plan mode is not supported by the "
+                       "Si5351 backend.";
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+        return result;
+    }
+
+    std::string error;
+    if (!extractToneFrequencies(
+            plan,
+            unique_tone_frequencies_,
+            event_tone_indexes_,
+            error))
+    {
+        result.error = error;
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+        return result;
+    }
+
+    for (std::size_t i = 0; i < unique_tone_frequencies_.size(); ++i)
+    {
+        std::ostringstream stream;
+        stream << "Si5351 configure tone " << i << ": requested "
+               << format_frequency(unique_tone_frequencies_[i]) << ".";
+        log_si5351(owner_, WsprTransmitLogLevel::DEBUG, stream.str());
+    }
+
+    const std::size_t expected_tones = expectedToneCount(planner_mode);
+    if (unique_tone_frequencies_.size() != expected_tones)
+    {
+        std::ostringstream stream;
+        stream << "Execution plan contains "
+               << unique_tone_frequencies_.size()
+               << " unique Si5351 tone frequencies, expected "
+               << expected_tones << ".";
+        result.error = stream.str();
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+        return result;
+    }
+
+    std::vector<Si5351Planner::ToneEntry> tones;
+    tones.reserve(unique_tone_frequencies_.size());
+    for (const double frequency_hz : unique_tone_frequencies_)
+    {
+        tones.push_back(Si5351Planner::ToneEntry{frequency_hz});
+    }
+
+    si5351_plan_ = planner_.buildPlan(planner_mode, tones);
+    if (!validatePlannerOutput(si5351_plan_, expected_tones, error))
+    {
+        result.error = error;
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+        return result;
+    }
+
+    for (std::size_t i = 0; i < si5351_plan_.tone_sets.size(); ++i)
+    {
+        const Si5351Planner::ToneRegisterSet& tone =
+            si5351_plan_.tone_sets[i];
+        std::ostringstream stream;
+        stream << "Si5351 planner tone " << i << ": requested "
+               << format_frequency(tone.requested_hz)
+               << ", actual " << format_frequency(tone.actual_hz) << ".";
+        log_si5351(owner_, WsprTransmitLogLevel::DEBUG, stream.str());
+    }
+
+    log_si5351(
+        owner_,
+        WsprTransmitLogLevel::DEBUG,
+        "Si5351 configure complete.");
+    {
+        std::ostringstream stream;
+        stream << "Si5351 power level " << active_power_level_
+               << " selected (" << drive_strength_name(active_drive_strength_)
+               << " drive strength).";
+        log_si5351(owner_, WsprTransmitLogLevel::DEBUG, stream.str());
+    }
+
+    configured_ = true;
+    result.ok = true;
+    return result;
+}
+
+wsprrypi::ExecutionResult WsprSi5351Backend::execute(
+    const wsprrypi::ExecutionPlan& plan)
+{
+    wsprrypi::ExecutionResult result;
+    if (!configured_)
+    {
+        result.error = "Si5351 backend is not configured.";
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+        return result;
+    }
+
+    if (!planMatchesConfigured(plan))
+    {
+        result.error = "Execution plan does not match the configured "
+                       "Si5351 plan.";
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+        return result;
+    }
+
+    auto idle_device = [this]() {
+        (void)disableTransmitOutput();
+        (void)applyIdleProgramming();
+        device_.close();
+        log_si5351(
+            owner_,
+            WsprTransmitLogLevel::DEBUG,
+            "Si5351 idle cleanup complete.");
+    };
+
+    try
+    {
+        log_si5351(
+            owner_,
+            WsprTransmitLogLevel::DEBUG,
+            "Si5351 execution starting.");
+
+        if (!device_.open())
+        {
+            result.error = device_error_or(
+                device_,
+                "Could not open Si5351 device.");
+            log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+            return result;
+        }
+        log_si5351(
+            owner_,
+            WsprTransmitLogLevel::DEBUG,
+            "Si5351 device opened.");
+
+        if (!device_.initialize())
+        {
+            result.error = device_error_or(
+                device_,
+                "Could not initialize Si5351 device.");
+            log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+            idle_device();
+            return result;
+        }
+        log_si5351(
+            owner_,
+            WsprTransmitLogLevel::DEBUG,
+            "Si5351 device initialized.");
+
+        if (!applyStartupProgramming())
+        {
+            result.error = device_error_or(
+                device_,
+                "Could not apply Si5351 startup programming.");
+            log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+            idle_device();
+            return result;
+        }
+        log_si5351(
+            owner_,
+            WsprTransmitLogLevel::DEBUG,
+            "Si5351 startup programming applied.");
+
+        if (!device_.setDriveStrength(
+                config_.planner.tx_output,
+                active_drive_strength_))
+        {
+            result.error = device_error_or(
+                device_,
+                "Could not set Si5351 drive strength.");
+            log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+            idle_device();
+            return result;
+        }
+        log_si5351(
+            owner_,
+            WsprTransmitLogLevel::DEBUG,
+            "Si5351 drive strength applied.");
+
+        struct timespec start_time{};
+        if (::clock_gettime(CLOCK_MONOTONIC, &start_time) != 0)
+        {
+            result.error = "Could not read monotonic clock for Si5351 "
+                           "execution.";
+            log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+            idle_device();
+            return result;
+        }
+
+        bool rf_enabled = false;
+        for (std::size_t i = 0; i < plan.events.size(); ++i)
+        {
+            if (stop_requested_ || owner_.backendShouldStop())
+                break;
+
+            const wsprrypi::RfEvent& event = plan.events[i];
+            if (i > 0)
+            {
+                const timespec target = add_ns(
+                    start_time,
+                    event.offset_from_start.count());
+
+                while (!stop_requested_ && !owner_.backendShouldStop())
+                {
+                    const int rc = ::clock_nanosleep(
+                        CLOCK_MONOTONIC,
+                        TIMER_ABSTIME,
+                        &target,
+                        nullptr);
+                    if (rc == 0)
+                        break;
+                    if (rc != EINTR)
+                    {
+                        throw std::system_error(
+                            rc,
+                            std::generic_category(),
+                            "clock_nanosleep");
+                    }
+                }
+            }
+
+            if (i < event_tone_indexes_.size() &&
+                event_tone_indexes_[i] != invalid_tone_index() &&
+                event_tone_indexes_[i] != current_tone_index_)
+            {
+                if (!applyTone(event_tone_indexes_[i]))
+                {
+                    result.error = device_error_or(
+                        device_,
+                        "Could not apply Si5351 tone programming.");
+                    log_si5351(
+                        owner_,
+                        WsprTransmitLogLevel::ERROR,
+                        result.error);
+                    idle_device();
+                    return result;
+                }
+            }
+
+            if (event.rf_on && !rf_enabled)
+            {
+                if (!enableTransmitOutput())
+                {
+                    result.error = device_error_or(
+                        device_,
+                        "Could not enable Si5351 transmit output.");
+                    log_si5351(
+                        owner_,
+                        WsprTransmitLogLevel::ERROR,
+                        result.error);
+                    idle_device();
+                    return result;
+                }
+                rf_enabled = true;
+                log_si5351(
+                    owner_,
+                    WsprTransmitLogLevel::DEBUG,
+                    "Si5351 TX output enabled.");
+            }
+            else if (!event.rf_on && rf_enabled)
+            {
+                if (!disableTransmitOutput())
+                {
+                    result.error = device_error_or(
+                        device_,
+                        "Could not disable Si5351 transmit output.");
+                    log_si5351(
+                        owner_,
+                        WsprTransmitLogLevel::ERROR,
+                        result.error);
+                    idle_device();
+                    return result;
+                }
+                rf_enabled = false;
+                log_si5351(
+                    owner_,
+                    WsprTransmitLogLevel::DEBUG,
+                    "Si5351 TX output disabled.");
+            }
+        }
+
+        if (stop_requested_ || owner_.backendShouldStop())
+        {
+            log_si5351(
+                owner_,
+                WsprTransmitLogLevel::DEBUG,
+                "Si5351 execution stopped early.");
+        }
+
+        idle_device();
+        result.ok = true;
+        result.stopped = stop_requested_ || owner_.backendShouldStop();
+        return result;
+    }
+    catch (const std::exception& e)
+    {
+        idle_device();
+        result.faulted = true;
+        result.error = e.what();
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+        return result;
+    }
+}
+
+void WsprSi5351Backend::stop() noexcept
+{
+    stop_requested_ = true;
+    log_si5351(
+        owner_,
+        WsprTransmitLogLevel::DEBUG,
+        "Si5351 stop requested.");
+    owner_.backendRequestStopTxNoJoin();
+}
+
+void WsprSi5351Backend::cleanup() noexcept
+{
+    (void)disableTransmitOutput();
+    device_.close();
+    if (configured_)
+    {
+        log_si5351(
+            owner_,
+            WsprTransmitLogLevel::DEBUG,
+            "Si5351 cleanup requested.");
+    }
+    resetState();
+}
+
+const WsprSi5351Backend::Config&
+WsprSi5351Backend::getConfig() const noexcept
+{
+    return config_;
+}
+
+bool WsprSi5351Backend::mapPlannerMode(
+    wsprrypi::TransmissionMode mode,
+    Si5351Planner::Mode& planner_mode) const
+{
+    switch (mode)
+    {
+        case wsprrypi::TransmissionMode::TONE:
+            planner_mode = Si5351Planner::Mode::TONE;
+            return true;
+        case wsprrypi::TransmissionMode::QRSS:
+            planner_mode = Si5351Planner::Mode::QRSS;
+            return true;
+        case wsprrypi::TransmissionMode::FSKCW:
+            planner_mode = Si5351Planner::Mode::FSKCW;
+            return true;
+        case wsprrypi::TransmissionMode::DFCW:
+            planner_mode = Si5351Planner::Mode::DFCW;
+            return true;
+        case wsprrypi::TransmissionMode::WSPR:
+            planner_mode = Si5351Planner::Mode::WSPR;
+            return true;
+        case wsprrypi::TransmissionMode::CW:
+            return false;
+    }
+
+    return false;
+}
+
+bool WsprSi5351Backend::extractToneFrequencies(
+    const wsprrypi::ExecutionPlan& plan,
+    std::vector<double>& frequencies,
+    std::vector<std::size_t>& event_tone_indexes,
+    std::string& error) const
+{
+    frequencies.clear();
+    event_tone_indexes.assign(plan.events.size(), invalid_tone_index());
+
+    for (std::size_t i = 0; i < plan.events.size(); ++i)
+    {
+        const wsprrypi::RfEvent& event = plan.events[i];
+        if (!is_frequency_event(event))
+            continue;
+
+        if (!std::isfinite(event.frequency_hz))
+        {
+            std::ostringstream stream;
+            stream << "Execution plan event " << i
+                   << " has an invalid Si5351 frequency.";
+            error = stream.str();
+            return false;
+        }
+
+        std::size_t tone_index = invalid_tone_index();
+        for (std::size_t j = 0; j < frequencies.size(); ++j)
+        {
+            const double delta_hz =
+                std::fabs(frequencies[j] - event.frequency_hz);
+            if (delta_hz <= kFrequencyMatchToleranceHz)
+            {
+                tone_index = j;
+                break;
+            }
+        }
+
+        if (tone_index == invalid_tone_index())
+        {
+            tone_index = frequencies.size();
+            frequencies.push_back(event.frequency_hz);
+        }
+
+        event_tone_indexes[i] = tone_index;
+    }
+
+    if (frequencies.empty())
+    {
+        error = "Execution plan contains no usable Si5351 tone "
+                "frequencies.";
+        return false;
+    }
+
+    return true;
+}
+
+bool WsprSi5351Backend::validatePlannerOutput(
+    const Si5351Planner::Plan& plan,
+    std::size_t expected_tones,
+    std::string& error) const
+{
+    if (plan.startup_writes.empty())
+    {
+        error = "Si5351 planner produced no startup register writes.";
+        return false;
+    }
+
+    if (plan.tone_sets.size() != expected_tones)
+    {
+        std::ostringstream stream;
+        stream << "Si5351 planner produced " << plan.tone_sets.size()
+               << " tone register sets, expected " << expected_tones
+               << ".";
+        error = stream.str();
+        return false;
+    }
+
+    for (std::size_t i = 0; i < plan.tone_sets.size(); ++i)
+    {
+        const Si5351Planner::ToneRegisterSet& tone = plan.tone_sets[i];
+        if (tone.requested_hz <= 0.0 || tone.actual_hz <= 0.0)
+        {
+            std::ostringstream stream;
+            stream << "Si5351 planner produced unusable frequency data "
+                   << "for tone " << i << ".";
+            error = stream.str();
+            return false;
+        }
+
+        if (tone.writes.empty())
+        {
+            std::ostringstream stream;
+            stream << "Si5351 planner produced no register writes for "
+                   << "tone " << i << ".";
+            error = stream.str();
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool WsprSi5351Backend::planMatchesConfigured(
+    const wsprrypi::ExecutionPlan& plan) const noexcept
+{
+    if (plan.id.value != current_plan_.id.value ||
+        plan.request_id.value != current_plan_.request_id.value ||
+        plan.mode != current_plan_.mode ||
+        plan.backend != current_plan_.backend ||
+        plan.events.size() != current_plan_.events.size())
+    {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < plan.events.size(); ++i)
+    {
+        if (!same_event(plan.events[i], current_plan_.events[i]))
+            return false;
+    }
+
+    return true;
+}
+
+bool WsprSi5351Backend::mapPowerLevelToDriveStrength(
+    int power_level,
+    Si5351Device::DriveStrength& drive_strength) const noexcept
+{
+    switch (power_level)
+    {
+        case 1:
+            drive_strength = Si5351Device::DriveStrength::MA_2;
+            return true;
+        case 2:
+            drive_strength = Si5351Device::DriveStrength::MA_4;
+            return true;
+        case 3:
+            drive_strength = Si5351Device::DriveStrength::MA_6;
+            return true;
+        case 4:
+            drive_strength = Si5351Device::DriveStrength::MA_8;
+            return true;
+    }
+
+    return false;
+}
+
+std::size_t WsprSi5351Backend::expectedToneCount(
+    Si5351Planner::Mode mode) const noexcept
+{
+    switch (mode)
+    {
+        case Si5351Planner::Mode::TONE:
+        case Si5351Planner::Mode::QRSS:
+            return 1;
+        case Si5351Planner::Mode::FSKCW:
+        case Si5351Planner::Mode::DFCW:
+            return 2;
+        case Si5351Planner::Mode::WSPR:
+            return 4;
+    }
+
+    return 0;
+}
+
+void WsprSi5351Backend::resetState()
+{
+    current_plan_ = wsprrypi::ExecutionPlan{};
+    unique_tone_frequencies_.clear();
+    event_tone_indexes_.clear();
+    si5351_plan_ = Si5351Planner::Plan{};
+    configured_ = false;
+    stop_requested_ = false;
+    active_power_level_ = config_.power_level;
+    active_drive_strength_ = Si5351Device::DriveStrength::MA_2;
+    current_tone_index_ = invalid_tone_index();
+}
+
+bool WsprSi5351Backend::applyStartupProgramming()
+{
+    return device_.writeRegisters(si5351_plan_.startup_writes);
+}
+
+bool WsprSi5351Backend::applyIdleProgramming()
+{
+    return device_.writeRegisters(si5351_plan_.idle_writes);
+}
+
+bool WsprSi5351Backend::applyTone(std::size_t tone_index)
+{
+    if (tone_index >= si5351_plan_.tone_sets.size())
+        return false;
+
+    const Si5351Planner::ToneRegisterSet& tone =
+        si5351_plan_.tone_sets[tone_index];
+    if (tone.writes.empty())
+        return false;
+
+    if (!device_.writeRegisters(tone.writes))
+        return false;
+
+    current_tone_index_ = tone_index;
+    {
+        std::ostringstream stream;
+        stream << "Si5351 tone " << tone_index << ": requested "
+               << format_frequency(tone.requested_hz)
+               << ", actual " << format_frequency(tone.actual_hz) << ".";
+        log_si5351(owner_, WsprTransmitLogLevel::DEBUG, stream.str());
+    }
+    return true;
+}
+
+bool WsprSi5351Backend::enableTransmitOutput()
+{
+    return device_.enableOutput(config_.planner.tx_output);
+}
+
+bool WsprSi5351Backend::disableTransmitOutput()
+{
+    return device_.disableOutput(config_.planner.tx_output);
+}
