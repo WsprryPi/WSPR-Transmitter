@@ -99,7 +99,6 @@ enum class TransmissionMode
     TONE  ///< Direct RF tone execution for one committed runtime request.
 };
 
-inline constexpr int kWsprTransmitControlGpioUnset = -1;
 inline constexpr int kWsprRandomOffsetHz = 80;
 
 /**
@@ -159,7 +158,7 @@ struct TransmissionRequest
      * @brief BCM GPIO used for RF output.
      *
      * This is the transmit-output GPIO consumed by the backend, not the
-     * scheduler-owned per-frequency selector GPIO.
+     * scheduler-owned band-selector GPIO.
      */
     int tx_gpio = 4;
 
@@ -177,19 +176,6 @@ struct TransmissionRequest
      * Zero means no random offset was committed for this request.
      */
     double applied_offset_hz = 0.0;
-
-    /**
-     * @brief Optional per-frequency control GPIO prepared by the scheduler.
-     *
-     * This represents transient runtime selector state tied to the currently
-     * selected frequency entry, not persistent transmit GPIO configuration.
-     */
-    int frequency_control_gpio = kWsprTransmitControlGpioUnset;
-
-    /**
-     * @brief Polarity for the per-frequency control GPIO.
-     */
-    bool frequency_control_active_high = false;
 
     /**
      * @brief Original user-facing frequency token for logs and diagnostics.

@@ -94,7 +94,7 @@ public:
  *   - WSPR planning policy such as Auto versus RequirePaired.
  *   - Tone versus WSPR mode selection.
  *   - Random WSPR offset selection.
- *   - Per-frequency selector GPIO choice and preparation.
+ *   - Band-selector GPIO choice and preparation.
  *
  *   Responsibilities intentionally left to the backend include:
  *   - Hardware setup and teardown
