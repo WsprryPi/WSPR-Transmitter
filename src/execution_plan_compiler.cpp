@@ -1,5 +1,6 @@
 #include "execution_plan_compiler.hpp"
 
+#include <chrono>
 #include <cctype>
 #include <stdexcept>
 #include <string_view>
@@ -12,6 +13,7 @@ namespace
 
 constexpr double kWsprSymbolPeriodSeconds = 8192.0 / 12000.0;
 constexpr double kWsprToneSpacingHz = 1.0 / kWsprSymbolPeriodSeconds;
+constexpr auto kDefaultToneDuration = std::chrono::hours(24);
 
 std::string_view morse_code_for(char ch)
 {
@@ -541,10 +543,44 @@ ExecutionPlan ExecutionPlanCompiler::compile_cw(
 }
 
 ExecutionPlan ExecutionPlanCompiler::compile_tone(
-    const TransmissionRequest&,
-    const TonePayload&) const
+    const TransmissionRequest& request,
+    const TonePayload& payload) const
 {
-    throw std::runtime_error("Tone execution-plan compilation is not implemented.");
+    if (payload.frequency_hz <= 0.0)
+        throw std::runtime_error("Tone payload frequency is invalid.");
+
+    const std::chrono::nanoseconds duration =
+        payload.duration.value_or(kDefaultToneDuration);
+    validate_positive_duration(duration, "tone duration");
+
+    ExecutionPlan plan;
+    plan.request_id = request.id;
+    plan.mode = request.mode;
+    plan.backend = request.output.backend;
+    plan.reference_frequency_hz = payload.frequency_hz;
+    plan.calibration = request.calibration;
+    plan.policy = request.policy;
+
+    std::chrono::nanoseconds offset{0};
+    append_event(
+        plan,
+        offset,
+        RfEventType::RF_ON,
+        true,
+        payload.frequency_hz,
+        duration,
+        payload.envelope);
+    append_event(
+        plan,
+        offset,
+        RfEventType::RF_OFF,
+        false,
+        payload.frequency_hz,
+        std::chrono::nanoseconds{1},
+        payload.envelope);
+
+    plan.summary = build_summary(plan.events);
+    return plan;
 }
 
 } // namespace wsprrypi

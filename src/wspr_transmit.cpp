@@ -494,12 +494,6 @@ void WsprTransmitter::configureExecution(
     const wsprrypi::TransmissionRequest& request,
     const TransmissionRequest& legacy_request)
 {
-    if (request.mode == wsprrypi::TransmissionMode::TONE)
-    {
-        throw std::invalid_argument(
-            "Canonical transmitter request currently does not use TONE mode.");
-    }
-
     if (request.mode == wsprrypi::TransmissionMode::WSPR &&
         legacy_request.isTone())
     {
@@ -1324,6 +1318,41 @@ void WsprTransmitter::transmit()
 
     if (activeExecutionIsTone())
     {
+        if (selected_backend_ == wsprrypi::BackendKind::SI5351)
+        {
+            fire_transmit_cb(TransmissionCallbackEvent::STARTING,
+                             LogLevel::INFO,
+                             "",
+                             current_request_.actual_rf_frequency_hz);
+
+            const auto t0_chrono = std::chrono::steady_clock::now();
+            const auto execute_result =
+                transmission_controller_->execute_prepared();
+            const bool canceled =
+                execute_result.stopped || shouldStop();
+            if (!execute_result.ok)
+            {
+                throw std::runtime_error(
+                    execute_result.error.empty()
+                        ? "Execution-plan backend fault."
+                        : execute_result.error);
+            }
+
+            const auto t_end_chrono = std::chrono::steady_clock::now();
+            state_.store(canceled ? State::CANCELLED : State::COMPLETE,
+                         std::memory_order_release);
+
+            const double actual =
+                std::chrono::duration<double>(t_end_chrono - t0_chrono).count();
+            fire_transmit_cb(canceled
+                                 ? TransmissionCallbackEvent::CANCELLED
+                                 : TransmissionCallbackEvent::COMPLETE,
+                             LogLevel::INFO,
+                             "",
+                             actual);
+            return;
+        }
+
         // Fire callback as close to the first symbol as possible.
         fire_transmit_cb(TransmissionCallbackEvent::STARTING,
                          LogLevel::INFO,
