@@ -79,7 +79,7 @@ namespace
     {
         std::cerr
             << "Usage: " << program << " [options]\n"
-            << "  --mode tone|fskcw|dfcw|wspr\n"
+            << "  --mode tone|qrss|fskcw|dfcw|wspr\n"
             << "  --freq <hz>\n"
             << "  --freq-a <hz>\n"
             << "  --freq-b <hz>\n"
@@ -292,6 +292,8 @@ namespace
     {
         if (mode == "tone")
             return wsprrypi::TransmissionMode::TONE;
+        if (mode == "qrss")
+            return wsprrypi::TransmissionMode::QRSS;
         if (mode == "fskcw")
             return wsprrypi::TransmissionMode::FSKCW;
         if (mode == "dfcw")
@@ -305,7 +307,7 @@ namespace
     static std::vector<double> mode_frequencies(
         const HarnessOptions& options)
     {
-        if (options.mode == "tone")
+        if (options.mode == "tone" || options.mode == "qrss")
             return {options.freq_a_hz};
         if (options.mode == "fskcw" || options.mode == "dfcw")
             return {options.freq_a_hz, options.freq_b_hz};
