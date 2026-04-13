@@ -258,6 +258,19 @@ Si5351Planner::buildIdleWrites() const
         clock_control_register(tx_index),
         powered_down_control});
 
+    if (config_.park_unused_outputs)
+    {
+        for (std::uint8_t index = 0; index < 3; ++index)
+        {
+            if (index == tx_index)
+                continue;
+
+            writes.push_back(Si5351Device::RegisterWrite{
+                clock_control_register(index),
+                powered_down_control});
+        }
+    }
+
     return writes;
 }
 
