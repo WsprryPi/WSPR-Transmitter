@@ -119,6 +119,7 @@ public:
         int reference_hz = 27000000;
         int tx_output = 0;
         int power_level = 1;
+        bool app_managed = false;
 
         bool operator==(const Si5351RuntimeConfig &) const = default;
     };

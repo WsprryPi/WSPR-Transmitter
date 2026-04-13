@@ -391,6 +391,10 @@ void WsprTransmitter::selectBackend(
                 static_cast<std::uint32_t>(runtime_config.reference_hz);
             si5351_config.planner.tx_output =
                 si5351_output_from_index(runtime_config.tx_output);
+            if (runtime_config.app_managed)
+            {
+                si5351_config.planner.park_unused_outputs = true;
+            }
             si5351_config.power_level = runtime_config.power_level;
             si5351_config.dry_run = false;
             backend_ = std::make_unique<WsprSi5351Backend>(
