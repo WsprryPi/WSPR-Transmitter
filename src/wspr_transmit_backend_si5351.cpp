@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <cerrno>
+#include <chrono>
 
 #include <time.h>
 
@@ -117,6 +118,14 @@ namespace
         }
 
         return time;
+    }
+
+    static std::int64_t diff_ns(
+        const timespec& lhs,
+        const timespec& rhs) noexcept
+    {
+        return (lhs.tv_sec - rhs.tv_sec) * 1000000000LL +
+            (lhs.tv_nsec - rhs.tv_nsec);
     }
 
     static bool same_event(
@@ -434,6 +443,7 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
         }
 
         bool rf_enabled = false;
+        bool execution_interrupted = false;
         for (std::size_t i = 0; i < plan.events.size(); ++i)
         {
             if (stop_requested_ || owner_.backendShouldStop())
@@ -448,21 +458,31 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
 
                 while (!stop_requested_ && !owner_.backendShouldStop())
                 {
-                    const int rc = ::clock_nanosleep(
-                        CLOCK_MONOTONIC,
-                        TIMER_ABSTIME,
-                        &target,
-                        nullptr);
-                    if (rc == 0)
-                        break;
-                    if (rc != EINTR)
+                    timespec now{};
+                    if (::clock_gettime(CLOCK_MONOTONIC, &now) != 0)
                     {
                         throw std::system_error(
-                            rc,
+                            errno,
                             std::generic_category(),
-                            "clock_nanosleep");
+                            "clock_gettime");
+                    }
+
+                    const std::int64_t remaining_ns = diff_ns(target, now);
+                    if (remaining_ns <= 0)
+                        break;
+
+                    if (!owner_.backendWaitInterruptableFor(
+                            std::chrono::nanoseconds{remaining_ns}))
+                    {
+                        execution_interrupted = true;
+                        break;
                     }
                 }
+
+                if (execution_interrupted ||
+                    stop_requested_ ||
+                    owner_.backendShouldStop())
+                    break;
             }
 
             if (i < event_tone_indexes_.size() &&
@@ -545,7 +565,9 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
             }
         }
 
-        if (stop_requested_ || owner_.backendShouldStop())
+        if (execution_interrupted ||
+            stop_requested_ ||
+            owner_.backendShouldStop())
         {
             log_si5351(
                 owner_,
@@ -555,7 +577,9 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
 
         idle_device();
         result.ok = true;
-        result.stopped = stop_requested_ || owner_.backendShouldStop();
+        result.stopped = execution_interrupted ||
+            stop_requested_ ||
+            owner_.backendShouldStop();
         return result;
     }
     catch (const std::exception& e)

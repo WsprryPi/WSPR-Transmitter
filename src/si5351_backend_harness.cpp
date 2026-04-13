@@ -247,7 +247,7 @@ namespace
             std::chrono::nanoseconds duration) override
         {
             std::unique_lock<std::mutex> lock(stop_mutex_);
-            return stop_cv_.wait_for(
+            const bool interrupted = stop_cv_.wait_for(
                 lock,
                 duration,
                 [this]
@@ -255,6 +255,7 @@ namespace
                     return stop_requested_.load(
                         std::memory_order_acquire);
                 });
+            return !interrupted;
         }
 
         void backendThrowIfStopRequested(const char *context) override
