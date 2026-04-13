@@ -112,6 +112,17 @@ public:
 class WsprTransmitter : public IControllerBridge
 {
 public:
+    struct Si5351RuntimeConfig
+    {
+        int i2c_bus = 1;
+        int i2c_address = 0x60;
+        int reference_hz = 27000000;
+        int tx_output = 0;
+        int power_level = 1;
+
+        bool operator==(const Si5351RuntimeConfig &) const = default;
+    };
+
     /**
      * @enum State
      * @brief High-level transmission state for the transmitter.
@@ -258,6 +269,9 @@ public:
                             const TransmissionRequest& legacy_request);
 
     void selectBackend(wsprrypi::BackendKind backend_kind);
+    void selectBackend(
+        wsprrypi::BackendKind backend_kind,
+        const Si5351RuntimeConfig &si5351_config);
 
     /**
      * @brief Configure POSIX scheduling policy and priority for future
@@ -972,6 +986,7 @@ private:
     std::unique_ptr<wsprrypi::ITransmissionBackend> backend_;
     WsprRpiBackend *rpi_backend_{nullptr};
     wsprrypi::BackendKind selected_backend_{wsprrypi::BackendKind::RPI_CLOCK_GPIO};
+    Si5351RuntimeConfig selected_si5351_config_{};
     std::unique_ptr<wsprrypi::TransmissionController> transmission_controller_;
 };
 

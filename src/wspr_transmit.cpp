@@ -76,6 +76,20 @@ namespace
         return cpu;
     }
 
+    static Si5351Device::Output si5351_output_from_index(int output) noexcept
+    {
+        switch (output)
+        {
+            case 1:
+                return Si5351Device::Output::CLK1;
+            case 2:
+                return Si5351Device::Output::CLK2;
+            case 0:
+            default:
+                return Si5351Device::Output::CLK0;
+        }
+    }
+
     static inline int64_t diff_ns(const timespec &a, const timespec &b)
     {
         return (a.tv_sec - b.tv_sec) * 1'000'000'000LL + (a.tv_nsec - b.tv_nsec);
@@ -334,7 +348,17 @@ WsprTransmitter::~WsprTransmitter()
 
 void WsprTransmitter::selectBackend(wsprrypi::BackendKind backend_kind)
 {
-    if (backend_ && selected_backend_ == backend_kind)
+    selectBackend(backend_kind, Si5351RuntimeConfig{});
+}
+
+void WsprTransmitter::selectBackend(
+    wsprrypi::BackendKind backend_kind,
+    const Si5351RuntimeConfig &runtime_config)
+{
+    if (backend_ &&
+        selected_backend_ == backend_kind &&
+        (backend_kind != wsprrypi::BackendKind::SI5351 ||
+         selected_si5351_config_ == runtime_config))
     {
         return;
     }
@@ -344,6 +368,7 @@ void WsprTransmitter::selectBackend(wsprrypi::BackendKind backend_kind)
 
     rpi_backend_ = nullptr;
     selected_backend_ = backend_kind;
+    selected_si5351_config_ = runtime_config;
 
     switch (backend_kind)
     {
@@ -357,6 +382,16 @@ void WsprTransmitter::selectBackend(wsprrypi::BackendKind backend_kind)
         case wsprrypi::BackendKind::SI5351:
         {
             WsprSi5351Backend::Config si5351_config;
+            si5351_config.device.i2c_bus = runtime_config.i2c_bus;
+            si5351_config.device.i2c_address =
+                static_cast<std::uint8_t>(runtime_config.i2c_address);
+            si5351_config.device.reference_hz =
+                static_cast<std::uint32_t>(runtime_config.reference_hz);
+            si5351_config.planner.reference_hz =
+                static_cast<std::uint32_t>(runtime_config.reference_hz);
+            si5351_config.planner.tx_output =
+                si5351_output_from_index(runtime_config.tx_output);
+            si5351_config.power_level = runtime_config.power_level;
             si5351_config.dry_run = false;
             backend_ = std::make_unique<WsprSi5351Backend>(
                 *this,
