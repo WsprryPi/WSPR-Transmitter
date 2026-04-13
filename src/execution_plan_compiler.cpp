@@ -561,23 +561,23 @@ ExecutionPlan ExecutionPlanCompiler::compile_tone(
     plan.calibration = request.calibration;
     plan.policy = request.policy;
 
-    std::chrono::nanoseconds offset{0};
-    append_event(
-        plan,
-        offset,
-        RfEventType::RF_ON,
-        true,
-        payload.frequency_hz,
-        duration,
-        payload.envelope);
-    append_event(
-        plan,
-        offset,
-        RfEventType::RF_OFF,
-        false,
-        payload.frequency_hz,
-        std::chrono::nanoseconds{1},
-        payload.envelope);
+    RfEvent on_event;
+    on_event.offset_from_start = std::chrono::nanoseconds::zero();
+    on_event.duration = duration;
+    on_event.type = RfEventType::RF_ON;
+    on_event.frequency_hz = payload.frequency_hz;
+    on_event.rf_on = true;
+    on_event.envelope = payload.envelope;
+    plan.events.push_back(on_event);
+
+    RfEvent off_event;
+    off_event.offset_from_start = duration;
+    off_event.duration = std::chrono::nanoseconds{1};
+    off_event.type = RfEventType::RF_OFF;
+    off_event.frequency_hz = payload.frequency_hz;
+    off_event.rf_on = false;
+    off_event.envelope = payload.envelope;
+    plan.events.push_back(off_event);
 
     plan.summary = build_summary(plan.events);
     return plan;
