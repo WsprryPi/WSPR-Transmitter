@@ -885,6 +885,15 @@ void WsprTransmitter::stopAndJoin()
     cleanupTransmissionBackend();
 }
 
+void WsprTransmitter::shutdownForProcessExit()
+{
+    shutdown();
+    cleanupTransmissionBackend();
+    backend_.reset();
+    rpi_backend_ = nullptr;
+    stop_callback_worker();
+}
+
 WsprTransmitState WsprTransmitter::getState() const noexcept
 {
     return state_.load(std::memory_order_acquire);

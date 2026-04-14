@@ -386,6 +386,16 @@ public:
     void stopAndJoin();
 
     /**
+     * @brief Fully tear down transmitter-owned background threads for exit.
+     *
+     * @details
+     *   Performs the normal stop/join path, releases backend ownership so
+     *   backend-managed helper threads are joined, and stops the callback
+     *   worker. Intended for final process shutdown only.
+     */
+    void shutdownForProcessExit();
+
+    /**
      * @brief Returns true if the DMA watchdog detected a stalled DMA engine.
      */
     bool watchdogFaulted() const noexcept;
