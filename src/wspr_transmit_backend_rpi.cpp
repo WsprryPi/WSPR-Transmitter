@@ -1922,15 +1922,17 @@ void WsprRpiBackend::transmit_symbol_with_envelope(
         return;
     }
 
-    constexpr auto kSlice =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::milliseconds(5));
+    const auto slice_limit =
+        event.envelope.fade_slice > std::chrono::nanoseconds::zero()
+            ? event.envelope.fade_slice
+            : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::milliseconds(5));
     std::chrono::nanoseconds elapsed{0};
 
     while (elapsed < event.duration && !owner_.backendShouldStop())
     {
         const auto remaining = event.duration - elapsed;
-        const auto slice = std::min(remaining, kSlice);
+        const auto slice = std::min(remaining, slice_limit);
         const auto midpoint = elapsed + slice / 2;
         const double level =
             envelope_level_at(event.envelope, event.duration, midpoint);

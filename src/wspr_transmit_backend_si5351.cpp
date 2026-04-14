@@ -140,6 +140,7 @@ namespace
             lhs.envelope.fade_shape == rhs.envelope.fade_shape &&
             lhs.envelope.fade_in == rhs.envelope.fade_in &&
             lhs.envelope.fade_out == rhs.envelope.fade_out &&
+            lhs.envelope.fade_slice == rhs.envelope.fade_slice &&
             std::fabs(lhs.frequency_hz - rhs.frequency_hz) <=
                 kFrequencyMatchToleranceHz;
     }
@@ -629,16 +630,18 @@ bool WsprSi5351Backend::runEnvelopeEvent(
         return enable_output();
     }
 
-    constexpr auto kSlice =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::milliseconds(5));
+    const auto slice_limit =
+        event.envelope.fade_slice > std::chrono::nanoseconds::zero()
+            ? event.envelope.fade_slice
+            : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::milliseconds(5));
     std::chrono::nanoseconds elapsed{0};
     while (elapsed < event.duration &&
            !stop_requested_ &&
            !owner_.backendShouldStop())
     {
         const auto remaining = event.duration - elapsed;
-        const auto slice = std::min(remaining, kSlice);
+        const auto slice = std::min(remaining, slice_limit);
         const auto midpoint = elapsed + slice / 2;
         const double level =
             envelope_level_at(event.envelope, event.duration, midpoint);

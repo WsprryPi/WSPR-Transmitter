@@ -43,6 +43,7 @@ struct EnvelopeSettings
     FadeShape fade_shape{FadeShape::NONE};
     std::chrono::nanoseconds fade_in{};
     std::chrono::nanoseconds fade_out{};
+    std::chrono::nanoseconds fade_slice{std::chrono::milliseconds(5)};
 };
 
 struct WsprPreparedMessage
