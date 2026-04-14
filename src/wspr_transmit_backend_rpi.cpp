@@ -75,46 +75,6 @@ namespace
         return cpu;
     }
 
-    static double envelope_level_at(
-        const wsprrypi::EnvelopeSettings& envelope,
-        std::chrono::nanoseconds event_duration,
-        std::chrono::nanoseconds offset) noexcept
-    {
-        if (envelope.fade_shape == wsprrypi::FadeShape::NONE)
-            return 1.0;
-
-        auto ramp_level = [&](std::chrono::nanoseconds elapsed,
-                              std::chrono::nanoseconds ramp_duration,
-                              bool rising) noexcept -> double
-        {
-            if (ramp_duration <= std::chrono::nanoseconds::zero())
-                return 1.0;
-
-            const double x = std::clamp(
-                static_cast<double>(elapsed.count()) /
-                    static_cast<double>(ramp_duration.count()),
-                0.0,
-                1.0);
-            const double shaped =
-                envelope.fade_shape == wsprrypi::FadeShape::RAISED_COSINE
-                    ? 0.5 - 0.5 * std::cos(3.14159265358979323846 * x)
-                    : x;
-            return rising ? shaped : 1.0 - shaped;
-        };
-
-        double level = 1.0;
-        if (offset < envelope.fade_in)
-            level = std::min(level, ramp_level(offset, envelope.fade_in, true));
-
-        const auto remaining = event_duration - offset;
-        if (remaining < envelope.fade_out)
-            level = std::min(
-                level,
-                ramp_level(remaining, envelope.fade_out, true));
-
-        return std::clamp(level, 0.0, 1.0);
-    }
-
     class MailboxMemoryPool
     {
         size_t total_size_;
@@ -1903,74 +1863,23 @@ void WsprRpiBackend::transmit_symbol_with_envelope(
     bool &rf_enabled,
     int symbol_index)
 {
-    if (event.envelope.fade_shape == wsprrypi::FadeShape::NONE ||
-        (event.envelope.fade_in <= std::chrono::nanoseconds::zero() &&
-         event.envelope.fade_out <= std::chrono::nanoseconds::zero()))
+    // GPIO DMA emission expects a continuous symbol run. Re-slicing a CW event
+    // into multiple transmit_symbol() calls and disabling the clock between
+    // slices restarts the symbol path, which produces audible/visible startup
+    // transients instead of a stable full-length tone. Keep GPIO CW emission
+    // continuous even when fade shaping is requested.
+    if (!rf_enabled)
     {
-        if (!rf_enabled)
-        {
-            transmit_on(plan);
-            start_watchdog();
-            rf_enabled = true;
-        }
-
-        transmit_symbol(
-            plan,
-            sym_num,
-            std::chrono::duration<double>(event.duration).count(),
-            symbol_index);
-        return;
+        transmit_on(plan);
+        start_watchdog();
+        rf_enabled = true;
     }
 
-    const auto slice_limit =
-        event.envelope.fade_slice > std::chrono::nanoseconds::zero()
-            ? event.envelope.fade_slice
-            : std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  std::chrono::milliseconds(5));
-    std::chrono::nanoseconds elapsed{0};
-
-    while (elapsed < event.duration && !owner_.backendShouldStop())
-    {
-        const auto remaining = event.duration - elapsed;
-        const auto slice = std::min(remaining, slice_limit);
-        const auto midpoint = elapsed + slice / 2;
-        const double level =
-            envelope_level_at(event.envelope, event.duration, midpoint);
-        const auto on_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::duration<double, std::nano>(
-                static_cast<double>(slice.count()) * level));
-        const auto off_duration = slice - on_duration;
-
-        if (on_duration > std::chrono::nanoseconds::zero())
-        {
-            if (!rf_enabled)
-            {
-                transmit_on(plan);
-                start_watchdog();
-                rf_enabled = true;
-            }
-
-            transmit_symbol(
-                plan,
-                sym_num,
-                std::chrono::duration<double>(on_duration).count(),
-                symbol_index);
-        }
-
-        if (off_duration > std::chrono::nanoseconds::zero())
-        {
-            if (rf_enabled)
-            {
-                disable_clock();
-                rf_enabled = false;
-            }
-
-            if (!owner_.backendWaitInterruptableFor(off_duration))
-                return;
-        }
-
-        elapsed += slice;
-    }
+    transmit_symbol(
+        plan,
+        sym_num,
+        std::chrono::duration<double>(event.duration).count(),
+        symbol_index);
 }
 
 double WsprRpiBackend::bit_trunc(const double &d, const int &lsb)
