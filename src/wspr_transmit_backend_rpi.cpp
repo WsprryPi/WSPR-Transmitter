@@ -192,6 +192,47 @@ namespace
         }
         return t;
     }
+
+    static inline int64_t diff_ns(const timespec &future, const timespec &past)
+    {
+        return (static_cast<int64_t>(future.tv_sec) -
+                static_cast<int64_t>(past.tv_sec)) *
+                   1000000000LL +
+               (static_cast<int64_t>(future.tv_nsec) -
+                static_cast<int64_t>(past.tv_nsec));
+    }
+
+    static bool wait_until_interruptible(
+        IControllerBridge &owner,
+        clockid_t clk_id,
+        const timespec &target)
+    {
+        while (!owner.backendShouldStop())
+        {
+            timespec now{};
+            if (::clock_gettime(clk_id, &now) != 0)
+            {
+                throw std::system_error(
+                    errno,
+                    std::generic_category(),
+                    "clock_gettime");
+            }
+
+            const int64_t remaining_ns = diff_ns(target, now);
+            if (remaining_ns <= 0)
+            {
+                return true;
+            }
+
+            if (!owner.backendWaitInterruptableFor(
+                    std::chrono::nanoseconds{remaining_ns}))
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
 }
 
 WsprRpiBackend::DMAConfig::DMAConfig()
@@ -340,21 +381,8 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
             {
                 const timespec target =
                     add_ns(t0_ts, event.offset_from_start.count());
-                while (!owner_.backendShouldStop())
-                {
-                    const int rc = clock_nanosleep(
-                        CLOCK_MONOTONIC,
-                        TIMER_ABSTIME,
-                        &target,
-                        nullptr);
-                    if (rc == 0)
-                        break;
-                    if (rc != EINTR)
-                        throw std::system_error(
-                            rc,
-                            std::generic_category(),
-                            "clock_nanosleep");
-                }
+                if (!wait_until_interruptible(owner_, CLOCK_MONOTONIC, target))
+                    break;
             }
 
             if (plan.mode == wsprrypi::TransmissionMode::QRSS)
@@ -409,11 +437,10 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
                 add_ns(
                     t0_ts,
                     (last.offset_from_start + last.duration).count());
-            (void)clock_nanosleep(
+            (void)wait_until_interruptible(
+                owner_,
                 CLOCK_MONOTONIC,
-                TIMER_ABSTIME,
-                &end_target,
-                nullptr);
+                end_target);
         }
 
         result.ok = true;
