@@ -240,6 +240,11 @@ private:
      */
     bool disableTransmitOutput();
 
+    bool runEnvelopeEvent(
+        const wsprrypi::RfEvent& event,
+        bool& rf_enabled,
+        std::string& error);
+
     IControllerBridge& owner_;
     Config config_;
     Si5351Device device_;

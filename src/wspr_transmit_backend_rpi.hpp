@@ -290,6 +290,12 @@ private:
         const std::uint32_t &sym_num,
         const double &tsym,
         int symbol_index);
+    void transmit_symbol_with_envelope(
+        const WsprTransmissionPlan &plan,
+        const std::uint32_t &sym_num,
+        const wsprrypi::RfEvent &event,
+        bool &rf_enabled,
+        int symbol_index);
     void force_dma_reset_sequence() noexcept;
     void get_plld();
     void allocate_memory_pool(unsigned numpages);

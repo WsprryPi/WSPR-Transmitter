@@ -75,6 +75,46 @@ namespace
         return cpu;
     }
 
+    static double envelope_level_at(
+        const wsprrypi::EnvelopeSettings& envelope,
+        std::chrono::nanoseconds event_duration,
+        std::chrono::nanoseconds offset) noexcept
+    {
+        if (envelope.fade_shape == wsprrypi::FadeShape::NONE)
+            return 1.0;
+
+        auto ramp_level = [&](std::chrono::nanoseconds elapsed,
+                              std::chrono::nanoseconds ramp_duration,
+                              bool rising) noexcept -> double
+        {
+            if (ramp_duration <= std::chrono::nanoseconds::zero())
+                return 1.0;
+
+            const double x = std::clamp(
+                static_cast<double>(elapsed.count()) /
+                    static_cast<double>(ramp_duration.count()),
+                0.0,
+                1.0);
+            const double shaped =
+                envelope.fade_shape == wsprrypi::FadeShape::RAISED_COSINE
+                    ? 0.5 - 0.5 * std::cos(3.14159265358979323846 * x)
+                    : x;
+            return rising ? shaped : 1.0 - shaped;
+        };
+
+        double level = 1.0;
+        if (offset < envelope.fade_in)
+            level = std::min(level, ramp_level(offset, envelope.fade_in, true));
+
+        const auto remaining = event_duration - offset;
+        if (remaining < envelope.fade_out)
+            level = std::min(
+                level,
+                ramp_level(remaining, envelope.fade_out, true));
+
+        return std::clamp(level, 0.0, 1.0);
+    }
+
     class MailboxMemoryPool
     {
         size_t total_size_;
@@ -247,6 +287,7 @@ wsprrypi::BackendCapabilities WsprRpiBackend::capabilities() const
     wsprrypi::BackendCapabilities caps;
     caps.supports_frequency_switching = true;
     caps.supports_rf_gating = true;
+    caps.supports_fade_shape = true;
     caps.supports_precomputed_execution = true;
     caps.nominal_frequency_resolution_hz = std::pow(2.0, -12);
     return caps;
@@ -533,19 +574,13 @@ void WsprRpiBackend::execute_qrss_event(
         return;
     }
 
-    if (!rf_enabled)
-    {
-        transmit_on(plan);
-        start_watchdog();
-        rf_enabled = true;
-    }
-
     // QRSS currently reuses the legacy WSPR 4-tone DMA table by placing the
     // desired fixed QRSS frequency at symbol 0 in the compatibility plan.
-    transmit_symbol(
+    transmit_symbol_with_envelope(
         plan,
         0U,
-        std::chrono::duration<double>(event.duration).count(),
+        event,
+        rf_enabled,
         symbol_index);
 }
 
@@ -561,19 +596,13 @@ void WsprRpiBackend::execute_fskcw_event(
             "FSKCW execution-plan event unexpectedly disables RF.");
     }
 
-    if (!rf_enabled)
-    {
-        transmit_on(plan);
-        start_watchdog();
-        rf_enabled = true;
-    }
-
     const auto symbol =
         reconstruct_compatibility_symbol(event, plan, 0L, 1L);
-    transmit_symbol(
+    transmit_symbol_with_envelope(
         plan,
         symbol,
-        std::chrono::duration<double>(event.duration).count(),
+        event,
+        rf_enabled,
         symbol_index);
 }
 
@@ -594,19 +623,13 @@ void WsprRpiBackend::execute_dfcw_event(
         return;
     }
 
-    if (!rf_enabled)
-    {
-        transmit_on(plan);
-        start_watchdog();
-        rf_enabled = true;
-    }
-
     const auto symbol =
         reconstruct_compatibility_symbol(event, plan, 0L, 1L);
-    transmit_symbol(
+    transmit_symbol_with_envelope(
         plan,
         symbol,
-        std::chrono::duration<double>(event.duration).count(),
+        event,
+        rf_enabled,
         symbol_index);
 }
 
@@ -1870,6 +1893,81 @@ void WsprRpiBackend::transmit_symbol(
 
         n_pwmclk_transmitted += n_pwmclk;
         n_f0_transmitted += n_f0;
+    }
+}
+
+void WsprRpiBackend::transmit_symbol_with_envelope(
+    const WsprTransmissionPlan &plan,
+    const std::uint32_t &sym_num,
+    const wsprrypi::RfEvent &event,
+    bool &rf_enabled,
+    int symbol_index)
+{
+    if (event.envelope.fade_shape == wsprrypi::FadeShape::NONE ||
+        (event.envelope.fade_in <= std::chrono::nanoseconds::zero() &&
+         event.envelope.fade_out <= std::chrono::nanoseconds::zero()))
+    {
+        if (!rf_enabled)
+        {
+            transmit_on(plan);
+            start_watchdog();
+            rf_enabled = true;
+        }
+
+        transmit_symbol(
+            plan,
+            sym_num,
+            std::chrono::duration<double>(event.duration).count(),
+            symbol_index);
+        return;
+    }
+
+    constexpr auto kSlice =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::milliseconds(5));
+    std::chrono::nanoseconds elapsed{0};
+
+    while (elapsed < event.duration && !owner_.backendShouldStop())
+    {
+        const auto remaining = event.duration - elapsed;
+        const auto slice = std::min(remaining, kSlice);
+        const auto midpoint = elapsed + slice / 2;
+        const double level =
+            envelope_level_at(event.envelope, event.duration, midpoint);
+        const auto on_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double, std::nano>(
+                static_cast<double>(slice.count()) * level));
+        const auto off_duration = slice - on_duration;
+
+        if (on_duration > std::chrono::nanoseconds::zero())
+        {
+            if (!rf_enabled)
+            {
+                transmit_on(plan);
+                start_watchdog();
+                rf_enabled = true;
+            }
+
+            transmit_symbol(
+                plan,
+                sym_num,
+                std::chrono::duration<double>(on_duration).count(),
+                symbol_index);
+        }
+
+        if (off_duration > std::chrono::nanoseconds::zero())
+        {
+            if (rf_enabled)
+            {
+                disable_clock();
+                rf_enabled = false;
+            }
+
+            if (!owner_.backendWaitInterruptableFor(off_duration))
+                return;
+        }
+
+        elapsed += slice;
     }
 }
 

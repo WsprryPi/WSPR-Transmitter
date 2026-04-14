@@ -2,6 +2,7 @@
 
 #include "wspr_transmit.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <limits>
@@ -136,8 +137,46 @@ namespace
             lhs.duration == rhs.duration &&
             lhs.type == rhs.type &&
             lhs.rf_on == rhs.rf_on &&
+            lhs.envelope.fade_shape == rhs.envelope.fade_shape &&
+            lhs.envelope.fade_in == rhs.envelope.fade_in &&
+            lhs.envelope.fade_out == rhs.envelope.fade_out &&
             std::fabs(lhs.frequency_hz - rhs.frequency_hz) <=
                 kFrequencyMatchToleranceHz;
+    }
+
+    static double envelope_level_at(
+        const wsprrypi::EnvelopeSettings& envelope,
+        std::chrono::nanoseconds event_duration,
+        std::chrono::nanoseconds offset) noexcept
+    {
+        if (envelope.fade_shape == wsprrypi::FadeShape::NONE)
+            return 1.0;
+
+        auto ramp_level = [&](std::chrono::nanoseconds elapsed,
+                              std::chrono::nanoseconds ramp_duration) noexcept
+        {
+            if (ramp_duration <= std::chrono::nanoseconds::zero())
+                return 1.0;
+
+            const double x = std::clamp(
+                static_cast<double>(elapsed.count()) /
+                    static_cast<double>(ramp_duration.count()),
+                0.0,
+                1.0);
+            return envelope.fade_shape == wsprrypi::FadeShape::RAISED_COSINE
+                       ? 0.5 - 0.5 * std::cos(3.14159265358979323846 * x)
+                       : x;
+        };
+
+        double level = 1.0;
+        if (offset < envelope.fade_in)
+            level = std::min(level, ramp_level(offset, envelope.fade_in));
+
+        const auto remaining = event_duration - offset;
+        if (remaining < envelope.fade_out)
+            level = std::min(level, ramp_level(remaining, envelope.fade_out));
+
+        return std::clamp(level, 0.0, 1.0);
     }
 }
 
@@ -188,6 +227,7 @@ wsprrypi::BackendCapabilities WsprSi5351Backend::capabilities() const
     wsprrypi::BackendCapabilities caps;
     caps.supports_frequency_switching = true;
     caps.supports_rf_gating = true;
+    caps.supports_fade_shape = true;
     caps.supports_precomputed_execution = true;
     caps.min_frequency_hz = 0.0;
     caps.max_frequency_hz = 0.0;
@@ -503,65 +543,11 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
                 }
             }
 
-            if (event.rf_on && !rf_enabled)
+            if (!runEnvelopeEvent(event, rf_enabled, result.error))
             {
-                if (!enableTransmitOutput())
-                {
-                    result.error = device_error_or(
-                        device_,
-                        "Could not enable Si5351 transmit output.");
-                    log_si5351(
-                        owner_,
-                        WsprTransmitLogLevel::ERROR,
-                        result.error);
-                    idle_device();
-                    return result;
-                }
-                rf_enabled = true;
-                if (config_.dry_run)
-                {
-                    log_si5351(
-                        owner_,
-                        WsprTransmitLogLevel::INFO,
-                        "Si5351 dry-run: TX output enable skipped.");
-                }
-                else
-                {
-                    log_si5351(
-                        owner_,
-                        WsprTransmitLogLevel::DEBUG,
-                        "Si5351 TX output enabled.");
-                }
-            }
-            else if (!event.rf_on && rf_enabled)
-            {
-                if (!disableTransmitOutput())
-                {
-                    result.error = device_error_or(
-                        device_,
-                        "Could not disable Si5351 transmit output.");
-                    log_si5351(
-                        owner_,
-                        WsprTransmitLogLevel::ERROR,
-                        result.error);
-                    idle_device();
-                    return result;
-                }
-                rf_enabled = false;
-                if (config_.dry_run)
-                {
-                    log_si5351(
-                        owner_,
-                        WsprTransmitLogLevel::INFO,
-                        "Si5351 dry-run: TX output disable skipped.");
-                }
-                else
-                {
-                    log_si5351(
-                        owner_,
-                        WsprTransmitLogLevel::DEBUG,
-                        "Si5351 TX output disabled.");
-                }
+                log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+                idle_device();
+                return result;
             }
         }
 
@@ -590,6 +576,99 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
         log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
         return result;
     }
+}
+
+bool WsprSi5351Backend::runEnvelopeEvent(
+    const wsprrypi::RfEvent& event,
+    bool& rf_enabled,
+    std::string& error)
+{
+    auto enable_output = [&]() -> bool
+    {
+        if (rf_enabled)
+            return true;
+
+        if (!enableTransmitOutput())
+        {
+            error = device_error_or(
+                device_,
+                "Could not enable Si5351 transmit output.");
+            return false;
+        }
+
+        rf_enabled = true;
+        return true;
+    };
+
+    auto disable_output = [&]() -> bool
+    {
+        if (!rf_enabled)
+            return true;
+
+        if (!disableTransmitOutput())
+        {
+            error = device_error_or(
+                device_,
+                "Could not disable Si5351 transmit output.");
+            return false;
+        }
+
+        rf_enabled = false;
+        return true;
+    };
+
+    if (!event.rf_on)
+    {
+        return disable_output();
+    }
+
+    if (event.envelope.fade_shape == wsprrypi::FadeShape::NONE ||
+        (event.envelope.fade_in <= std::chrono::nanoseconds::zero() &&
+         event.envelope.fade_out <= std::chrono::nanoseconds::zero()))
+    {
+        return enable_output();
+    }
+
+    constexpr auto kSlice =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::milliseconds(5));
+    std::chrono::nanoseconds elapsed{0};
+    while (elapsed < event.duration &&
+           !stop_requested_ &&
+           !owner_.backendShouldStop())
+    {
+        const auto remaining = event.duration - elapsed;
+        const auto slice = std::min(remaining, kSlice);
+        const auto midpoint = elapsed + slice / 2;
+        const double level =
+            envelope_level_at(event.envelope, event.duration, midpoint);
+        const auto on_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double, std::nano>(
+                static_cast<double>(slice.count()) * level));
+        const auto off_duration = slice - on_duration;
+
+        if (on_duration > std::chrono::nanoseconds::zero())
+        {
+            if (!enable_output())
+                return false;
+
+            if (!owner_.backendWaitInterruptableFor(on_duration))
+                return true;
+        }
+
+        if (off_duration > std::chrono::nanoseconds::zero())
+        {
+            if (!disable_output())
+                return false;
+
+            if (!owner_.backendWaitInterruptableFor(off_duration))
+                return true;
+        }
+
+        elapsed += slice;
+    }
+
+    return true;
 }
 
 void WsprSi5351Backend::stop() noexcept
