@@ -47,6 +47,7 @@
 #include "bcm_model.hpp"
 #include "mailbox.hpp"
 #include "signal_handler.hpp"
+#include "version.hpp"
 
 namespace
 {
@@ -258,6 +259,18 @@ wsprrypi::BackendCompileResult WsprRpiBackend::configure(
     const wsprrypi::BackendExecutionInputs &inputs)
 {
     wsprrypi::BackendCompileResult result;
+    if (plan.backend != wsprrypi::BackendKind::RPI_CLOCK_GPIO)
+    {
+        result.error =
+            "Execution plan is not targeted for the Raspberry Pi GPIO backend.";
+        return result;
+    }
+
+    if (!platform_supports_gpio_clock_transmission(&result.error))
+    {
+        return result;
+    }
+
     auto compat = build_execution_plan_config(plan, inputs, &result);
     if (!compat.has_value())
     {
