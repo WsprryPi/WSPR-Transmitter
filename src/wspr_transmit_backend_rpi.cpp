@@ -1253,7 +1253,7 @@ void WsprRpiBackend::start_watchdog()
 
                         std::ostringstream oss;
                         oss
-                            << "DMA watchdog diagnostics:"
+                            << "DMA watchdog diagnostics: "
                             << " CS=0x" << std::hex << cs
                             << " (" << flags.str() << " )"
                             << " CONBLK_AD=0x" << conblk

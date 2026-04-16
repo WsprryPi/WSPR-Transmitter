@@ -981,7 +981,7 @@ void WsprTransmitter::dumpParameters()
     }
     else
     {
-        log_line("WSPR Symbols:");
+        log_line("WSPR Symbols: ");
 
         const int frame_count =
             static_cast<int>(current_request_.payload.frameCount());
