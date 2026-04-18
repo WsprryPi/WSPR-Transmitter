@@ -184,21 +184,20 @@ struct TransmissionRequest
     std::string frequency_entry_label{};
 
     /**
+     * @brief Whether the scheduler prepared a selector GPIO for this request.
+     *
+     * This snapshot is scheduler metadata used to recover selector state
+     * from the committed request without re-running policy resolution.
+     */
+    bool selector_gpio_enabled = false;
+
+    /**
      * @brief True only when the scheduler intentionally commits a skipped slot.
      *
      * This must not be inferred from a zero RF frequency because waiting and
      * logging paths are not scheduling skips.
      */
     bool skip_window = false;
-
-    /**
-     * @brief True when the scheduler committed a specific LPF selector choice.
-     *
-     * This is scheduler-owned execution metadata. Execution callbacks must use
-     * this committed snapshot rather than re-deriving selector policy from
-     * mutable live configuration.
-     */
-    bool selector_gpio_enabled = false;
 
     /**
      * @brief Scheduler-selected amateur band for LPF control.
