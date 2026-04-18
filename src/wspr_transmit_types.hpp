@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <string>
 
+#include "band_gpio.hpp"
 #include "wspr_reference_adapter.hpp"
 
 /**
@@ -190,6 +191,25 @@ struct TransmissionRequest
      */
     bool skip_window = false;
 
+    /**
+     * @brief True when the scheduler committed a specific LPF selector choice.
+     *
+     * This is scheduler-owned execution metadata. Execution callbacks must use
+     * this committed snapshot rather than re-deriving selector policy from
+     * mutable live configuration.
+     */
+    bool selector_gpio_enabled = false;
+
+    /**
+     * @brief Scheduler-selected amateur band for LPF control.
+     */
+    HamBand selector_band = HamBand::BAND_2200M;
+
+    /**
+     * @brief Scheduler-selected GPIO configuration for LPF control.
+     */
+    BandGPIOConfig selector_gpio_config{};
+
     bool isTone() const noexcept
     {
         return mode == TransmissionMode::TONE;
@@ -198,6 +218,13 @@ struct TransmissionRequest
     bool isSkipWindow() const noexcept
     {
         return !isTone() && skip_window;
+    }
+
+    bool hasSelectorGPIO() const noexcept
+    {
+        return selector_gpio_enabled &&
+               selector_gpio_config.enabled &&
+               selector_gpio_config.gpio >= 0;
     }
 
     std::size_t totalSymbolCount() const noexcept
