@@ -89,7 +89,8 @@ void append_event(
     bool rf_on,
     double frequency_hz,
     std::chrono::nanoseconds duration,
-    const EnvelopeSettings& envelope)
+    const EnvelopeSettings& envelope,
+    int message_char_index = -1)
 {
     if (duration <= std::chrono::nanoseconds::zero())
         return;
@@ -100,6 +101,7 @@ void append_event(
     event.type = type;
     event.frequency_hz = frequency_hz;
     event.rf_on = rf_on;
+    event.message_char_index = message_char_index;
     event.envelope = envelope;
     plan.events.push_back(event);
     offset += duration;
@@ -131,10 +133,10 @@ void expand_morse_message(
 
         for (std::size_t j = 0; j < morse.size(); ++j)
         {
-            emit_mark(morse[j]);
+            emit_mark(morse[j], static_cast<int>(i));
 
             if (j + 1U < morse.size())
-                emit_gap(GapKind::IntraElement);
+                emit_gap(GapKind::IntraElement, static_cast<int>(i));
         }
 
         std::size_t next = i + 1U;
@@ -145,7 +147,8 @@ void expand_morse_message(
             continue;
 
         emit_gap(next > (i + 1U) ? GapKind::InterWord
-                                 : GapKind::InterCharacter);
+                                 : GapKind::InterCharacter,
+                 static_cast<int>(i));
     }
 }
 
@@ -322,7 +325,7 @@ ExecutionPlan ExecutionPlanCompiler::compile_qrss(
     {
         expand_morse_message(
             payload.message,
-            [&](char element)
+            [&](char element, int message_char_index)
             {
                 const auto duration =
                     (element == '.') ? payload.timing.dot : payload.timing.dash;
@@ -333,9 +336,10 @@ ExecutionPlan ExecutionPlanCompiler::compile_qrss(
                     true,
                     payload.frequency_hz,
                     duration,
-                    payload.envelope);
+                    payload.envelope,
+                    message_char_index);
             },
-            [&](auto gap_kind)
+            [&](auto gap_kind, int message_char_index)
             {
                 append_event(
                     plan,
@@ -348,7 +352,8 @@ ExecutionPlan ExecutionPlanCompiler::compile_qrss(
                         : (gap_kind == decltype(gap_kind)::InterWord
                                ? payload.timing.inter_word_gap
                                : payload.timing.inter_character_gap),
-                    payload.envelope);
+                    payload.envelope,
+                    message_char_index);
             });
     }
     catch (const std::runtime_error& e)
@@ -404,7 +409,7 @@ ExecutionPlan ExecutionPlanCompiler::compile_fskcw(
     {
         expand_morse_message(
             payload.message,
-            [&](char element)
+            [&](char element, int message_char_index)
             {
                 const auto duration =
                     (element == '.') ? payload.timing.dot : payload.timing.dash;
@@ -415,9 +420,10 @@ ExecutionPlan ExecutionPlanCompiler::compile_fskcw(
                     true,
                     payload.mark_frequency_hz,
                     duration,
-                    payload.envelope);
+                    payload.envelope,
+                    message_char_index);
             },
-            [&](auto gap_kind)
+            [&](auto gap_kind, int message_char_index)
             {
                 append_event(
                     plan,
@@ -430,7 +436,8 @@ ExecutionPlan ExecutionPlanCompiler::compile_fskcw(
                         : (gap_kind == decltype(gap_kind)::InterWord
                                ? payload.timing.inter_word_gap
                                : payload.timing.inter_character_gap),
-                    payload.envelope);
+                    payload.envelope,
+                    message_char_index);
             });
     }
     catch (const std::runtime_error& e)
@@ -487,7 +494,7 @@ ExecutionPlan ExecutionPlanCompiler::compile_dfcw(
     {
         expand_morse_message(
             payload.message,
-            [&](char element)
+            [&](char element, int message_char_index)
             {
                 append_event(
                     plan,
@@ -498,9 +505,10 @@ ExecutionPlan ExecutionPlanCompiler::compile_dfcw(
                         ? payload.dot_frequency_hz
                         : payload.dash_frequency_hz,
                     payload.timing.dot,
-                    payload.envelope);
+                    payload.envelope,
+                    message_char_index);
             },
-            [&](auto gap_kind)
+            [&](auto gap_kind, int message_char_index)
             {
                 append_event(
                     plan,
@@ -514,7 +522,8 @@ ExecutionPlan ExecutionPlanCompiler::compile_dfcw(
                         : (gap_kind == decltype(gap_kind)::InterWord
                                ? payload.timing.dot * 2
                                : payload.timing.dot),
-                    payload.envelope);
+                    payload.envelope,
+                    message_char_index);
             });
     }
     catch (const std::runtime_error& e)

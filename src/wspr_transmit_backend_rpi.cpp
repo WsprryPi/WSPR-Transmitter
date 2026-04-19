@@ -376,6 +376,7 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
                 break;
 
             const auto &event = plan.events[i];
+            owner_.backendReportExecutionProgress(i);
 
             if (i > 0)
             {

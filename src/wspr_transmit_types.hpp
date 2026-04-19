@@ -88,6 +88,7 @@ enum class WsprTransmitLogLevel
 enum class WsprTransmissionCallbackEvent
 {
     STARTING,
+    PROGRESS,
     COMPLETE,
     CANCELLED,
     SKIPPED,

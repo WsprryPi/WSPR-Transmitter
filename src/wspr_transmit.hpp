@@ -65,6 +65,7 @@ public:
     virtual void backendRequestStopTxNoJoin() noexcept = 0;
     virtual bool backendWaitInterruptableFor(std::chrono::nanoseconds duration) = 0;
     virtual void backendThrowIfStopRequested(const char *context) = 0;
+    virtual void backendReportExecutionProgress(std::size_t event_index) noexcept = 0;
     virtual void backendFireTransmitCallback(WsprTransmissionCallbackEvent event,
                                              WsprTransmitLogLevel level,
                                              const std::string &msg,
@@ -112,6 +113,13 @@ public:
 class WsprTransmitter : public IControllerBridge
 {
 public:
+    struct RuntimeExecutionStatus
+    {
+        wsprrypi::TransmissionMode mode{wsprrypi::TransmissionMode::WSPR};
+        std::string cw_message;
+        int cw_active_char_index{-1};
+    };
+
     struct Si5351RuntimeConfig
     {
         int i2c_bus = 1;
@@ -158,6 +166,7 @@ public:
     std::string stateToStringLower(State state);
     bool activeExecutionIsTone() const noexcept;
     bool activeExecutionIsWspr() const noexcept;
+    RuntimeExecutionStatus runtimeExecutionStatusSnapshot() const;
 
     /**
      * @brief Constructs a WSPR transmitter with default settings.
@@ -476,6 +485,8 @@ public:
 
     void backendThrowIfStopRequested(const char *context) override;
 
+    void backendReportExecutionProgress(std::size_t event_index) noexcept override;
+
     void backendFireTransmitCallback(WsprTransmissionCallbackEvent event,
                                      WsprTransmitLogLevel level,
                                      const std::string &msg,
@@ -721,6 +732,8 @@ private:
     wsprrypi::ExecutionPlan current_execution_plan_{};
     wsprrypi::TransmissionMode current_execution_mode_{
         wsprrypi::TransmissionMode::WSPR};
+    std::string current_cw_message_{};
+    std::atomic<int> current_cw_active_char_index_{-1};
 
     /**
      * @brief Invoke the configured transmission callback.

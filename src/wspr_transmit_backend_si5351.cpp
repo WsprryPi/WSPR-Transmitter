@@ -519,12 +519,14 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
                         break;
                     }
                 }
-
-                if (execution_interrupted ||
-                    stop_requested_ ||
-                    owner_.backendShouldStop())
-                    break;
             }
+
+            if (execution_interrupted ||
+                stop_requested_ ||
+                owner_.backendShouldStop())
+                break;
+
+            owner_.backendReportExecutionProgress(i);
 
             if (i < event_tone_indexes_.size() &&
                 event_tone_indexes_[i] != invalid_tone_index() &&

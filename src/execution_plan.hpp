@@ -33,6 +33,7 @@ struct RfEvent
 
     double frequency_hz{0.0};
     bool rf_on{false};
+    int message_char_index{-1};
 
     EnvelopeSettings envelope{};
 };

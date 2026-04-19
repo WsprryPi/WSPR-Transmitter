@@ -41,6 +41,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 
 // POSIX and system headers
 #include <sys/mman.h>
@@ -55,6 +56,27 @@
 // Helper classes and functions in anonymous namespace
 namespace
 {
+    std::string current_cw_message_for_payload(
+        const wsprrypi::TransmissionPayload &payload)
+    {
+        return std::visit(
+            [](const auto &variant_payload) -> std::string
+            {
+                using PayloadT = std::decay_t<decltype(variant_payload)>;
+
+                if constexpr (std::is_same_v<PayloadT, wsprrypi::QrssPayload> ||
+                              std::is_same_v<PayloadT, wsprrypi::FskcwPayload> ||
+                              std::is_same_v<PayloadT, wsprrypi::DfcwPayload> ||
+                              std::is_same_v<PayloadT, wsprrypi::CwPayload>)
+                {
+                    return variant_payload.message;
+                }
+
+                return std::string{};
+            },
+            payload);
+    }
+
     static inline int cpu_count() noexcept
     {
         long n = ::sysconf(_SC_NPROCESSORS_ONLN);
@@ -437,6 +459,17 @@ bool WsprTransmitter::activeExecutionIsWspr() const noexcept
     return current_execution_mode_ == wsprrypi::TransmissionMode::WSPR;
 }
 
+WsprTransmitter::RuntimeExecutionStatus
+WsprTransmitter::runtimeExecutionStatusSnapshot() const
+{
+    RuntimeExecutionStatus snapshot;
+    snapshot.mode = current_execution_mode_;
+    snapshot.cw_message = current_cw_message_;
+    snapshot.cw_active_char_index =
+        current_cw_active_char_index_.load(std::memory_order_acquire);
+    return snapshot;
+}
+
 void WsprTransmitter::configureExecution(
     const TransmissionRequest &request)
 {
@@ -487,6 +520,8 @@ void WsprTransmitter::configureExecution(
     current_execution_mode_ =
         request.isTone() ? wsprrypi::TransmissionMode::TONE
                          : wsprrypi::TransmissionMode::WSPR;
+    current_cw_message_.clear();
+    current_cw_active_char_index_.store(-1, std::memory_order_release);
     transmission_controller_->reset();
 
     if (current_request_.isSkipWindow())
@@ -562,6 +597,8 @@ void WsprTransmitter::configureExecution(
     current_request_ = legacy_request;
     current_execution_plan_ = wsprrypi::ExecutionPlan{};
     current_execution_mode_ = request.mode;
+    current_cw_message_ = current_cw_message_for_payload(request.payload);
+    current_cw_active_char_index_.store(-1, std::memory_order_release);
     transmission_controller_->reset();
 
     if (current_request_.isSkipWindow())
@@ -1127,6 +1164,39 @@ void WsprTransmitter::backendThrowIfStopRequested(const char *context)
     throwIfStopRequested(context);
 }
 
+void WsprTransmitter::backendReportExecutionProgress(
+    std::size_t event_index) noexcept
+{
+    if (current_execution_mode_ != wsprrypi::TransmissionMode::QRSS &&
+        current_execution_mode_ != wsprrypi::TransmissionMode::FSKCW &&
+        current_execution_mode_ != wsprrypi::TransmissionMode::DFCW)
+    {
+        return;
+    }
+
+    if (event_index >= current_execution_plan_.events.size())
+    {
+        return;
+    }
+
+    const int message_char_index =
+        current_execution_plan_.events[event_index].message_char_index;
+    const int prior =
+        current_cw_active_char_index_.exchange(
+            message_char_index,
+            std::memory_order_acq_rel);
+    if (prior == message_char_index)
+    {
+        return;
+    }
+
+    fire_transmit_cb(
+        TransmissionCallbackEvent::PROGRESS,
+        LogLevel::DEBUG,
+        "",
+        static_cast<double>(message_char_index));
+}
+
 void WsprTransmitter::backendFireTransmitCallback(
     WsprTransmissionCallbackEvent event,
     WsprTransmitLogLevel level,
@@ -1388,6 +1458,7 @@ void WsprTransmitter::transmit()
             }
 
             const auto t_end_chrono = std::chrono::steady_clock::now();
+            current_cw_active_char_index_.store(-1, std::memory_order_release);
             state_.store(canceled ? State::CANCELLED : State::COMPLETE,
                          std::memory_order_release);
 
@@ -1442,6 +1513,7 @@ void WsprTransmitter::transmit()
 
         const bool canceled = shouldStop();
 
+        current_cw_active_char_index_.store(-1, std::memory_order_release);
         state_.store(canceled ? State::CANCELLED : State::COMPLETE,
                      std::memory_order_release);
 
@@ -1567,6 +1639,7 @@ void WsprTransmitter::transmit()
         // shutdown overhead should not be counted against the on-air duration.
         const auto t_end_chrono = std::chrono::steady_clock::now();
 
+        current_cw_active_char_index_.store(-1, std::memory_order_release);
         state_.store(canceled ? State::CANCELLED : State::COMPLETE,
                      std::memory_order_release);
 
