@@ -1368,6 +1368,7 @@ void WsprTransmitter::transmit()
     {
         if (selected_backend_ == wsprrypi::BackendKind::SI5351)
         {
+            state_.store(State::TRANSMITTING, std::memory_order_release);
             fire_transmit_cb(TransmissionCallbackEvent::STARTING,
                              LogLevel::INFO,
                              "",
@@ -1402,6 +1403,7 @@ void WsprTransmitter::transmit()
         }
 
         // Fire callback as close to the first symbol as possible.
+        state_.store(State::TRANSMITTING, std::memory_order_release);
         fire_transmit_cb(TransmissionCallbackEvent::STARTING,
                          LogLevel::INFO,
                          "",
@@ -1511,6 +1513,7 @@ void WsprTransmitter::transmit()
         }
 
         // Fire callback as close to the first symbol as possible.
+        state_.store(State::TRANSMITTING, std::memory_order_release);
         fire_transmit_cb(TransmissionCallbackEvent::STARTING, LogLevel::INFO, "", current_request_.actual_rf_frequency_hz);
 
         const int symbol_count =
