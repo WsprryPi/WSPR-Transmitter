@@ -146,9 +146,14 @@ void expand_morse_message(
         if (next >= message.size())
             continue;
 
+        const int gap_char_index =
+            next > (i + 1U)
+                ? static_cast<int>(i + 1U)
+                : static_cast<int>(i);
+
         emit_gap(next > (i + 1U) ? GapKind::InterWord
                                  : GapKind::InterCharacter,
-                 static_cast<int>(i));
+                 gap_char_index);
     }
 }
 
