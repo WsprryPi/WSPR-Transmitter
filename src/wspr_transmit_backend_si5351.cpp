@@ -554,6 +554,40 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
             }
         }
 
+        if (!execution_interrupted &&
+            !stop_requested_ &&
+            !owner_.backendShouldStop() &&
+            !plan.events.empty())
+        {
+            const wsprrypi::RfEvent& last = plan.events.back();
+            const timespec end_target = add_ns(
+                start_time,
+                (last.offset_from_start + last.duration).count());
+
+            while (!stop_requested_ && !owner_.backendShouldStop())
+            {
+                timespec now{};
+                if (::clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+                {
+                    throw std::system_error(
+                        errno,
+                        std::generic_category(),
+                        "clock_gettime");
+                }
+
+                const std::int64_t remaining_ns = diff_ns(end_target, now);
+                if (remaining_ns <= 0)
+                    break;
+
+                if (!owner_.backendWaitInterruptableFor(
+                        std::chrono::nanoseconds{remaining_ns}))
+                {
+                    execution_interrupted = true;
+                    break;
+                }
+            }
+        }
+
         if (execution_interrupted ||
             stop_requested_ ||
             owner_.backendShouldStop())

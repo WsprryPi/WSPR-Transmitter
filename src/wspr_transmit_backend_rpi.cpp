@@ -54,6 +54,40 @@ namespace
     static constexpr size_t NUM_PAGES = 4096;
     static constexpr double kWsprSymbolPeriodSeconds = 8192.0 / 12000.0;
     static constexpr double kWsprToneSpacingHz = 1.0 / kWsprSymbolPeriodSeconds;
+    static constexpr double kPwmSampleTableSize = 1024.0;
+    static constexpr double kMaxRandomizedIterMultiplier = 1.5;
+
+    static std::chrono::nanoseconds max_dma_block_duration(
+        double pwm_clock_init_hz,
+        std::uint32_t pwm_clocks_per_iter_nominal) noexcept
+    {
+        if (!std::isfinite(pwm_clock_init_hz) || pwm_clock_init_hz <= 0.0)
+        {
+            return std::chrono::nanoseconds::zero();
+        }
+
+        const double max_samples =
+            static_cast<double>(pwm_clocks_per_iter_nominal) *
+            kMaxRandomizedIterMultiplier;
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double>(
+                (max_samples * kPwmSampleTableSize) / pwm_clock_init_hz));
+    }
+
+    static std::chrono::nanoseconds dma_block_timeout(
+        double pwm_clock_init_hz,
+        std::uint32_t pwm_clocks_per_iter_nominal,
+        std::chrono::nanoseconds minimum_timeout,
+        std::chrono::nanoseconds slack) noexcept
+    {
+        const auto block_duration =
+            max_dma_block_duration(pwm_clock_init_hz, pwm_clocks_per_iter_nominal);
+        const auto derived_timeout =
+            block_duration + block_duration + slack;
+        return derived_timeout > minimum_timeout
+                   ? derived_timeout
+                   : minimum_timeout;
+    }
 
     static inline int cpu_count() noexcept
     {
@@ -569,9 +603,8 @@ void WsprRpiBackend::execute_qrss_event(
     {
         if (rf_enabled)
         {
-            // QRSS inter-element/inter-character gaps turn RF off without
-            // ending the prepared DMA run. A full teardown here would stop a
-            // multi-character message at its first gap.
+            // QRSS gaps blank RF inside one committed CW stream. Tearing the
+            // DMA/PWM path down here would abort the remaining characters.
             stop_watchdog();
             disable_clock();
             rf_enabled = false;
@@ -969,8 +1002,12 @@ void WsprRpiBackend::start_watchdog()
     }
 
     constexpr auto kPollPeriod = std::chrono::milliseconds(20);
-    constexpr auto kStallTimeout = std::chrono::milliseconds(250);
     constexpr auto kHeartbeatPeriod = std::chrono::seconds(2);
+    const auto kStallTimeout = dma_block_timeout(
+        pwm_clock_init_,
+        PWM_CLOCKS_PER_ITER_NOMINAL,
+        std::chrono::milliseconds(250),
+        std::chrono::milliseconds(100));
 
     std::optional<std::chrono::nanoseconds> inject_stall_after;
     if (const char *env = std::getenv("WSPR_TX_INJECT_WD_STALL"))
@@ -1011,7 +1048,11 @@ void WsprRpiBackend::start_watchdog()
 
     {
         std::ostringstream oss;
-        oss << "DMA watchdog started.";
+        oss << "DMA watchdog started."
+            << " stall_timeout_ms="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(
+                   kStallTimeout)
+                   .count();
         owner_.backendFireTransmitCallback(
             WsprTransmissionCallbackEvent::LOGGING,
             WsprTransmitLogLevel::DEBUG,
@@ -1688,7 +1729,14 @@ void WsprRpiBackend::transmit_symbol(
     constexpr std::uint32_t kMask = 0x3FFu;
     constexpr std::uint32_t kLead = 64u;
     constexpr int kPollSleepUs = 50;
-    constexpr int kMaxWaitUs = 200000;
+    const auto max_wait =
+        dma_block_timeout(
+            pwm_clock_init_,
+            PWM_CLOCKS_PER_ITER_NOMINAL,
+            std::chrono::milliseconds(200),
+            std::chrono::milliseconds(50));
+    const int kMaxWaitUs = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::microseconds>(max_wait).count());
 
     auto dma_conblk_ad = [&]() -> std::uint32_t
     {
@@ -1713,7 +1761,14 @@ void WsprRpiBackend::transmit_symbol(
                 std::ostringstream oss;
                 oss << "DMA appears stuck at CONBLK_AD=0x"
                     << std::hex << cur << std::dec
-                    << ", forcing stop to avoid deadlock.";
+                    << ", forcing stop to avoid deadlock."
+                    << " waited_ms=" << (waited_us / 1000.0)
+                    << " max_wait_ms="
+                    << std::chrono::duration_cast<std::chrono::milliseconds>(
+                           max_wait)
+                           .count()
+                    << " pwm_clock_init_hz=" << std::fixed << std::setprecision(3)
+                    << pwm_clock_init_;
                 owner_.backendFireTransmitCallback(
                     WsprTransmissionCallbackEvent::LOGGING,
                     WsprTransmitLogLevel::DEBUG,
