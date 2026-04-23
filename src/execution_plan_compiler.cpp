@@ -162,9 +162,8 @@ std::size_t resolve_wspr_frame_index(const PreparedWsprTransmission& prepared)
     if (prepared.frames.empty())
         throw std::runtime_error("WSPR payload has no prepared frames.");
 
-    // PreparedWsprTransmission.current_frame is carried through scheduling as
-    // a 1-based "current frame" ordinal for runtime status. Execution needs a
-    // zero-based index into frames.
+    // PreparedWsprTransmission.current_frame is 1-based within the payload
+    // committed for this execution request.
     if (prepared.current_frame == 0U)
         return 0U;
 
