@@ -175,7 +175,9 @@ namespace
         }
     };
 
-    static inline bool gpclk0_wait_not_busy(volatile int &gp0ctl_reg, int max_us)
+    static inline bool gpclk0_wait_not_busy(
+        volatile uint32_t &gp0ctl_reg,
+        int max_us)
     {
         const int polls = (max_us <= 0) ? 0 : (max_us / 100);
         for (int i = 0; i < polls; ++i)
@@ -191,11 +193,11 @@ namespace
         return ((gp0ctl_reg & (1 << 7)) == 0);
     }
 
-    static inline void gpclk0_disable_wait(volatile int &gp0ctl_reg)
+    static inline void gpclk0_disable_wait(volatile uint32_t &gp0ctl_reg)
     {
-        uint32_t ctl = static_cast<uint32_t>(gp0ctl_reg);
+        uint32_t ctl = gp0ctl_reg;
         ctl = (ctl & 0x7EFu) | 0x5A000000u;
-        gp0ctl_reg = static_cast<int>(ctl);
+        gp0ctl_reg = ctl;
 
         if (gpclk0_wait_not_busy(gp0ctl_reg, 200000))
             return;
@@ -1445,20 +1447,27 @@ int WsprRpiBackend::get_gpio_power_mw(int level)
     return DRIVE_STRENGTH_TABLE[level];
 }
 
-inline volatile int &WsprRpiBackend::access_bus_address(std::uintptr_t bus_addr)
+inline volatile uint32_t &WsprRpiBackend::access_bus_address(std::uintptr_t bus_addr)
 {
     std::uintptr_t offset = Mailbox::offsetFromBase(bus_addr);
-    return *reinterpret_cast<volatile int *>(dma_config_.peripheral_base_virtual + offset);
+    return *reinterpret_cast<volatile uint32_t *>(
+        dma_config_.peripheral_base_virtual + offset);
 }
 
 inline void WsprRpiBackend::set_bit_bus_address(std::uintptr_t base, unsigned int bit)
 {
-    access_bus_address(base) |= 1 << bit;
+    volatile uint32_t &reg = access_bus_address(base);
+    const uint32_t mask = uint32_t{1} << bit;
+    const uint32_t value = reg;
+    reg = value | mask;
 }
 
 inline void WsprRpiBackend::clear_bit_bus_address(std::uintptr_t base, unsigned int bit)
 {
-    access_bus_address(base) &= ~(1 << bit);
+    volatile uint32_t &reg = access_bus_address(base);
+    const uint32_t mask = uint32_t{1} << bit;
+    const uint32_t value = reg;
+    reg = value & ~mask;
 }
 
 void WsprRpiBackend::configure_transmit_gpio(int gpio)
@@ -1484,7 +1493,7 @@ void WsprRpiBackend::configure_transmit_gpio(int gpio)
             "Unsupported transmit GPIO. GPCLK0 output is supported on BCM GPIO 4 or 20.");
     }
 
-    volatile int &gpfsel =
+    volatile uint32_t &gpfsel =
         access_bus_address(GPIO_BUS_BASE + register_offset);
     const std::uint32_t mask = static_cast<std::uint32_t>(0b111u << shift);
     const std::uint32_t current_value = static_cast<std::uint32_t>(gpfsel);

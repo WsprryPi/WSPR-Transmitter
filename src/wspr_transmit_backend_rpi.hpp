@@ -272,7 +272,7 @@ private:
         volatile unsigned int DEBUG;
     };
 
-    inline volatile int &access_bus_address(std::uintptr_t bus_addr);
+    inline volatile uint32_t &access_bus_address(std::uintptr_t bus_addr);
     inline void set_bit_bus_address(std::uintptr_t base, unsigned int bit);
     inline void clear_bit_bus_address(std::uintptr_t base, unsigned int bit);
     void configure_transmit_gpio(int gpio);
