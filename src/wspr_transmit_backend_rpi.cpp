@@ -569,7 +569,11 @@ void WsprRpiBackend::execute_qrss_event(
     {
         if (rf_enabled)
         {
-            transmit_off();
+            // QRSS inter-element/inter-character gaps turn RF off without
+            // ending the prepared DMA run. A full teardown here would stop a
+            // multi-character message at its first gap.
+            stop_watchdog();
+            disable_clock();
             rf_enabled = false;
         }
         return;
