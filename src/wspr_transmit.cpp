@@ -507,7 +507,9 @@ void WsprTransmitter::configureExecution(
 
     stop_requested_.store(false);
 
-    if (!request.isTone() && request.payload.frames.empty())
+    if (!request.isTone() &&
+        !request.isSkipWindow() &&
+        request.payload.frames.empty())
     {
         throw std::invalid_argument(
             "WSPR transmission request contains no frames.");
@@ -588,6 +590,7 @@ void WsprTransmitter::configureExecution(
     stop_requested_.store(false);
 
     if (request.mode == wsprrypi::TransmissionMode::WSPR &&
+        !legacy_request.isSkipWindow() &&
         legacy_request.payload.frames.empty())
     {
         throw std::invalid_argument(
