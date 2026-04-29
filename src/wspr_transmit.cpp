@@ -77,6 +77,19 @@ namespace
             payload);
     }
 
+    const char *backend_kind_name(wsprrypi::BackendKind backend) noexcept
+    {
+        switch (backend)
+        {
+        case wsprrypi::BackendKind::RPI_CLOCK_GPIO:
+            return "GPIO";
+        case wsprrypi::BackendKind::SI5351:
+            return "SI5351";
+        }
+
+        return "unknown";
+    }
+
     static inline int cpu_count() noexcept
     {
         long n = ::sysconf(_SC_NPROCESSORS_ONLN);
@@ -603,6 +616,15 @@ void WsprTransmitter::configureExecution(
     const wsprrypi::TransmissionRequest& request,
     const TransmissionRequest& legacy_request)
 {
+    if (request.mode == wsprrypi::TransmissionMode::TONE &&
+        request.output.backend != wsprrypi::BackendKind::SI5351)
+    {
+        throw std::invalid_argument(
+            std::string(
+                "Controller tone execution is only supported for the SI5351 backend; received ") +
+            backend_kind_name(request.output.backend) + ".");
+    }
+
     if (request.mode == wsprrypi::TransmissionMode::WSPR &&
         legacy_request.isTone())
     {
