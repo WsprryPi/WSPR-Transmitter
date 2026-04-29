@@ -554,7 +554,7 @@ void transmitter_cb(
         const double elapsed = value;
 
         std::cout << log_tag
-                  << "Transmission cancelled after "
+                  << "Transmission canceled after "
                   << std::fixed
                   << std::setprecision(6)
                   << elapsed
