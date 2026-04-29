@@ -167,6 +167,8 @@ public:
     bool activeExecutionIsTone() const noexcept;
     bool activeExecutionIsWspr() const noexcept;
     RuntimeExecutionStatus runtimeExecutionStatusSnapshot() const;
+    std::string reloadDeferDebugState() const;
+    void clearExecutionStateAfterStop() noexcept;
 
     /**
      * @brief Constructs a WSPR transmitter with default settings.

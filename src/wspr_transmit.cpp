@@ -497,6 +497,81 @@ WsprTransmitter::runtimeExecutionStatusSnapshot() const
     return snapshot;
 }
 
+std::string WsprTransmitter::reloadDeferDebugState() const
+{
+    auto mode_name =
+        [](wsprrypi::TransmissionMode mode) noexcept
+    {
+        switch (mode)
+        {
+        case wsprrypi::TransmissionMode::WSPR:
+            return "WSPR";
+        case wsprrypi::TransmissionMode::QRSS:
+            return "QRSS";
+        case wsprrypi::TransmissionMode::FSKCW:
+            return "FSKCW";
+        case wsprrypi::TransmissionMode::DFCW:
+            return "DFCW";
+        case wsprrypi::TransmissionMode::CW:
+            return "CW";
+        case wsprrypi::TransmissionMode::TONE:
+            return "TONE";
+        default:
+            return "UNKNOWN";
+        }
+    };
+
+    auto committed_mode_name =
+        [](TransmissionMode mode) noexcept
+    {
+        switch (mode)
+        {
+        case TransmissionMode::WSPR:
+            return "WSPR";
+        case TransmissionMode::TONE:
+            return "TONE";
+        default:
+            return "UNKNOWN";
+        }
+    };
+
+    std::ostringstream oss;
+    const State state = state_.load(std::memory_order_acquire);
+    std::string state_name = wsprTransmitStateToString(state);
+    std::transform(
+        state_name.begin(),
+        state_name.end(),
+        state_name.begin(),
+        [](unsigned char c)
+        {
+            return static_cast<char>(std::tolower(c));
+        });
+    oss << "state=" << state_name
+        << ", stop_requested=" << (stop_requested_.load(std::memory_order_acquire) ? "true" : "false")
+        << ", soft_off=" << (soft_off_.load(std::memory_order_acquire) ? "true" : "false")
+        << ", active_execution_mode=" << mode_name(current_execution_mode_)
+        << ", active_execution_is_tone=" << (activeExecutionIsTone() ? "true" : "false")
+        << ", active_execution_is_wspr=" << (activeExecutionIsWspr() ? "true" : "false")
+        << ", current_request_mode=" << committed_mode_name(current_request_.mode)
+        << ", current_request_rf_hz=" << current_request_.actual_rf_frequency_hz
+        << ", current_request_dial_hz=" << current_request_.dial_frequency_hz
+        << ", current_request_skip=" << (current_request_.isSkipWindow() ? "true" : "false")
+        << ", current_plan_events=" << current_execution_plan_.events.size()
+        << ", scheduled_start_rt_ns=" << scheduled_start_rt_ns_.load(std::memory_order_acquire);
+    return oss.str();
+}
+
+void WsprTransmitter::clearExecutionStateAfterStop() noexcept
+{
+    current_request_ = TransmissionRequest{};
+    current_execution_plan_ = wsprrypi::ExecutionPlan{};
+    current_execution_mode_ = wsprrypi::TransmissionMode::WSPR;
+    current_cw_message_.clear();
+    current_cw_active_char_index_.store(-1, std::memory_order_release);
+    scheduled_start_rt_ns_.store(0, std::memory_order_release);
+    transmission_controller_->reset();
+}
+
 void WsprTransmitter::configureExecution(
     const TransmissionRequest &request)
 {
