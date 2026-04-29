@@ -487,13 +487,29 @@ WsprTransmitter::runtimeExecutionStatusSnapshot() const
 void WsprTransmitter::configureExecution(
     const TransmissionRequest &request)
 {
-    if (!request.isSkipWindow())
+    if (request.isTone() && selected_backend_ == wsprrypi::BackendKind::SI5351)
     {
         wsprrypi::TransmissionRequest controller_request;
-        controller_request.mode =
-            request.isTone()
-                ? wsprrypi::TransmissionMode::TONE
-                : wsprrypi::TransmissionMode::WSPR;
+        controller_request.mode = wsprrypi::TransmissionMode::TONE;
+        controller_request.output.backend = selected_backend_;
+        controller_request.output.output =
+            si5351_clock_source_from_index(selected_si5351_config_.tx_output);
+        controller_request.output.gpio = request.tx_gpio;
+        controller_request.calibration.ppm = request.ppm;
+        controller_request.id.value = 1;
+
+        wsprrypi::TonePayload payload;
+        payload.frequency_hz = request.actual_rf_frequency_hz;
+        controller_request.payload = payload;
+
+        configureExecution(controller_request, request);
+        return;
+    }
+
+    if (!request.isTone() && !request.isSkipWindow())
+    {
+        wsprrypi::TransmissionRequest controller_request;
+        controller_request.mode = wsprrypi::TransmissionMode::WSPR;
         controller_request.output.backend = selected_backend_;
         controller_request.output.output =
             selected_backend_ == wsprrypi::BackendKind::SI5351
@@ -503,19 +519,10 @@ void WsprTransmitter::configureExecution(
         controller_request.calibration.ppm = request.ppm;
         controller_request.id.value = 1;
 
-        if (request.isTone())
-        {
-            wsprrypi::TonePayload payload;
-            payload.frequency_hz = request.actual_rf_frequency_hz;
-            controller_request.payload = payload;
-        }
-        else
-        {
-            wsprrypi::WsprPayload payload;
-            payload.prepared = request.payload;
-            payload.base_frequency_hz = request.actual_rf_frequency_hz;
-            controller_request.payload = payload;
-        }
+        wsprrypi::WsprPayload payload;
+        payload.prepared = request.payload;
+        payload.base_frequency_hz = request.actual_rf_frequency_hz;
+        controller_request.payload = payload;
 
         configureExecution(controller_request, request);
         return;
