@@ -191,6 +191,11 @@ public:
      */
     bool recoveryInProgress() const noexcept override;
 
+    static constexpr std::uint32_t frequencyDitherBlockClocks() noexcept
+    {
+        return PWM_CLOCKS_PER_ITER_NOMINAL;
+    }
+
 private:
     struct ExecutionPlanConfig
     {
@@ -383,11 +388,7 @@ private:
     static constexpr uint32_t DMA_BUS_BASE = 0x7E007000;
     static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
 
-#if INTPTR_MAX == INT32_MAX
-    static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 50000;
-#else
     static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
-#endif
 
     static inline constexpr std::array<int, 8> DRIVE_STRENGTH_TABLE = {
         2, 4, 6, 8, 10, 12, 14, 16};

@@ -269,6 +269,12 @@ namespace
 
         return false;
     }
+
+    static bool trace_wspr_tones_enabled() noexcept
+    {
+        const char *env = std::getenv("WSPRYPI_TRACE_WSPR_TONES");
+        return env != nullptr && env[0] != '\0' && env[0] != '0';
+    }
 }
 
 WsprRpiBackend::DMAConfig::DMAConfig()
@@ -1901,6 +1907,33 @@ void WsprRpiBackend::transmit_symbol(
     const double f0_ratio =
         1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
 
+    if (trace_wspr_tones_enabled())
+    {
+        std::ostringstream oss;
+        oss
+            << "WSPR tone request:"
+            << " idx=" << (symbol_index >= 0 ? symbol_index + 1 : 0)
+            << "/" << plan.symbolCount()
+            << " symbol=" << sym_num
+            << " requested_hz=" << std::fixed << std::setprecision(6)
+            << tone_freq
+            << " lower_word=0x" << std::hex
+            << (reinterpret_cast<std::uint32_t *>(const_page_.v)[f0_idx] & 0x00FFFFFFu)
+            << " upper_word=0x"
+            << (reinterpret_cast<std::uint32_t *>(const_page_.v)[f1_idx] & 0x00FFFFFFu)
+            << std::dec
+            << " lower_hz=" << std::fixed << std::setprecision(6) << f0_freq
+            << " upper_hz=" << std::fixed << std::setprecision(6) << f1_freq
+            << " f0_ratio=" << std::fixed << std::setprecision(9) << f0_ratio
+            << " dither_block_clocks=" << pwm_clocks_per_iter
+            << " symbol_pwm_clocks=" << n_pwmclk_per_sym;
+        owner_.backendFireTransmitCallback(
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
+            oss.str(),
+            0.0);
+    }
+
     while (n_pwmclk_transmitted < n_pwmclk_per_sym &&
            !owner_.backendShouldStop())
     {
@@ -2289,6 +2322,60 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
         }
 
         tuning_word[i] = static_cast<std::uint32_t>(div * std::pow(2.0, 12));
+    }
+
+    if (trace_wspr_tones_enabled())
+    {
+        std::ostringstream oss;
+        oss
+            << "WSPR tone table:"
+            << " center_hz=" << std::fixed << std::setprecision(6)
+            << result.applied_frequency_hz
+            << " spacing_hz=" << std::fixed << std::setprecision(9)
+            << plan.tone_spacing_hz
+            << " ppm=" << std::fixed << std::setprecision(6)
+            << plan.ppm
+            << " plld_hz=" << std::fixed << std::setprecision(3)
+            << dma_config_.plld_clock_frequency
+            << " pwm_clock_hz=" << std::fixed << std::setprecision(3)
+            << pwm_clock_init_
+            << " dither_block_clocks="
+            << WsprRpiBackend::frequencyDitherBlockClocks();
+
+        for (int symbol = 0; symbol < 4; ++symbol)
+        {
+            const int lower_index = symbol * 2;
+            const int upper_index = lower_index + 1;
+            const double requested_hz =
+                tone0_freq + static_cast<double>(symbol) * plan.tone_spacing_hz;
+            const double lower_hz =
+                dma_config_.plld_clock_frequency /
+                (static_cast<double>(tuning_word[lower_index]) / std::pow(2.0, 12));
+            const double upper_hz =
+                dma_config_.plld_clock_frequency /
+                (static_cast<double>(tuning_word[upper_index]) / std::pow(2.0, 12));
+            oss
+                << " tone" << symbol
+                << "_requested_hz=" << std::fixed << std::setprecision(6)
+                << requested_hz
+                << " tone" << symbol
+                << "_lower_word=0x" << std::hex << tuning_word[lower_index]
+                << " tone" << symbol
+                << "_upper_word=0x" << tuning_word[upper_index]
+                << std::dec
+                << " tone" << symbol
+                << "_lower_hz=" << std::fixed << std::setprecision(6)
+                << lower_hz
+                << " tone" << symbol
+                << "_upper_hz=" << std::fixed << std::setprecision(6)
+                << upper_hz;
+        }
+
+        owner_.backendFireTransmitCallback(
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
+            oss.str(),
+            0.0);
     }
 
     for (int i = 8; i < 1024; i++)
