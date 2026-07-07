@@ -521,11 +521,10 @@ ExecutionPlan ExecutionPlanCompiler::compile_dfcw(
                     false,
                     0.0,
                     gap_kind == decltype(gap_kind)::IntraElement
-                        ? std::chrono::duration_cast<std::chrono::nanoseconds>(
-                              payload.timing.dot / 3)
+                        ? payload.timing.intra_element_gap
                         : (gap_kind == decltype(gap_kind)::InterWord
-                               ? payload.timing.dot * 2
-                               : payload.timing.dot),
+                               ? payload.timing.inter_word_gap
+                               : payload.timing.inter_character_gap),
                     payload.envelope,
                     message_char_index);
             });
