@@ -41,7 +41,8 @@ BIN_DIR		 	= build/bin
 LOCAL_C_SOURCES   := $(shell find . -type f -name '*.c')
 LOCAL_CPP_SOURCES := $(shell find . -type f -name '*.cpp')
 SI5351_TEST_SOURCE := ./si5351_backend_harness.cpp
-LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
+STANDARD_FELD_TEST_SOURCE := ../tests/standard_feld_compiler_test.cpp
+LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE) $(STANDARD_FELD_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
 
 # Find in each submodule—but explicitly skip any “main” there:
 SUBMODULE_C_SOURCES   := $(shell find $(SUBMODULE_SRCDIRS) -type f -name '*.c'   ! -name 'main.c')
@@ -65,6 +66,7 @@ SI5351_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_si5351.o \
 	$(OBJ_DIR_DEBUG)/./si5351_device.o \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o
+STANDARD_FELD_TEST_OUT := build/bin/standard_feld_compiler_test
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Linker Flags
@@ -172,6 +174,11 @@ build/bin/si5351_backend_harness: $(SI5351_TEST_OBJECTS)
 	$(Q)echo "Linking debug: si5351_backend_harness"
 	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
 
+$(STANDARD_FELD_TEST_OUT): ../tests/standard_feld_compiler_test.cpp \
+		execution_plan_compiler.cpp standard_feld.cpp
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
 # Generic release compile (your own code)
 $(OBJ_DIR_RELEASE)/%.o: %.cpp
 	$(Q)mkdir -p $(dir $@)
@@ -212,7 +219,7 @@ build/bin/$(OUT): $(CPP_OBJECTS) $(C_OBJECTS)
 ##
 # Phony targets
 ##
-.PHONY: clean release debug test si5351-test gdb lint macros help
+.PHONY: clean release debug test si5351-test standard-feld-test gdb lint macros help
 
 clean:
 	$(Q)echo "Cleaning up build artifacts."
@@ -229,6 +236,9 @@ test: debug
 
 si5351-test: build/bin/si5351_backend_harness
 	$(Q)echo "Si5351 backend harness built successfully."
+
+standard-feld-test: $(STANDARD_FELD_TEST_OUT)
+	$(Q)./$(STANDARD_FELD_TEST_OUT)
 
 watchdog: debug
 	$(Q)$(SUDO) env WSPR_TX_INJECT_WD_STALL=5 ./build/bin/$(TEST_OUT) --now --oneshot
@@ -254,6 +264,7 @@ help:
 	$(Q)echo "  debug      Build debug binary"
 	$(Q)echo "  test       Run tests"
 	$(Q)echo "  si5351-test Build temporary Si5351 backend harness"
+	$(Q)echo "  standard-feld-test Build and run backend-neutral Standard Feld tests"
 	$(Q)echo "  watchdog   Run tests with watchdog fail"
 	$(Q)echo "  gdb        Debug with gdb"
 	$(Q)echo "  lint       Static analysis"
