@@ -67,6 +67,7 @@ SI5351_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./si5351_device.o \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o
 STANDARD_FELD_TEST_OUT := build/bin/standard_feld_compiler_test
+STANDARD_FELD_GPIO_DRY_RUN_TEST_OUT := build/bin/standard_feld_gpio_dry_run_test
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Linker Flags
@@ -179,6 +180,21 @@ $(STANDARD_FELD_TEST_OUT): ../tests/standard_feld_compiler_test.cpp \
 	$(Q)mkdir -p $(BIN_DIR)
 	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
 
+$(STANDARD_FELD_GPIO_DRY_RUN_TEST_OUT): \
+		../tests/standard_feld_gpio_dry_run_test.cpp \
+		../tests/rpi_standard_feld_dry_run.cpp \
+		../tests/rpi_standard_feld_dry_run.hpp \
+		execution_plan_compiler.cpp standard_feld.cpp \
+		execution_plan.hpp execution_plan_compiler.hpp \
+		standard_feld.hpp standard_feld_asset.hpp \
+		transmission_payloads.hpp transmission_request.hpp
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) \
+		../tests/standard_feld_gpio_dry_run_test.cpp \
+		../tests/rpi_standard_feld_dry_run.cpp \
+		execution_plan_compiler.cpp standard_feld.cpp \
+		-o $@ $(LDFLAGS)
+
 # Generic release compile (your own code)
 $(OBJ_DIR_RELEASE)/%.o: %.cpp
 	$(Q)mkdir -p $(dir $@)
@@ -219,7 +235,7 @@ build/bin/$(OUT): $(CPP_OBJECTS) $(C_OBJECTS)
 ##
 # Phony targets
 ##
-.PHONY: clean release debug test si5351-test standard-feld-test gdb lint macros help
+.PHONY: clean release debug test si5351-test standard-feld-test standard-feld-gpio-dry-run-test gdb lint macros help
 
 clean:
 	$(Q)echo "Cleaning up build artifacts."
@@ -239,6 +255,9 @@ si5351-test: build/bin/si5351_backend_harness
 
 standard-feld-test: $(STANDARD_FELD_TEST_OUT)
 	$(Q)./$(STANDARD_FELD_TEST_OUT)
+
+standard-feld-gpio-dry-run-test: $(STANDARD_FELD_GPIO_DRY_RUN_TEST_OUT)
+	$(Q)./$(STANDARD_FELD_GPIO_DRY_RUN_TEST_OUT)
 
 watchdog: debug
 	$(Q)$(SUDO) env WSPR_TX_INJECT_WD_STALL=5 ./build/bin/$(TEST_OUT) --now --oneshot
