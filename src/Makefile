@@ -68,6 +68,9 @@ SI5351_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o
 STANDARD_FELD_TEST_OUT := build/bin/standard_feld_compiler_test
 STANDARD_FELD_GPIO_DRY_RUN_TEST_OUT := build/bin/standard_feld_gpio_dry_run_test
+STANDARD_FELD_RPI_EXECUTION_TEST_OUT := build/bin/standard_feld_rpi_execution_test
+STANDARD_FELD_GATE_TEST_OUT := build/bin/standard_feld_execution_gate_test
+STANDARD_FELD_PROGRESS_BRIDGE_TEST_OUT := build/bin/standard_feld_progress_bridge_test
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Linker Flags
@@ -185,6 +188,7 @@ $(STANDARD_FELD_GPIO_DRY_RUN_TEST_OUT): \
 		../tests/rpi_standard_feld_dry_run.cpp \
 		../tests/rpi_standard_feld_dry_run.hpp \
 		execution_plan_compiler.cpp standard_feld.cpp \
+		rpi_standard_feld_execution.cpp rpi_standard_feld_execution.hpp \
 		execution_plan.hpp execution_plan_compiler.hpp \
 		standard_feld.hpp standard_feld_asset.hpp \
 		transmission_payloads.hpp transmission_request.hpp
@@ -193,7 +197,33 @@ $(STANDARD_FELD_GPIO_DRY_RUN_TEST_OUT): \
 		../tests/standard_feld_gpio_dry_run_test.cpp \
 		../tests/rpi_standard_feld_dry_run.cpp \
 		execution_plan_compiler.cpp standard_feld.cpp \
+		rpi_standard_feld_execution.cpp \
 		-o $@ $(LDFLAGS)
+
+$(STANDARD_FELD_RPI_EXECUTION_TEST_OUT): \
+		../tests/standard_feld_rpi_execution_test.cpp \
+		rpi_standard_feld_execution.cpp rpi_standard_feld_execution.hpp \
+		transmission_controller.cpp transmission_controller.hpp \
+		transmission_backend.hpp wspr_transmit.hpp wspr_transmit_types.hpp \
+		execution_plan_compiler.cpp execution_plan_compiler.hpp \
+		standard_feld.cpp standard_feld.hpp standard_feld_asset.hpp \
+		execution_plan.hpp transmission_payloads.hpp transmission_request.hpp
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) \
+		../tests/standard_feld_rpi_execution_test.cpp \
+		rpi_standard_feld_execution.cpp \
+		transmission_controller.cpp \
+		execution_plan_compiler.cpp standard_feld.cpp \
+		-o $@ $(LDFLAGS)
+
+$(STANDARD_FELD_GATE_TEST_OUT): ../tests/standard_feld_execution_gate_test.cpp \
+		standard_feld_execution_gate.cpp standard_feld_execution_gate.hpp
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) -DSTANDARD_FELD_GATE_TEST_HOOKS $< standard_feld_execution_gate.cpp -o $@ $(LDFLAGS)
+
+$(STANDARD_FELD_PROGRESS_BRIDGE_TEST_OUT): ../tests/standard_feld_progress_bridge_test.cpp rpi_standard_feld_progress_bridge.cpp rpi_standard_feld_progress_bridge.hpp rpi_standard_feld_execution.cpp rpi_standard_feld_execution.hpp execution_plan_compiler.cpp standard_feld.cpp
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) -DSTANDARD_FELD_PROGRESS_TEST_HOOKS $< rpi_standard_feld_progress_bridge.cpp rpi_standard_feld_execution.cpp execution_plan_compiler.cpp standard_feld.cpp -o $@ $(LDFLAGS)
 
 # Generic release compile (your own code)
 $(OBJ_DIR_RELEASE)/%.o: %.cpp
@@ -235,7 +265,7 @@ build/bin/$(OUT): $(CPP_OBJECTS) $(C_OBJECTS)
 ##
 # Phony targets
 ##
-.PHONY: clean release debug test si5351-test standard-feld-test standard-feld-gpio-dry-run-test gdb lint macros help
+.PHONY: clean release debug test si5351-test standard-feld-test standard-feld-gpio-dry-run-test standard-feld-rpi-execution-test standard-feld-execution-gate-test standard-feld-progress-bridge-test gdb lint macros help
 
 clean:
 	$(Q)echo "Cleaning up build artifacts."
@@ -258,6 +288,15 @@ standard-feld-test: $(STANDARD_FELD_TEST_OUT)
 
 standard-feld-gpio-dry-run-test: $(STANDARD_FELD_GPIO_DRY_RUN_TEST_OUT)
 	$(Q)./$(STANDARD_FELD_GPIO_DRY_RUN_TEST_OUT)
+
+standard-feld-rpi-execution-test: $(STANDARD_FELD_RPI_EXECUTION_TEST_OUT)
+	$(Q)./$(STANDARD_FELD_RPI_EXECUTION_TEST_OUT)
+
+standard-feld-execution-gate-test: $(STANDARD_FELD_GATE_TEST_OUT)
+	$(Q)./$(STANDARD_FELD_GATE_TEST_OUT)
+
+standard-feld-progress-bridge-test: $(STANDARD_FELD_PROGRESS_BRIDGE_TEST_OUT)
+	$(Q)./$(STANDARD_FELD_PROGRESS_BRIDGE_TEST_OUT)
 
 watchdog: debug
 	$(Q)$(SUDO) env WSPR_TX_INJECT_WD_STALL=5 ./build/bin/$(TEST_OUT) --now --oneshot
