@@ -192,7 +192,7 @@ WsprSi5351Backend::WsprSi5351Backend(
     const Config& config)
     : owner_(owner),
       config_(config),
-      device_(config.device),
+      device_(config.device, config.device_adapter),
       planner_(config.planner),
       current_plan_(),
       unique_tone_frequencies_(),
@@ -354,6 +354,49 @@ wsprrypi::BackendCompileResult WsprSi5351Backend::configure(
 
     configured_ = true;
     result.ok = true;
+    return result;
+}
+
+wsprrypi::StartupQuiesceResult WsprSi5351Backend::quiesceForStartup()
+{
+    wsprrypi::StartupQuiesceResult result;
+
+    if (config_.dry_run)
+    {
+        log_si5351(
+            owner_, WsprTransmitLogLevel::INFO,
+            "Si5351 dry-run: startup quiesce skipped without I2C access.");
+        result.ok = true;
+        return result;
+    }
+
+    // Startup quiescence is a direct all-outputs-off operation.  It must not
+    // apply planner, drive-strength, output-enable, or PLL programming.
+    if (!device_.open())
+    {
+        result.error = device_error_or(
+            device_, "Could not open Si5351 device for startup quiesce.");
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+        device_.close();
+        return result;
+    }
+
+    const bool disabled = device_.disableAllOutputs();
+    if (!disabled)
+    {
+        result.error = device_error_or(
+            device_, "Could not disable Si5351 outputs for startup quiesce.");
+        log_si5351(owner_, WsprTransmitLogLevel::ERROR, result.error);
+    }
+    device_.close();
+
+    result.ok = disabled;
+    if (result.ok)
+    {
+        log_si5351(
+            owner_, WsprTransmitLogLevel::DEBUG,
+            "Si5351 startup quiesce complete: all outputs disabled.");
+    }
     return result;
 }
 

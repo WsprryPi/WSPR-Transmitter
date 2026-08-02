@@ -83,6 +83,7 @@ public:
         const wsprrypi::BackendExecutionInputs &inputs) override;
     wsprrypi::ExecutionResult execute(
         const wsprrypi::ExecutionPlan &plan) override;
+    wsprrypi::StartupQuiesceResult quiesceForStartup() override;
     void stop() noexcept override;
     void cleanup() noexcept override;
 
@@ -301,7 +302,7 @@ private:
         const wsprrypi::RfEvent &event,
         bool &rf_enabled,
         int symbol_index);
-    void force_dma_reset_sequence() noexcept;
+    bool force_dma_reset_sequence() noexcept;
     void get_plld();
     void allocate_memory_pool(unsigned numpages);
     void get_real_mem_page_from_pool(void **vAddr, void **bAddr);

@@ -41,7 +41,8 @@ BIN_DIR		 	= build/bin
 LOCAL_C_SOURCES   := $(shell find . -type f -name '*.c')
 LOCAL_CPP_SOURCES := $(shell find . -type f -name '*.cpp')
 SI5351_TEST_SOURCE := ./si5351_backend_harness.cpp
-LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
+STARTUP_QUIESCE_TEST_SOURCE := ./startup_quiesce_test.cpp
+LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE) $(STARTUP_QUIESCE_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
 
 # Find in each submodule—but explicitly skip any “main” there:
 SUBMODULE_C_SOURCES   := $(shell find $(SUBMODULE_SRCDIRS) -type f -name '*.c'   ! -name 'main.c')
@@ -65,6 +66,14 @@ SI5351_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_si5351.o \
 	$(OBJ_DIR_DEBUG)/./si5351_device.o \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o
+STARTUP_QUIESCE_TEST_OBJECTS := \
+	$(OBJ_DIR_DEBUG)/./startup_quiesce_test.o \
+	$(OBJ_DIR_DEBUG)/./transmission_controller.o \
+	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_rpi.o \
+	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_si5351.o \
+	$(OBJ_DIR_DEBUG)/./si5351_device.o \
+	$(OBJ_DIR_DEBUG)/./si5351_planner.o \
+	$(OBJ_DIR_DEBUG)/Mailbox/src/mailbox.o
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Linker Flags
@@ -104,6 +113,7 @@ CXXFLAGS += $(COMMON_FLAGS) $(COMM_CXX_FLAGS)
 
 # Include paths
 CXXFLAGS += -I$(abspath .)
+CXXFLAGS += -I$(abspath ../..)
 CXXFLAGS += $(foreach dir,$(SUBMODULE_SRCDIRS),-I$(abspath $(dir)))
 CXXFLAGS += -I$(abspath ../../WSPR-Reference/src/wspr)
 
@@ -172,6 +182,11 @@ build/bin/si5351_backend_harness: $(SI5351_TEST_OBJECTS)
 	$(Q)echo "Linking debug: si5351_backend_harness"
 	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
 
+build/bin/startup_quiesce_test: $(STARTUP_QUIESCE_TEST_OBJECTS)
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)echo "Linking debug: startup_quiesce_test"
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
 # Generic release compile (your own code)
 $(OBJ_DIR_RELEASE)/%.o: %.cpp
 	$(Q)mkdir -p $(dir $@)
@@ -212,7 +227,7 @@ build/bin/$(OUT): $(CPP_OBJECTS) $(C_OBJECTS)
 ##
 # Phony targets
 ##
-.PHONY: clean release debug test si5351-test gdb lint macros help
+.PHONY: clean release debug test si5351-test startup-quiesce-test gdb lint macros help
 
 clean:
 	$(Q)echo "Cleaning up build artifacts."
@@ -229,6 +244,9 @@ test: debug
 
 si5351-test: build/bin/si5351_backend_harness
 	$(Q)echo "Si5351 backend harness built successfully."
+
+startup-quiesce-test: build/bin/startup_quiesce_test
+	$(Q)./build/bin/startup_quiesce_test
 
 watchdog: debug
 	$(Q)$(SUDO) env WSPR_TX_INJECT_WD_STALL=5 ./build/bin/$(TEST_OUT) --now --oneshot
@@ -254,6 +272,7 @@ help:
 	$(Q)echo "  debug      Build debug binary"
 	$(Q)echo "  test       Run tests"
 	$(Q)echo "  si5351-test Build temporary Si5351 backend harness"
+	$(Q)echo "  startup-quiesce-test Build and run non-hardware startup-quiesce tests"
 	$(Q)echo "  watchdog   Run tests with watchdog fail"
 	$(Q)echo "  gdb        Debug with gdb"
 	$(Q)echo "  lint       Static analysis"

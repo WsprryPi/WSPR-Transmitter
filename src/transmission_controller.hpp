@@ -27,6 +27,7 @@ public:
     ExecutionResult transmit(
         const TransmissionRequest& request,
         const TransmissionPrepareOptions& options = {});
+    StartupQuiesceResult quiesceForStartup();
     const ExecutionPlan* prepared_plan() const noexcept;
     void reset() noexcept;
     void stop() noexcept;

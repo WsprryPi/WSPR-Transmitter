@@ -60,6 +60,11 @@ ExecutionResult TransmissionController::transmit(
     return execute_prepared();
 }
 
+StartupQuiesceResult TransmissionController::quiesceForStartup()
+{
+    return backend_.quiesceForStartup();
+}
+
 const ExecutionPlan* TransmissionController::prepared_plan() const noexcept
 {
     return prepared_plan_.has_value() ? &*prepared_plan_ : nullptr;

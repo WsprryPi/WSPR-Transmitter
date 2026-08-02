@@ -498,6 +498,52 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
     }
 }
 
+wsprrypi::StartupQuiesceResult WsprRpiBackend::quiesceForStartup()
+{
+    // These established paths are no-ops before this process has mapped DMA
+    // resources, while a mapped backend gets the same reset and GPCLK-disable
+    // sequence used by watchdog recovery.
+    std::string error;
+
+    try
+    {
+        stop_watchdog();
+    }
+    catch (const std::exception& e)
+    {
+        error = std::string("Could not stop GPIO backend watchdog: ") +
+            e.what();
+    }
+    catch (...)
+    {
+        error = "Could not stop GPIO backend watchdog.";
+    }
+
+    if (!force_dma_reset_sequence() && error.empty())
+    {
+        error = "Could not reset GPIO backend DMA and clock state.";
+    }
+
+    // Cleanup remains best effort and no-throw from the caller's point of
+    // view.  Do not mask an earlier quiescence failure with cleanup success.
+    try
+    {
+        cleanupTransmission();
+    }
+    catch (const std::exception& e)
+    {
+        if (error.empty())
+            error = std::string("Could not clean up GPIO backend: ") + e.what();
+    }
+    catch (...)
+    {
+        if (error.empty())
+            error = "Could not clean up GPIO backend.";
+    }
+
+    return wsprrypi::StartupQuiesceResult{error.empty(), error};
+}
+
 void WsprRpiBackend::stop() noexcept
 {
     owner_.backendRequestStopTxNoJoin();
@@ -736,7 +782,7 @@ void WsprRpiBackend::emitSymbol(
 void WsprRpiBackend::resetTransmissionOutput() noexcept
 {
     dma_buf_ptr_ = 0;
-    force_dma_reset_sequence();
+    (void)force_dma_reset_sequence();
 }
 
 bool WsprRpiBackend::faulted() const noexcept
@@ -1366,11 +1412,11 @@ void WsprRpiBackend::stop_watchdog()
     }
 }
 
-void WsprRpiBackend::force_dma_reset_sequence() noexcept
+bool WsprRpiBackend::force_dma_reset_sequence() noexcept
 {
     if (dma_config_.peripheral_base_virtual == nullptr)
     {
-        return;
+        return true;
     }
 
     try
@@ -1394,9 +1440,11 @@ void WsprRpiBackend::force_dma_reset_sequence() noexcept
         access_bus_address(PWM_BUS_BASE + 0x08) = 0;
 
         disable_clock();
+        return true;
     }
     catch (...)
     {
+        return false;
     }
 }
 

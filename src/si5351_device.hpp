@@ -28,7 +28,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 /**
@@ -49,6 +51,18 @@
 class Si5351Device
 {
 public:
+    /** Injectable Linux I2C operations for source-level hardware tests. */
+    class I2CAdapter
+    {
+    public:
+        virtual ~I2CAdapter() = default;
+        virtual int openDevice(const std::string& path, int flags) = 0;
+        virtual int selectSlave(int fd, std::uint8_t address) = 0;
+        virtual ssize_t writeData(int fd, const void* data, std::size_t size) = 0;
+        virtual ssize_t readData(int fd, void* data, std::size_t size) = 0;
+        virtual int closeDevice(int fd) = 0;
+    };
+
     /**
      * @brief Supported output clocks
      */
@@ -109,7 +123,9 @@ public:
      *
      * @param config Device access and reference configuration
      */
-    explicit Si5351Device(const Config& config);
+    explicit Si5351Device(
+        const Config& config,
+        std::shared_ptr<I2CAdapter> adapter = {});
 
     /**
      * @brief Destroy the device wrapper
@@ -261,6 +277,7 @@ private:
     void setLastError(const std::string& message);
 
     Config config_;
+    std::shared_ptr<I2CAdapter> adapter_;
     int fd_;
     std::string last_error_;
     std::vector<bool> cache_valid_;
