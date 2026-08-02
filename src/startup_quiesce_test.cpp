@@ -253,10 +253,12 @@ namespace
     {
         TestBridge bridge;
         WsprRpiBackend backend(bridge);
-        expect(backend.quiesceForStartup().ok,
-               "GPIO startup quiesce must be safe before first transmission");
-        expect(backend.quiesceForStartup().ok,
-               "repeated GPIO startup quiesce must remain safe");
+        const auto first = backend.quiesceForStartup();
+        const auto second = backend.quiesceForStartup();
+        expect(!first.ok && !first.error.empty(),
+               "GPIO startup quiesce must fail closed when safe peripheral access is unavailable");
+        expect(!second.ok && !second.error.empty(),
+               "repeated unavailable GPIO startup quiesce must remain fail closed");
     }
 }
 

@@ -303,6 +303,9 @@ private:
         bool &rf_enabled,
         int symbol_index);
     bool force_dma_reset_sequence() noexcept;
+    bool map_startup_quiesce_peripherals(std::string &error);
+    bool set_transmit_gpio_safe(std::string &error) noexcept;
+    bool release_startup_quiesce_peripherals(std::string &error) noexcept;
     void get_plld();
     void allocate_memory_pool(unsigned numpages);
     void get_real_mem_page_from_pool(void **vAddr, void **bAddr);
@@ -388,6 +391,8 @@ private:
     static constexpr uint32_t CLK_BUS_BASE = 0x7E101000;
     static constexpr uint32_t DMA_BUS_BASE = 0x7E007000;
     static constexpr uint32_t PWM_BUS_BASE = 0x7E20C000;
+    // Covers GPIO (0x200000), PWM (0x20c000), and all lower owned blocks.
+    static constexpr std::size_t STARTUP_QUIESCE_MAP_SIZE = 0x210000;
 
     static constexpr std::uint32_t PWM_CLOCKS_PER_ITER_NOMINAL = 1000;
 

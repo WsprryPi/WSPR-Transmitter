@@ -500,10 +500,15 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
 
 wsprrypi::StartupQuiesceResult WsprRpiBackend::quiesceForStartup()
 {
-    // These established paths are no-ops before this process has mapped DMA
-    // resources, while a mapped backend gets the same reset and GPCLK-disable
-    // sequence used by watchdog recovery.
     std::string error;
+    bool temporary_mapping = false;
+
+    if (!platform_supports_gpio_clock_transmission(&error))
+    {
+        if (error.empty())
+            error = "GPIO startup quiesce is unavailable on this platform.";
+        return {false, error};
+    }
 
     try
     {
@@ -519,29 +524,91 @@ wsprrypi::StartupQuiesceResult WsprRpiBackend::quiesceForStartup()
         error = "Could not stop GPIO backend watchdog.";
     }
 
+    if (dma_config_.peripheral_base_virtual == nullptr)
+    {
+        temporary_mapping = true;
+        if (!map_startup_quiesce_peripherals(error))
+            return {false, error};
+    }
+
     if (!force_dma_reset_sequence() && error.empty())
     {
         error = "Could not reset GPIO backend DMA and clock state.";
     }
 
-    // Cleanup remains best effort and no-throw from the caller's point of
-    // view.  Do not mask an earlier quiescence failure with cleanup success.
+    if (!set_transmit_gpio_safe(error) && error.empty())
+        error = "Could not return the GPIO backend transmit pin to input mode.";
+
+    // Do not call dma_cleanup(): it restores saved GPCLK/GPIO state and can
+    // undo startup quiescence.  A fresh-process mapping has no DMA pages or
+    // waveform allocation and is released directly after the safe writes.
+    if (temporary_mapping && !release_startup_quiesce_peripherals(error) && error.empty())
+        error = "Could not release GPIO startup-quiesce peripheral mapping.";
+
+    return wsprrypi::StartupQuiesceResult{error.empty(), error};
+}
+
+bool WsprRpiBackend::map_startup_quiesce_peripherals(std::string &error)
+{
     try
     {
-        cleanupTransmission();
+        mailbox.open();
+        dma_config_.peripheral_base_virtual = ::mailbox.mapMem(
+            Mailbox::discoverPeripheralBase(), STARTUP_QUIESCE_MAP_SIZE);
+        if (dma_config_.peripheral_base_virtual == nullptr)
+            throw std::runtime_error("Peripheral mapping returned null.");
+        return true;
     }
     catch (const std::exception& e)
     {
-        if (error.empty())
-            error = std::string("Could not clean up GPIO backend: ") + e.what();
+        error = std::string("Could not map GPIO startup-quiesce peripherals: ") + e.what();
     }
     catch (...)
     {
-        if (error.empty())
-            error = "Could not clean up GPIO backend.";
+        error = "Could not map GPIO startup-quiesce peripherals.";
     }
+    try { mailbox.close(); } catch (...) {}
+    return false;
+}
 
-    return wsprrypi::StartupQuiesceResult{error.empty(), error};
+bool WsprRpiBackend::release_startup_quiesce_peripherals(std::string &error) noexcept
+{
+    bool ok = true;
+    try
+    {
+        if (dma_config_.peripheral_base_virtual != nullptr)
+        {
+            ::mailbox.unMapMem(dma_config_.peripheral_base_virtual, STARTUP_QUIESCE_MAP_SIZE);
+            dma_config_.peripheral_base_virtual = nullptr;
+        }
+        mailbox.close();
+    }
+    catch (const std::exception& e)
+    {
+        if (error.empty()) error = std::string("Could not release GPIO startup-quiesce resources: ") + e.what();
+        ok = false;
+    }
+    catch (...)
+    {
+        if (error.empty()) error = "Could not release GPIO startup-quiesce resources.";
+        ok = false;
+    }
+    return ok;
+}
+
+bool WsprRpiBackend::set_transmit_gpio_safe(std::string &error) noexcept
+{
+    try
+    {
+        std::uintptr_t offset = 0; unsigned shift = 0;
+        if (configured_tx_gpio_ == 4) { offset = 0; shift = 12; }
+        else if (configured_tx_gpio_ == 20) { offset = 8; shift = 0; }
+        else { error = "Unsupported GPIO backend transmit pin for startup quiesce."; return false; }
+        volatile uint32_t &gpfsel = access_bus_address(GPIO_BUS_BASE + offset);
+        gpfsel = static_cast<uint32_t>(gpfsel) & ~(uint32_t{0x7} << shift);
+        return true;
+    }
+    catch (...) { error = "Could not set GPIO backend transmit pin inactive."; return false; }
 }
 
 void WsprRpiBackend::stop() noexcept
