@@ -454,6 +454,12 @@ namespace
     };
 }
 
+std::shared_ptr<IRpiStartupQuiesceAccess>
+makeProductionRpiStartupQuiesceAccess()
+{
+    return std::make_shared<ProductionRpiStartupQuiesceAccess>();
+}
+
 WsprRpiBackend::DMAConfig::DMAConfig()
     : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
       plld_clock_frequency(plld_nominal_freq),
@@ -484,7 +490,7 @@ WsprRpiBackend::WsprRpiBackend(
       startup_quiesce_access_(
           startup_quiesce_access
               ? std::move(startup_quiesce_access)
-              : std::make_shared<ProductionRpiStartupQuiesceAccess>()),
+              : makeProductionRpiStartupQuiesceAccess()),
       configured_tx_gpio_(startup_quiesce_gpio)
 {
     const int ncpu = cpu_count();

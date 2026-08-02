@@ -98,6 +98,16 @@ public:
 };
 
 /**
+ * @brief Create the production fresh-process startup-quiesce access adapter.
+ *
+ * @details The concrete adapter and all raw MMIO details remain private to
+ * wspr_transmit_backend_rpi.cpp.  This factory exists for the separately
+ * built, guarded qualification executable.
+ */
+std::shared_ptr<IRpiStartupQuiesceAccess>
+makeProductionRpiStartupQuiesceAccess();
+
+/**
  * @class WsprRpiBackend
  * @brief Raspberry Pi implementation of the generic transmission backend.
  *
