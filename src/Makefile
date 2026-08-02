@@ -42,7 +42,10 @@ LOCAL_C_SOURCES   := $(shell find . -type f -name '*.c')
 LOCAL_CPP_SOURCES := $(shell find . -type f -name '*.cpp')
 SI5351_TEST_SOURCE := ./si5351_backend_harness.cpp
 STARTUP_QUIESCE_TEST_SOURCE := ./startup_quiesce_test.cpp
-LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE) $(STARTUP_QUIESCE_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
+SI5351_QUALIFICATION_SOURCE := ./si5351_startup_quiesce_qualification.cpp
+SI5351_QUALIFICATION_MAIN_SOURCE := ./si5351_startup_quiesce_qualification_main.cpp
+SI5351_QUALIFICATION_TEST_SOURCE := ./si5351_startup_quiesce_qualification_test.cpp
+LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE) $(STARTUP_QUIESCE_TEST_SOURCE) $(SI5351_QUALIFICATION_SOURCE) $(SI5351_QUALIFICATION_MAIN_SOURCE) $(SI5351_QUALIFICATION_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
 
 # Find in each submodule—but explicitly skip any “main” there:
 SUBMODULE_C_SOURCES   := $(shell find $(SUBMODULE_SRCDIRS) -type f -name '*.c'   ! -name 'main.c')
@@ -74,6 +77,11 @@ STARTUP_QUIESCE_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./si5351_device.o \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o \
 	$(OBJ_DIR_DEBUG)/Mailbox/src/mailbox.o
+SI5351_QUALIFICATION_OBJECTS := \
+	$(OBJ_DIR_DEBUG)/./si5351_startup_quiesce_qualification.o \
+	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_si5351.o \
+	$(OBJ_DIR_DEBUG)/./si5351_device.o \
+	$(OBJ_DIR_DEBUG)/./si5351_planner.o
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Linker Flags
@@ -187,6 +195,16 @@ build/bin/startup_quiesce_test: $(STARTUP_QUIESCE_TEST_OBJECTS)
 	$(Q)echo "Linking debug: startup_quiesce_test"
 	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
 
+build/bin/si5351_startup_quiesce_qualification: $(OBJ_DIR_DEBUG)/./si5351_startup_quiesce_qualification_main.o $(SI5351_QUALIFICATION_OBJECTS)
+
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
+build/bin/si5351_startup_quiesce_qualification_test: $(OBJ_DIR_DEBUG)/./si5351_startup_quiesce_qualification_test.o $(SI5351_QUALIFICATION_OBJECTS)
+
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
 # Generic release compile (your own code)
 $(OBJ_DIR_RELEASE)/%.o: %.cpp
 	$(Q)mkdir -p $(dir $@)
@@ -227,7 +245,7 @@ build/bin/$(OUT): $(CPP_OBJECTS) $(C_OBJECTS)
 ##
 # Phony targets
 ##
-.PHONY: clean release debug test si5351-test startup-quiesce-test gdb lint macros help
+.PHONY: clean release debug test si5351-test startup-quiesce-test si5351-startup-quiesce-qualification si5351-startup-quiesce-qualification-test gdb lint macros help
 
 clean:
 	$(Q)echo "Cleaning up build artifacts."
@@ -247,6 +265,12 @@ si5351-test: build/bin/si5351_backend_harness
 
 startup-quiesce-test: build/bin/startup_quiesce_test
 	$(Q)./build/bin/startup_quiesce_test
+
+si5351-startup-quiesce-qualification: build/bin/si5351_startup_quiesce_qualification
+	$(Q)echo "Built live qualification executable; it is not run by this target."
+
+si5351-startup-quiesce-qualification-test: build/bin/si5351_startup_quiesce_qualification_test
+	$(Q)./build/bin/si5351_startup_quiesce_qualification_test
 
 watchdog: debug
 	$(Q)$(SUDO) env WSPR_TX_INJECT_WD_STALL=5 ./build/bin/$(TEST_OUT) --now --oneshot
