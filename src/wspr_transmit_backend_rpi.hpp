@@ -32,14 +32,70 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "transmission_backend.hpp"
 #include "wspr_transmit_backend.hpp"
 #include "wspr_transmit.hpp"
+
+/**
+ * @brief Narrow register set used only to quiesce inherited GPIO transmitter
+ *        state before the backend has created its normal runtime mapping.
+ */
+enum class RpiStartupQuiesceRegister
+{
+    Dma0ControlStatus,
+    Dma0ControlBlockAddress,
+    Dma0TransferInformation,
+    Dma0SourceAddress,
+    Dma0DestinationAddress,
+    Dma0TransferLength,
+    Dma0Stride,
+    Dma0NextControlBlock,
+    Dma0Debug,
+    PwmControl,
+    PwmDmaConfiguration,
+    Gpclk0Control,
+    GpioFunctionSelect0,
+    GpioFunctionSelect2
+};
+
+/**
+ * @brief Typed access seam for fresh-process startup quiescence.
+ *
+ * @details This deliberately cannot expose arbitrary addresses, raw mappings,
+ * waveform memory, DMA allocation, or clock-frequency programming.
+ */
+class IRpiStartupQuiesceAccess
+{
+public:
+    virtual ~IRpiStartupQuiesceAccess() = default;
+
+    virtual bool supportedPlatform(std::string &error) = 0;
+    virtual bool discoverPeripheralBase(
+        std::uint32_t &base,
+        std::string &error) = 0;
+    virtual bool open(std::string &error) = 0;
+    virtual bool map(
+        std::uint32_t peripheral_base,
+        std::size_t size,
+        std::string &error) = 0;
+    virtual bool read(
+        RpiStartupQuiesceRegister reg,
+        std::uint32_t &value,
+        std::string &error) = 0;
+    virtual bool write(
+        RpiStartupQuiesceRegister reg,
+        std::uint32_t value,
+        std::string &error) = 0;
+    virtual bool unmap(std::size_t size, std::string &error) = 0;
+    virtual bool close(std::string &error) = 0;
+};
 
 /**
  * @class WsprRpiBackend
@@ -70,6 +126,11 @@ public:
      *              callback forwarding.
      */
     explicit WsprRpiBackend(IControllerBridge &owner);
+
+    WsprRpiBackend(
+        IControllerBridge &owner,
+        std::shared_ptr<IRpiStartupQuiesceAccess> startup_quiesce_access,
+        int startup_quiesce_gpio);
 
     /**
      * @brief Destroy the backend and release backend-owned resources.
@@ -303,9 +364,8 @@ private:
         bool &rf_enabled,
         int symbol_index);
     bool force_dma_reset_sequence() noexcept;
-    bool map_startup_quiesce_peripherals(std::string &error);
-    bool set_transmit_gpio_safe(std::string &error) noexcept;
-    bool release_startup_quiesce_peripherals(std::string &error) noexcept;
+    wsprrypi::StartupQuiesceResult quiesce_fresh_process();
+    bool set_mapped_transmit_gpio_safe(std::string &error) noexcept;
     void get_plld();
     void allocate_memory_pool(unsigned numpages);
     void get_real_mem_page_from_pool(void **vAddr, void **bAddr);
@@ -346,6 +406,7 @@ private:
         int symbol_index);
 
     IControllerBridge &owner_;
+    std::shared_ptr<IRpiStartupQuiesceAccess> startup_quiesce_access_;
 
     std::thread watchdog_thread_{};
     std::atomic<bool> watchdog_stop_{true};
