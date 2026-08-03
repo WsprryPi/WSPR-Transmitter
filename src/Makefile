@@ -41,7 +41,17 @@ BIN_DIR		 	= build/bin
 LOCAL_C_SOURCES   := $(shell find . -type f -name '*.c')
 LOCAL_CPP_SOURCES := $(shell find . -type f -name '*.cpp')
 SI5351_TEST_SOURCE := ./si5351_backend_harness.cpp
-LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
+STARTUP_QUIESCE_TEST_SOURCE := ./startup_quiesce_test.cpp
+SI5351_QUALIFICATION_SOURCE := ./si5351_startup_quiesce_qualification.cpp
+SI5351_QUALIFICATION_MAIN_SOURCE := ./si5351_startup_quiesce_qualification_main.cpp
+SI5351_QUALIFICATION_TEST_SOURCE := ./si5351_startup_quiesce_qualification_test.cpp
+# Qualification sources use .cc intentionally: normal dependency and parent
+# discovery include only .cpp files.  They are compiled solely by explicit
+# guarded qualification targets below.
+GPIO_QUALIFICATION_SOURCE := ./gpio_startup_quiesce_qualification.cc
+GPIO_QUALIFICATION_MAIN_SOURCE := ./gpio_startup_quiesce_qualification_main.cc
+GPIO_QUALIFICATION_TEST_SOURCE := ./gpio_startup_quiesce_qualification_test.cc
+LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE) $(STARTUP_QUIESCE_TEST_SOURCE) $(SI5351_QUALIFICATION_SOURCE) $(SI5351_QUALIFICATION_MAIN_SOURCE) $(SI5351_QUALIFICATION_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
 
 # Find in each submodule—but explicitly skip any “main” there:
 SUBMODULE_C_SOURCES   := $(shell find $(SUBMODULE_SRCDIRS) -type f -name '*.c'   ! -name 'main.c')
@@ -65,6 +75,23 @@ SI5351_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_si5351.o \
 	$(OBJ_DIR_DEBUG)/./si5351_device.o \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o
+STARTUP_QUIESCE_TEST_OBJECTS := \
+	$(OBJ_DIR_DEBUG)/./startup_quiesce_test.o \
+	$(OBJ_DIR_DEBUG)/./transmission_controller.o \
+	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_rpi.o \
+	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_si5351.o \
+	$(OBJ_DIR_DEBUG)/./si5351_device.o \
+	$(OBJ_DIR_DEBUG)/./si5351_planner.o \
+	$(OBJ_DIR_DEBUG)/Mailbox/src/mailbox.o
+SI5351_QUALIFICATION_OBJECTS := \
+	$(OBJ_DIR_DEBUG)/./si5351_startup_quiesce_qualification.o \
+	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_si5351.o \
+	$(OBJ_DIR_DEBUG)/./si5351_device.o \
+	$(OBJ_DIR_DEBUG)/./si5351_planner.o
+GPIO_QUALIFICATION_OBJECTS := \
+	$(OBJ_DIR_DEBUG)/./gpio_startup_quiesce_qualification.o \
+	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_rpi.o \
+	$(OBJ_DIR_DEBUG)/Mailbox/src/mailbox.o
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Linker Flags
@@ -104,6 +131,7 @@ CXXFLAGS += $(COMMON_FLAGS) $(COMM_CXX_FLAGS)
 
 # Include paths
 CXXFLAGS += -I$(abspath .)
+CXXFLAGS += -I$(abspath ../..)
 CXXFLAGS += $(foreach dir,$(SUBMODULE_SRCDIRS),-I$(abspath $(dir)))
 CXXFLAGS += -I$(abspath ../../WSPR-Reference/src/wspr)
 
@@ -143,6 +171,13 @@ $(OBJ_DIR_DEBUG)/%.o: %.cpp
 	$(Q)echo "Compiling (debug) $< into $@"
 	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) -MF $(DEP_DIR)/$*.d -c $< -o $@
 
+# Explicitly named qualification-only .cc sources are never broadly discovered.
+$(OBJ_DIR_DEBUG)/%.o: %.cc
+	$(Q)mkdir -p $(dir $@)
+	$(Q)mkdir -p $(DEP_DIR)/$(dir $*)
+	$(Q)echo "Compiling qualification (debug) $< into $@"
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) -MF $(DEP_DIR)/$*.d -c $< -o $@
+
 # Auto‑generate debug compile rules for each submodule
 define MAKE_DEBUG_SUBMOD_RULES
 $(OBJ_DIR_DEBUG)/$(patsubst ../../%,%,$(1))/%.o: $(1)/%.cpp
@@ -170,6 +205,31 @@ build/bin/$(TEST_OUT): $(CPP_DEBUG_OBJECTS) $(C_DEBUG_OBJECTS)
 build/bin/si5351_backend_harness: $(SI5351_TEST_OBJECTS)
 	$(Q)mkdir -p $(BIN_DIR)
 	$(Q)echo "Linking debug: si5351_backend_harness"
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
+build/bin/startup_quiesce_test: $(STARTUP_QUIESCE_TEST_OBJECTS)
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)echo "Linking debug: startup_quiesce_test"
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
+build/bin/si5351_startup_quiesce_qualification: $(OBJ_DIR_DEBUG)/./si5351_startup_quiesce_qualification_main.o $(SI5351_QUALIFICATION_OBJECTS)
+
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
+build/bin/si5351_startup_quiesce_qualification_test: $(OBJ_DIR_DEBUG)/./si5351_startup_quiesce_qualification_test.o $(SI5351_QUALIFICATION_OBJECTS)
+
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
+build/bin/gpio_startup_quiesce_qualification: $(OBJ_DIR_DEBUG)/./gpio_startup_quiesce_qualification_main.o $(GPIO_QUALIFICATION_OBJECTS)
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)echo "Linking guarded live GPIO startup-quiesce qualification executable"
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
+build/bin/gpio_startup_quiesce_qualification_test: $(OBJ_DIR_DEBUG)/./gpio_startup_quiesce_qualification_test.o $(GPIO_QUALIFICATION_OBJECTS)
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)echo "Linking fake GPIO startup-quiesce qualification tests"
 	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
 
 # Generic release compile (your own code)
@@ -212,7 +272,7 @@ build/bin/$(OUT): $(CPP_OBJECTS) $(C_OBJECTS)
 ##
 # Phony targets
 ##
-.PHONY: clean release debug test si5351-test gdb lint macros help
+.PHONY: clean release debug test si5351-test startup-quiesce-test si5351-startup-quiesce-qualification si5351-startup-quiesce-qualification-test gpio-startup-quiesce-qualification gpio-startup-quiesce-qualification-test gdb lint macros help
 
 clean:
 	$(Q)echo "Cleaning up build artifacts."
@@ -229,6 +289,21 @@ test: debug
 
 si5351-test: build/bin/si5351_backend_harness
 	$(Q)echo "Si5351 backend harness built successfully."
+
+startup-quiesce-test: build/bin/startup_quiesce_test
+	$(Q)./build/bin/startup_quiesce_test
+
+si5351-startup-quiesce-qualification: build/bin/si5351_startup_quiesce_qualification
+	$(Q)echo "Built live qualification executable; it is not run by this target."
+
+si5351-startup-quiesce-qualification-test: build/bin/si5351_startup_quiesce_qualification_test
+	$(Q)./build/bin/si5351_startup_quiesce_qualification_test
+
+gpio-startup-quiesce-qualification: build/bin/gpio_startup_quiesce_qualification
+	$(Q)echo "Built guarded live GPIO startup-quiesce qualification executable; it is not run by this target."
+
+gpio-startup-quiesce-qualification-test: build/bin/gpio_startup_quiesce_qualification_test
+	$(Q)./build/bin/gpio_startup_quiesce_qualification_test
 
 watchdog: debug
 	$(Q)$(SUDO) env WSPR_TX_INJECT_WD_STALL=5 ./build/bin/$(TEST_OUT) --now --oneshot
@@ -254,6 +329,9 @@ help:
 	$(Q)echo "  debug      Build debug binary"
 	$(Q)echo "  test       Run tests"
 	$(Q)echo "  si5351-test Build temporary Si5351 backend harness"
+	$(Q)echo "  startup-quiesce-test Build and run non-hardware startup-quiesce tests"
+	$(Q)echo "  gpio-startup-quiesce-qualification Build guarded live qualification executable only"
+	$(Q)echo "  gpio-startup-quiesce-qualification-test Run fake qualification tests"
 	$(Q)echo "  watchdog   Run tests with watchdog fail"
 	$(Q)echo "  gdb        Debug with gdb"
 	$(Q)echo "  lint       Static analysis"

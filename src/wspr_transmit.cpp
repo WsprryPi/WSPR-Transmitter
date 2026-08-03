@@ -459,6 +459,24 @@ void WsprTransmitter::selectBackend(
             *backend_);
 }
 
+wsprrypi::StartupQuiesceResult WsprTransmitter::quiesceForStartup()
+{
+    if (transmission_controller_ == nullptr || backend_ == nullptr)
+    {
+        return {false, "Startup quiesce is unavailable because no transmission backend is selected."};
+    }
+
+    if (state_.load(std::memory_order_acquire) != State::DISABLED ||
+        current_request_.actual_rf_frequency_hz != 0.0 ||
+        !current_execution_plan_.events.empty() ||
+        transmission_controller_->prepared_plan() != nullptr)
+    {
+        return {false, "Startup quiesce is only valid before transmission configuration or scheduling."};
+    }
+
+    return transmission_controller_->quiesceForStartup();
+}
+
 void WsprTransmitter::setTransmissionCallbacks(TransmissionCallback cb)
 {
     on_transmit_cb_ = std::move(cb);

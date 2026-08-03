@@ -275,6 +275,189 @@ namespace
         const char *env = std::getenv("WSPRYPI_TRACE_WSPR_TONES");
         return env != nullptr && env[0] != '\0' && env[0] != '0';
     }
+
+    class ProductionRpiStartupQuiesceAccess final
+        : public IRpiStartupQuiesceAccess
+    {
+    public:
+        bool supportedPlatform(std::string &error) override
+        {
+            return platform_supports_gpio_clock_transmission(&error);
+        }
+
+        bool discoverPeripheralBase(
+            std::uint32_t &base,
+            std::string &error) override
+        {
+            if (opened_ || mapped_ != nullptr)
+                return fail(error, "Peripheral discovery requested after startup-quiesce access opened.");
+            try
+            {
+                base = Mailbox::discoverPeripheralBase();
+                return true;
+            }
+            catch (const std::exception &e)
+            {
+                return fail(error, std::string("Could not discover peripheral base: ") + e.what());
+            }
+            catch (...)
+            {
+                return fail(error, "Could not discover peripheral base.");
+            }
+        }
+
+        bool open(std::string &error) override
+        {
+            if (opened_ || mapped_ != nullptr)
+                return fail(error, "Startup-quiesce access is already open.");
+            try
+            {
+                mailbox.open();
+                opened_ = true;
+                return true;
+            }
+            catch (const std::exception &e)
+            {
+                return fail(error, std::string("Could not open startup-quiesce access: ") + e.what());
+            }
+            catch (...)
+            {
+                return fail(error, "Could not open startup-quiesce access.");
+            }
+        }
+
+        bool map(
+            std::uint32_t peripheral_base,
+            std::size_t size,
+            std::string &error) override
+        {
+            if (!opened_ || mapped_ != nullptr)
+                return fail(error, "Startup-quiesce map requested in an invalid lifecycle state.");
+            if (size != kMapSize)
+                return fail(error, "Startup-quiesce map size was not exactly 0x210000 bytes.");
+            try
+            {
+                mapped_ = mailbox.mapMem(peripheral_base, size);
+                if (mapped_ == nullptr)
+                    return fail(error, "Startup-quiesce peripheral mapping returned null.");
+                return true;
+            }
+            catch (const std::exception &e)
+            {
+                return fail(error, std::string("Could not map startup-quiesce peripherals: ") + e.what());
+            }
+            catch (...)
+            {
+                return fail(error, "Could not map startup-quiesce peripherals.");
+            }
+        }
+
+        bool read(
+            RpiStartupQuiesceRegister reg,
+            std::uint32_t &value,
+            std::string &error) override
+        {
+            volatile std::uint32_t *address = registerAddress(reg, error);
+            if (address == nullptr)
+                return false;
+            value = *address;
+            return true;
+        }
+
+        bool write(
+            RpiStartupQuiesceRegister reg,
+            std::uint32_t value,
+            std::string &error) override
+        {
+            volatile std::uint32_t *address = registerAddress(reg, error);
+            if (address == nullptr)
+                return false;
+            *address = value;
+            return true;
+        }
+
+        bool unmap(std::size_t size, std::string &error) override
+        {
+            if (!opened_ || mapped_ == nullptr || size != kMapSize)
+                return fail(error, "Startup-quiesce unmap requested in an invalid lifecycle state.");
+            try
+            {
+                mailbox.unMapMem(mapped_, size);
+                mapped_ = nullptr;
+                return true;
+            }
+            catch (const std::exception &e)
+            {
+                return fail(error, std::string("Could not unmap startup-quiesce peripherals: ") + e.what());
+            }
+            catch (...)
+            {
+                return fail(error, "Could not unmap startup-quiesce peripherals.");
+            }
+        }
+
+        bool close(std::string &error) override
+        {
+            if (!opened_ || mapped_ != nullptr)
+                return fail(error, "Startup-quiesce close requested in an invalid lifecycle state.");
+            mailbox.close();
+            opened_ = false;
+            return true;
+        }
+
+    private:
+        static constexpr std::size_t kMapSize = 0x210000;
+
+        static bool fail(std::string &error, const std::string &message)
+        {
+            if (error.empty())
+                error = message;
+            return false;
+        }
+
+        volatile std::uint32_t *registerAddress(
+            RpiStartupQuiesceRegister reg,
+            std::string &error)
+        {
+            if (!opened_ || mapped_ == nullptr)
+            {
+                fail(error, "Startup-quiesce register access requested while unmapped.");
+                return nullptr;
+            }
+
+            std::size_t offset = 0;
+            switch (reg)
+            {
+            case RpiStartupQuiesceRegister::Dma0ControlStatus: offset = 0x7000; break;
+            case RpiStartupQuiesceRegister::Dma0ControlBlockAddress: offset = 0x7004; break;
+            case RpiStartupQuiesceRegister::Dma0TransferInformation: offset = 0x7008; break;
+            case RpiStartupQuiesceRegister::Dma0SourceAddress: offset = 0x700c; break;
+            case RpiStartupQuiesceRegister::Dma0DestinationAddress: offset = 0x7010; break;
+            case RpiStartupQuiesceRegister::Dma0TransferLength: offset = 0x7014; break;
+            case RpiStartupQuiesceRegister::Dma0Stride: offset = 0x7018; break;
+            case RpiStartupQuiesceRegister::Dma0NextControlBlock: offset = 0x701c; break;
+            case RpiStartupQuiesceRegister::Dma0Debug: offset = 0x7020; break;
+            case RpiStartupQuiesceRegister::PwmControl: offset = 0x20c000; break;
+            case RpiStartupQuiesceRegister::PwmDmaConfiguration: offset = 0x20c008; break;
+            case RpiStartupQuiesceRegister::Gpclk0Control: offset = 0x101070; break;
+            case RpiStartupQuiesceRegister::GpioFunctionSelect0: offset = 0x200000; break;
+            case RpiStartupQuiesceRegister::GpioFunctionSelect2: offset = 0x200008; break;
+            default:
+                fail(error, "Unknown startup-quiesce register identifier.");
+                return nullptr;
+            }
+            return reinterpret_cast<volatile std::uint32_t *>(mapped_ + offset);
+        }
+
+        bool opened_{false};
+        volatile std::uint8_t *mapped_{nullptr};
+    };
+}
+
+std::shared_ptr<IRpiStartupQuiesceAccess>
+makeProductionRpiStartupQuiesceAccess()
+{
+    return std::make_shared<ProductionRpiStartupQuiesceAccess>();
 }
 
 WsprRpiBackend::DMAConfig::DMAConfig()
@@ -295,7 +478,20 @@ WsprRpiBackend::DMAConfig::DMAConfig()
 }
 
 WsprRpiBackend::WsprRpiBackend(IControllerBridge &owner)
-    : owner_(owner)
+    : WsprRpiBackend(owner, nullptr, 4)
+{
+}
+
+WsprRpiBackend::WsprRpiBackend(
+    IControllerBridge &owner,
+    std::shared_ptr<IRpiStartupQuiesceAccess> startup_quiesce_access,
+    int startup_quiesce_gpio)
+    : owner_(owner),
+      startup_quiesce_access_(
+          startup_quiesce_access
+              ? std::move(startup_quiesce_access)
+              : makeProductionRpiStartupQuiesceAccess()),
+      configured_tx_gpio_(startup_quiesce_gpio)
 {
     const int ncpu = cpu_count();
     watchdog_cpu_ = clamp_cpu(watchdog_cpu_, ncpu);
@@ -496,6 +692,259 @@ wsprrypi::ExecutionResult WsprRpiBackend::execute(
         result.error = e.what();
         return result;
     }
+}
+
+wsprrypi::StartupQuiesceResult WsprRpiBackend::quiesceForStartup()
+{
+    std::string error;
+
+    try
+    {
+        stop_watchdog();
+    }
+    catch (const std::exception& e)
+    {
+        error = std::string("Could not stop GPIO backend watchdog: ") +
+            e.what();
+    }
+    catch (...)
+    {
+        error = "Could not stop GPIO backend watchdog.";
+    }
+
+    if (dma_config_.peripheral_base_virtual == nullptr)
+    {
+        if (!error.empty())
+            return {false, error};
+        return quiesce_fresh_process();
+    }
+
+    if (!platform_supports_gpio_clock_transmission(&error))
+    {
+        if (error.empty())
+            error = "GPIO startup quiesce is unavailable on this platform.";
+        return {false, error};
+    }
+
+    if (!force_dma_reset_sequence() && error.empty())
+    {
+        error = "Could not reset GPIO backend DMA and clock state.";
+    }
+
+    if (!set_mapped_transmit_gpio_safe(error) && error.empty())
+        error = "Could not return the GPIO backend transmit pin to input mode.";
+
+    return wsprrypi::StartupQuiesceResult{error.empty(), error};
+}
+
+wsprrypi::StartupQuiesceResult WsprRpiBackend::quiesce_fresh_process()
+{
+    constexpr std::size_t map_size = 0x210000;
+    constexpr std::uint32_t dma_reset_abort = (1u << 30) | (1u << 31);
+    constexpr std::uint32_t dma_abort = 1u << 31;
+    constexpr std::uint32_t clock_password = 0x5a000000u;
+    constexpr std::uint32_t clock_busy = 1u << 7;
+    constexpr std::uint32_t clock_kill = 1u << 5;
+
+    std::string error;
+    std::uint32_t peripheral_base = 0;
+    bool opened = false;
+    bool mapped = false;
+
+    auto retain_error = [&error](const std::string &fallback)
+    {
+        if (error.empty())
+            error = fallback;
+    };
+    auto write = [&](RpiStartupQuiesceRegister reg, std::uint32_t value,
+                     const char *fallback)
+    {
+        if (!startup_quiesce_access_->write(reg, value, error))
+        {
+            retain_error(fallback);
+            return false;
+        }
+        return true;
+    };
+    auto read = [&](RpiStartupQuiesceRegister reg, std::uint32_t &value,
+                    const char *fallback)
+    {
+        if (!startup_quiesce_access_->read(reg, value, error))
+        {
+            retain_error(fallback);
+            return false;
+        }
+        return true;
+    };
+
+    if (!startup_quiesce_access_->supportedPlatform(error))
+    {
+        retain_error("GPIO startup quiesce is unavailable on this platform.");
+        return {false, error};
+    }
+    if (configured_tx_gpio_ != 4 && configured_tx_gpio_ != 20)
+    {
+        retain_error("Unsupported GPIO backend transmit pin for startup quiesce.");
+        return {false, error};
+    }
+    if (!startup_quiesce_access_->discoverPeripheralBase(peripheral_base, error))
+    {
+        retain_error("Could not discover GPIO startup-quiesce peripheral base.");
+        return {false, error};
+    }
+    if (!startup_quiesce_access_->open(error))
+    {
+        retain_error("Could not open GPIO startup-quiesce peripheral access.");
+        return {false, error};
+    }
+    opened = true;
+    if (!startup_quiesce_access_->map(peripheral_base, map_size, error))
+    {
+        retain_error("Could not map GPIO startup-quiesce peripherals.");
+    }
+    else
+    {
+        mapped = true;
+    }
+
+    bool sequence_ok = mapped;
+    if (sequence_ok)
+    {
+        sequence_ok =
+            write(RpiStartupQuiesceRegister::Dma0ControlStatus,
+                  dma_reset_abort, "Could not reset DMA channel 0.") &&
+            (::usleep(10), true) &&
+            write(RpiStartupQuiesceRegister::Dma0ControlStatus,
+                  dma_abort, "Could not stop DMA channel 0.") &&
+            write(RpiStartupQuiesceRegister::Dma0ControlBlockAddress,
+                  0, "Could not clear DMA channel 0 control block.") &&
+            write(RpiStartupQuiesceRegister::Dma0TransferInformation,
+                  0, "Could not clear DMA channel 0 transfer information.") &&
+            write(RpiStartupQuiesceRegister::Dma0SourceAddress,
+                  0, "Could not clear DMA channel 0 source address.") &&
+            write(RpiStartupQuiesceRegister::Dma0DestinationAddress,
+                  0, "Could not clear DMA channel 0 destination address.") &&
+            write(RpiStartupQuiesceRegister::Dma0TransferLength,
+                  0, "Could not clear DMA channel 0 transfer length.") &&
+            write(RpiStartupQuiesceRegister::Dma0Stride,
+                  0, "Could not clear DMA channel 0 stride.") &&
+            write(RpiStartupQuiesceRegister::Dma0NextControlBlock,
+                  0, "Could not clear DMA channel 0 next control block.") &&
+            write(RpiStartupQuiesceRegister::Dma0Debug,
+                  7, "Could not clear DMA channel 0 debug state.");
+    }
+
+    if (sequence_ok)
+    {
+        sequence_ok =
+            write(RpiStartupQuiesceRegister::PwmControl,
+                  0, "Could not disable PWM during startup quiesce.") &&
+            write(RpiStartupQuiesceRegister::PwmDmaConfiguration,
+                  0, "Could not disable PWM DMA during startup quiesce.");
+    }
+
+    if (sequence_ok)
+    {
+        std::uint32_t control = 0;
+        sequence_ok = read(
+            RpiStartupQuiesceRegister::Gpclk0Control,
+            control,
+            "Could not read GPCLK0 control during startup quiesce.");
+        if (sequence_ok)
+        {
+            control = (control & 0x7efu) | clock_password;
+            sequence_ok = write(
+                RpiStartupQuiesceRegister::Gpclk0Control,
+                control,
+                "Could not disable GPCLK0 during startup quiesce.");
+        }
+
+        bool not_busy = false;
+        for (int poll = 0; sequence_ok && poll < 2000; ++poll)
+        {
+            sequence_ok = read(
+                RpiStartupQuiesceRegister::Gpclk0Control,
+                control,
+                "Could not confirm GPCLK0 shutdown during startup quiesce.");
+            if (sequence_ok && (control & clock_busy) == 0)
+            {
+                not_busy = true;
+                break;
+            }
+            if (sequence_ok)
+                ::usleep(100);
+        }
+        if (sequence_ok && !not_busy)
+        {
+            control |= clock_kill | clock_password;
+            sequence_ok = write(
+                RpiStartupQuiesceRegister::Gpclk0Control,
+                control,
+                "Could not kill GPCLK0 during startup quiesce.");
+            if (sequence_ok)
+            {
+                sequence_ok = read(
+                    RpiStartupQuiesceRegister::Gpclk0Control,
+                    control,
+                    "Could not confirm killed GPCLK0 state.");
+            }
+        }
+    }
+
+    if (sequence_ok)
+    {
+        RpiStartupQuiesceRegister gpio_register;
+        unsigned shift = 0;
+        if (configured_tx_gpio_ == 4)
+        {
+            gpio_register = RpiStartupQuiesceRegister::GpioFunctionSelect0;
+            shift = 12;
+        }
+        else if (configured_tx_gpio_ == 20)
+        {
+            gpio_register = RpiStartupQuiesceRegister::GpioFunctionSelect2;
+            shift = 0;
+        }
+        else
+        {
+            retain_error("Unsupported GPIO backend transmit pin for startup quiesce.");
+            sequence_ok = false;
+        }
+
+        std::uint32_t function_select = 0;
+        if (sequence_ok)
+            sequence_ok = read(
+                gpio_register,
+                function_select,
+                "Could not read transmit GPIO function select.");
+        if (sequence_ok)
+            sequence_ok = write(
+                gpio_register,
+                function_select & ~(std::uint32_t{0x7} << shift),
+                "Could not return transmit GPIO to input mode.");
+    }
+
+    if (mapped && !startup_quiesce_access_->unmap(map_size, error))
+        retain_error("Could not unmap GPIO startup-quiesce peripherals.");
+    if (opened && !startup_quiesce_access_->close(error))
+        retain_error("Could not close GPIO startup-quiesce peripheral access.");
+
+    return {sequence_ok && error.empty(), error};
+}
+
+bool WsprRpiBackend::set_mapped_transmit_gpio_safe(std::string &error) noexcept
+{
+    try
+    {
+        std::uintptr_t offset = 0; unsigned shift = 0;
+        if (configured_tx_gpio_ == 4) { offset = 0; shift = 12; }
+        else if (configured_tx_gpio_ == 20) { offset = 8; shift = 0; }
+        else { error = "Unsupported GPIO backend transmit pin for startup quiesce."; return false; }
+        volatile uint32_t &gpfsel = access_bus_address(GPIO_BUS_BASE + offset);
+        gpfsel = static_cast<uint32_t>(gpfsel) & ~(uint32_t{0x7} << shift);
+        return true;
+    }
+    catch (...) { error = "Could not set GPIO backend transmit pin inactive."; return false; }
 }
 
 void WsprRpiBackend::stop() noexcept
@@ -736,7 +1185,7 @@ void WsprRpiBackend::emitSymbol(
 void WsprRpiBackend::resetTransmissionOutput() noexcept
 {
     dma_buf_ptr_ = 0;
-    force_dma_reset_sequence();
+    (void)force_dma_reset_sequence();
 }
 
 bool WsprRpiBackend::faulted() const noexcept
@@ -1366,11 +1815,11 @@ void WsprRpiBackend::stop_watchdog()
     }
 }
 
-void WsprRpiBackend::force_dma_reset_sequence() noexcept
+bool WsprRpiBackend::force_dma_reset_sequence() noexcept
 {
     if (dma_config_.peripheral_base_virtual == nullptr)
     {
-        return;
+        return true;
     }
 
     try
@@ -1394,9 +1843,11 @@ void WsprRpiBackend::force_dma_reset_sequence() noexcept
         access_bus_address(PWM_BUS_BASE + 0x08) = 0;
 
         disable_clock();
+        return true;
     }
     catch (...)
     {
+        return false;
     }
 }
 

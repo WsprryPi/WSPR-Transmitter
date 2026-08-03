@@ -6,6 +6,7 @@
 #include "transmission_backend.hpp"
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,7 @@ public:
     {
         Si5351Device::Config device;
         Si5351Planner::Config planner;
+        std::shared_ptr<Si5351Device::I2CAdapter> device_adapter{};
 
         /**
          * @brief Si5351 drive-strength power level.
@@ -108,6 +110,9 @@ public:
      */
     wsprrypi::ExecutionResult execute(
         const wsprrypi::ExecutionPlan& plan) override;
+
+    /** Disable every Si5351 output without configuring transmission state. */
+    wsprrypi::StartupQuiesceResult quiesceForStartup() override;
 
     /**
      * @brief Request transmission stop.

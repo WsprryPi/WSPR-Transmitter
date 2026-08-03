@@ -60,6 +60,13 @@ struct ExecutionResult
     std::string error;
 };
 
+/** Result of placing a backend into its safe startup state. */
+struct StartupQuiesceResult
+{
+    bool ok{false};
+    std::string error;
+};
+
 class ITransmissionBackend
 {
 public:
@@ -72,6 +79,7 @@ public:
         const ExecutionPlan& plan,
         const BackendExecutionInputs& inputs) = 0;
     virtual ExecutionResult execute(const ExecutionPlan& plan) = 0;
+    virtual StartupQuiesceResult quiesceForStartup() = 0;
 
     virtual void stop() noexcept = 0;
     virtual void cleanup() noexcept = 0;

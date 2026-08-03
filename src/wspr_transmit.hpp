@@ -286,6 +286,12 @@ public:
         const Si5351RuntimeConfig &si5351_config);
 
     /**
+     * Place the selected backend into its safe startup state before any
+     * execution request is configured or scheduled.
+     */
+    wsprrypi::StartupQuiesceResult quiesceForStartup();
+
+    /**
      * @brief Configure POSIX scheduling policy and priority for future
      *        transmissions.
      *

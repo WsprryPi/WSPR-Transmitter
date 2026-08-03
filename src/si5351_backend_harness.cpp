@@ -264,6 +264,10 @@ namespace
                 throw std::runtime_error(context);
         }
 
+        void backendReportExecutionProgress(std::size_t) noexcept override
+        {
+        }
+
         void backendFireTransmitCallback(
             WsprTransmissionCallbackEvent event,
             WsprTransmitLogLevel level,

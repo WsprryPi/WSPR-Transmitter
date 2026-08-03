@@ -29,6 +29,7 @@
 #include <cstring>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include <fcntl.h>
 #include <linux/i2c-dev.h>
@@ -94,6 +95,35 @@ namespace
                << std::strerror(errno);
         return stream.str();
     }
+
+    class LinuxI2CAdapter final : public Si5351Device::I2CAdapter
+    {
+    public:
+        int openDevice(const std::string& path, int flags) override
+        {
+            return ::open(path.c_str(), flags);
+        }
+
+        int selectSlave(int fd, std::uint8_t address) override
+        {
+            return ::ioctl(fd, I2C_SLAVE, address);
+        }
+
+        ssize_t writeData(int fd, const void* data, std::size_t size) override
+        {
+            return ::write(fd, data, size);
+        }
+
+        ssize_t readData(int fd, void* data, std::size_t size) override
+        {
+            return ::read(fd, data, size);
+        }
+
+        int closeDevice(int fd) override
+        {
+            return ::close(fd);
+        }
+    };
 }
 
 /**
@@ -101,8 +131,11 @@ namespace
  *
  * @param config Device access and reference configuration
  */
-Si5351Device::Si5351Device(const Config& config)
+Si5351Device::Si5351Device(
+    const Config& config,
+    std::shared_ptr<I2CAdapter> adapter)
     : config_(config),
+      adapter_(adapter ? std::move(adapter) : std::make_shared<LinuxI2CAdapter>()),
       fd_(-1),
       last_error_(),
       cache_valid_(256, false),
@@ -129,17 +162,17 @@ bool Si5351Device::open()
     clearRegisterCache();
 
     const std::string path = buildI2CDevicePath();
-    fd_ = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
+    fd_ = adapter_->openDevice(path, O_RDWR | O_CLOEXEC);
     if (fd_ < 0)
     {
         setLastError(system_error_message("Open", path));
         return false;
     }
 
-    if (::ioctl(fd_, I2C_SLAVE, config_.i2c_address) < 0)
+    if (adapter_->selectSlave(fd_, config_.i2c_address) < 0)
     {
         setLastError(system_error_message("Select I2C slave", path));
-        ::close(fd_);
+        (void)adapter_->closeDevice(fd_);
         fd_ = -1;
         clearRegisterCache();
         return false;
@@ -153,7 +186,7 @@ void Si5351Device::close()
 {
     if (fd_ >= 0)
     {
-        (void)::close(fd_);
+        (void)adapter_->closeDevice(fd_);
         fd_ = -1;
     }
 
@@ -269,7 +302,7 @@ bool Si5351Device::writeRegister(
     }
 
     const std::uint8_t buffer[2] = {address, value};
-    const ssize_t written = ::write(fd_, buffer, sizeof(buffer));
+    const ssize_t written = adapter_->writeData(fd_, buffer, sizeof(buffer));
     if (written != static_cast<ssize_t>(sizeof(buffer)))
     {
         std::ostringstream stream;
@@ -299,7 +332,8 @@ bool Si5351Device::readRegister(
         return false;
     }
 
-    const ssize_t address_written = ::write(fd_, &address, sizeof(address));
+    const ssize_t address_written =
+        adapter_->writeData(fd_, &address, sizeof(address));
     if (address_written != static_cast<ssize_t>(sizeof(address)))
     {
         std::ostringstream stream;
@@ -313,7 +347,7 @@ bool Si5351Device::readRegister(
         return false;
     }
 
-    const ssize_t bytes_read = ::read(fd_, &value, sizeof(value));
+    const ssize_t bytes_read = adapter_->readData(fd_, &value, sizeof(value));
     if (bytes_read != static_cast<ssize_t>(sizeof(value)))
     {
         std::ostringstream stream;
