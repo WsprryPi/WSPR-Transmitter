@@ -43,6 +43,7 @@ public:
     struct Config
     {
         std::uint32_t reference_hz = 27000000;
+        double calibration_ppm = 0.0;
         std::uint64_t parked_pll_hz = 850000000;
         Si5351Device::Output tx_output = Si5351Device::Output::CLK0;
         bool park_unused_outputs = true;
@@ -112,6 +113,8 @@ public:
     struct Plan
     {
         Mode mode = Mode::TONE;
+        double calibration_ppm = 0.0;
+        double effective_reference_hz = 0.0;
         std::vector<Si5351Device::RegisterWrite> startup_writes;
         std::vector<Si5351Device::RegisterWrite> idle_writes;
         std::vector<ToneRegisterSet> tone_sets;
@@ -174,6 +177,16 @@ private:
      * @return Achievable output frequency
      */
     double quantizeFrequency(double requested_hz) const;
+
+    /**
+     * @brief Return the calibrated reference used for synthesis planning
+     *
+     * Uses the existing GPIO-compatible convention: a positive correction
+     * lowers the effective reference by the requested parts per million.
+     *
+     * @return Finite positive effective reference, or zero when unusable
+     */
+    double effectiveReferenceHz() const noexcept;
 
     Config config_;
 };

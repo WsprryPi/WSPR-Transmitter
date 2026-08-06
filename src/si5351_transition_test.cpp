@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -151,15 +152,17 @@ namespace
         void backendFireTransmitCallback(
             WsprTransmissionCallbackEvent,
             WsprTransmitLogLevel,
-            const std::string&,
+            const std::string& message,
             double) override
         {
+            logs.push_back(message);
         }
         bool backendRestartCurrentConfiguration() override { return false; }
 
         std::size_t progress_calls = 0;
         std::size_t wait_calls = 0;
         std::size_t interrupt_on_wait_call = 0;
+        std::vector<std::string> logs;
 
     private:
         std::atomic<WsprTransmitState> state_{WsprTransmitState::ENABLED};
@@ -237,6 +240,74 @@ namespace
                 ++count;
         }
         return count;
+    }
+
+    bool has_log(const TestBridge& bridge, const std::string& text)
+    {
+        for (const std::string& message : bridge.logs)
+        {
+            if (message.find(text) != std::string::npos)
+                return true;
+        }
+        return false;
+    }
+
+    void test_committed_calibration_snapshot_and_reporting()
+    {
+        TestBridge bridge;
+        auto adapter = std::make_shared<FakeI2CAdapter>();
+        WsprSi5351Backend backend(bridge, config(adapter));
+        wsprrypi::ExecutionPlan plan = four_tone_plan(4);
+        plan.calibration.ppm = 2.409358;
+
+        expect(configure(backend, plan),
+            "committed positive calibration should configure");
+        expect(has_log(bridge, "Si5351 calibration: ppm=2.409358"),
+            "backend should report the committed calibration PPM");
+        expect(has_log(bridge, "nominal reference=27000000"),
+            "backend should report the nominal Si5351 reference");
+        expect(has_log(bridge, "effective reference=26999934"),
+            "backend should report the calibrated effective reference");
+        expect(has_log(bridge, "requested RF=144490497"),
+            "backend should report requested RF separately");
+        expect(has_log(bridge, "calculated output=144490497"),
+            "backend should report calculated output separately");
+        expect(adapter->open_calls == 0 && adapter->select_calls == 0 &&
+                adapter->writes.empty(),
+            "configuration and reporting must not access I2C");
+    }
+
+    void test_invalid_calibration_fails_before_output_enable()
+    {
+        const double invalid_ppm[] = {
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),
+            -std::numeric_limits<double>::infinity(),
+            201.0};
+
+        for (const double ppm : invalid_ppm)
+        {
+            TestBridge bridge;
+            auto adapter = std::make_shared<FakeI2CAdapter>();
+            WsprSi5351Backend backend(bridge, config(adapter));
+            wsprrypi::ExecutionPlan plan = four_tone_plan(4);
+            plan.calibration.ppm = ppm;
+
+            const wsprrypi::BackendCompileResult result = backend.configure(
+                plan,
+                wsprrypi::BackendExecutionInputs{1, 0});
+            expect(!result.ok &&
+                    result.error.find("calibration PPM") !=
+                        std::string::npos,
+                "invalid calibration should fail with a calibration error");
+            expect(adapter->open_calls == 0 && adapter->select_calls == 0 &&
+                    adapter->close_calls == 0 && adapter->writes.empty() &&
+                    count_write(
+                        *adapter,
+                        kOutputEnableRegister,
+                        kClk0Enabled) == 0,
+                "invalid calibration must fail before I2C output enable");
+        }
     }
 
     void test_162_symbol_transition_order()
@@ -427,6 +498,8 @@ namespace
 
 int main()
 {
+    test_committed_calibration_snapshot_and_reporting();
+    test_invalid_calibration_fails_before_output_enable();
     test_162_symbol_transition_order();
     test_transition_failure_stays_inhibited();
     test_transition_interruptions_stay_inhibited();

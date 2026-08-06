@@ -254,7 +254,6 @@ private:
     IControllerBridge& owner_;
     Config config_;
     Si5351Device device_;
-    Si5351Planner planner_;
     wsprrypi::ExecutionPlan current_plan_;
     std::vector<double> unique_tone_frequencies_;
     std::vector<std::size_t> event_tone_indexes_;

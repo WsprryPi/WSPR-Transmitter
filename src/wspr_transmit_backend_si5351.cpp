@@ -193,7 +193,6 @@ WsprSi5351Backend::WsprSi5351Backend(
     : owner_(owner),
       config_(config),
       device_(config.device, config.device_adapter),
-      planner_(config.planner),
       current_plan_(),
       unique_tone_frequencies_(),
       event_tone_indexes_(),
@@ -293,14 +292,6 @@ wsprrypi::BackendCompileResult WsprSi5351Backend::configure(
         return result;
     }
 
-    for (std::size_t i = 0; i < unique_tone_frequencies_.size(); ++i)
-    {
-        std::ostringstream stream;
-        stream << "Si5351 configure tone " << i << ": requested "
-               << format_frequency(unique_tone_frequencies_[i]) << ".";
-        log_si5351(owner_, WsprTransmitLogLevel::DEBUG, stream.str());
-    }
-
     const std::size_t expected_tones = expectedToneCount(planner_mode);
     if (unique_tone_frequencies_.size() != expected_tones)
     {
@@ -321,7 +312,24 @@ wsprrypi::BackendCompileResult WsprSi5351Backend::configure(
         tones.push_back(Si5351Planner::ToneEntry{frequency_hz});
     }
 
-    si5351_plan_ = planner_.buildPlan(planner_mode, tones);
+    Si5351Planner::Config planner_config = config_.planner;
+    planner_config.calibration_ppm = plan.calibration.ppm;
+    si5351_plan_ = Si5351Planner(planner_config).buildPlan(
+        planner_mode,
+        tones);
+
+    {
+        std::ostringstream stream;
+        stream << "Si5351 calibration: ppm=" << std::fixed
+               << std::setprecision(6) << si5351_plan_.calibration_ppm
+               << ", nominal reference="
+               << format_frequency(planner_config.reference_hz)
+               << ", effective reference="
+               << format_frequency(si5351_plan_.effective_reference_hz)
+               << ".";
+        log_si5351(owner_, WsprTransmitLogLevel::DEBUG, stream.str());
+    }
+
     if (!validatePlannerOutput(si5351_plan_, expected_tones, error))
     {
         result.error = error;
@@ -334,9 +342,10 @@ wsprrypi::BackendCompileResult WsprSi5351Backend::configure(
         const Si5351Planner::ToneRegisterSet& tone =
             si5351_plan_.tone_sets[i];
         std::ostringstream stream;
-        stream << "Si5351 planner tone " << i << ": requested "
+        stream << "Si5351 planner tone " << i << ": requested RF="
                << format_frequency(tone.requested_hz)
-               << ", actual " << format_frequency(tone.actual_hz) << ".";
+               << ", calculated output="
+               << format_frequency(tone.actual_hz) << ".";
         log_si5351(owner_, WsprTransmitLogLevel::DEBUG, stream.str());
     }
 
@@ -877,6 +886,15 @@ bool WsprSi5351Backend::validatePlannerOutput(
     std::size_t expected_tones,
     std::string& error) const
 {
+    if (!std::isfinite(plan.calibration_ppm) ||
+        plan.effective_reference_hz <= 0.0 ||
+        !std::isfinite(plan.effective_reference_hz))
+    {
+        error = "Si5351 calibration PPM is non-finite or outside the "
+                "usable range.";
+        return false;
+    }
+
     if (plan.startup_writes.empty())
     {
         error = "Si5351 planner produced no startup register writes.";
@@ -925,6 +943,7 @@ bool WsprSi5351Backend::planMatchesConfigured(
         plan.request_id.value != current_plan_.request_id.value ||
         plan.mode != current_plan_.mode ||
         plan.backend != current_plan_.backend ||
+        plan.calibration.ppm != current_plan_.calibration.ppm ||
         plan.events.size() != current_plan_.events.size())
     {
         return false;
@@ -1071,9 +1090,10 @@ bool WsprSi5351Backend::applyTone(
     current_tone_index_ = tone_index;
     {
         std::ostringstream stream;
-        stream << "Si5351 tone " << tone_index << ": requested "
+        stream << "Si5351 tone " << tone_index << ": requested RF="
                << format_frequency(tone.requested_hz)
-               << ", actual " << format_frequency(tone.actual_hz) << ".";
+               << ", calculated output="
+               << format_frequency(tone.actual_hz) << ".";
         log_si5351(owner_, WsprTransmitLogLevel::DEBUG, stream.str());
     }
     return true;
