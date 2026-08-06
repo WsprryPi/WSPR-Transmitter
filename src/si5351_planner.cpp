@@ -268,6 +268,21 @@ namespace
             static_cast<std::uint8_t>(params.p2 & 0xff)});
     }
 
+    static Si5351Planner::DividerPlan divider_plan(
+        const DividerParameters& params)
+    {
+        Si5351Planner::DividerPlan plan;
+        plan.valid = params.valid;
+        plan.integer = params.a;
+        plan.numerator = params.b;
+        plan.denominator = params.c;
+        plan.p1 = params.p1;
+        plan.p2 = params.p2;
+        plan.p3 = params.p3;
+        plan.actual_ratio = params.actual_ratio;
+        return plan;
+    }
+
     static std::uint8_t multisynth_base_register(std::uint8_t index)
     {
         return static_cast<std::uint8_t>(
@@ -303,8 +318,9 @@ Si5351Planner::Plan Si5351Planner::buildPlan(
 
     for (const ToneEntry& tone : tones)
     {
-        plan.tone_sets.push_back(
-            buildToneRegisterSet(tone.frequency_hz));
+        plan.tone_sets.push_back(buildToneRegisterSet(
+            tone.frequency_hz,
+            mode == Mode::WSPR));
     }
 
     return plan;
@@ -412,7 +428,9 @@ Si5351Planner::buildIdleWrites() const
 }
 
 Si5351Planner::ToneRegisterSet
-Si5351Planner::buildToneRegisterSet(double frequency_hz) const
+Si5351Planner::buildToneRegisterSet(
+    double frequency_hz,
+    bool allow_pll_retune_candidate) const
 {
     ToneRegisterSet tone;
     tone.requested_hz = frequency_hz;
@@ -434,6 +452,61 @@ Si5351Planner::buildToneRegisterSet(double frequency_hz) const
     if (!ms_params.valid)
     {
         tone.actual_hz = 0.0;
+
+        // Direct 2 m WSPR requires a distinct PLL setting for each tone with
+        // an exact divide-by-6 MultiSynth.  The backend must inhibit the
+        // output around this complete PLL/MultiSynth/reset transition.
+        if (!allow_pll_retune_candidate || config_.reference_hz == 0)
+            return tone;
+
+        const double target_pll_hz = frequency_hz * 6.0;
+        if (target_pll_hz < static_cast<double>(kMinPllFrequencyHz) ||
+            target_pll_hz > static_cast<double>(kMaxPllFrequencyHz))
+        {
+            return tone;
+        }
+
+        const DividerParameters pll_params = build_divider_parameters(
+            target_pll_hz / static_cast<double>(config_.reference_hz),
+            kMinPllMultiplier,
+            kMaxPllMultiplier);
+        const DividerParameters candidate_ms_params =
+            build_multisynth_parameters(6.0);
+        if (!pll_params.valid || !candidate_ms_params.valid)
+            return tone;
+
+        PllRetuneCandidate& candidate = tone.pll_retune_candidate;
+        candidate.valid = true;
+        candidate.target_pll_hz = target_pll_hz;
+        candidate.actual_pll_hz =
+            static_cast<double>(config_.reference_hz) *
+            pll_params.actual_ratio;
+        candidate.r_divider = 1;
+        candidate.pll = divider_plan(pll_params);
+        candidate.multisynth = divider_plan(candidate_ms_params);
+        append_parameter_writes(
+            candidate.pll_writes,
+            kPllAParameterBaseRegister,
+            pll_params);
+        append_parameter_writes(
+            candidate.multisynth_writes,
+            multisynth_base_register(tx_index),
+            candidate_ms_params);
+        tone.writes = candidate.pll_writes;
+        tone.writes.insert(
+            tone.writes.end(),
+            candidate.multisynth_writes.begin(),
+            candidate.multisynth_writes.end());
+        tone.writes.push_back(Si5351Device::RegisterWrite{
+            clock_control_register(tx_index),
+            static_cast<std::uint8_t>(
+                kClkInputMultisynth | kClkMultisynthIntegerMode)});
+        tone.writes.push_back(Si5351Device::RegisterWrite{
+            kPllResetRegister,
+            kResetPllA});
+        tone.requires_output_inhibit = true;
+        tone.actual_hz = candidate.actual_pll_hz /
+            candidate_ms_params.actual_ratio;
         return tone;
     }
 

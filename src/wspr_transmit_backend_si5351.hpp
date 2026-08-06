@@ -227,9 +227,10 @@ private:
      * @brief Switch the active output to the specified tone index
      *
      * @param tone_index Tone index in the planned tone-set array
+     * @param rf_enabled Whether the output is currently enabled
      * @return True on success
      */
-    bool applyTone(std::size_t tone_index);
+    bool applyTone(std::size_t tone_index, bool rf_enabled);
 
     /**
      * @brief Enable the transmit output

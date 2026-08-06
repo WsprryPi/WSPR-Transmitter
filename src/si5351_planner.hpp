@@ -58,6 +58,40 @@ public:
     };
 
     /**
+     * @brief Decoded Si5351 divider parameters
+     */
+    struct DividerPlan
+    {
+        bool valid = false;
+        std::uint32_t integer = 0;
+        std::uint32_t numerator = 0;
+        std::uint32_t denominator = 1;
+        std::uint32_t p1 = 0;
+        std::uint32_t p2 = 0;
+        std::uint32_t p3 = 1;
+        double actual_ratio = 0.0;
+    };
+
+    /**
+     * @brief Per-tone PLL-retune plan
+     *
+     * The plan records the complete divider and register data.  The containing
+     * tone set marks that the backend must inhibit the output around these
+     * writes.
+     */
+    struct PllRetuneCandidate
+    {
+        bool valid = false;
+        double target_pll_hz = 0.0;
+        double actual_pll_hz = 0.0;
+        std::uint32_t r_divider = 1;
+        DividerPlan pll;
+        DividerPlan multisynth;
+        std::vector<Si5351Device::RegisterWrite> pll_writes;
+        std::vector<Si5351Device::RegisterWrite> multisynth_writes;
+    };
+
+    /**
      * @brief Precomputed register set for one tone
      *
      * This should contain only the writes needed to move the active output
@@ -68,6 +102,8 @@ public:
         double requested_hz = 0.0;
         double actual_hz = 0.0;
         std::vector<Si5351Device::RegisterWrite> writes;
+        bool requires_output_inhibit = false;
+        PllRetuneCandidate pll_retune_candidate;
     };
 
     /**
@@ -127,7 +163,9 @@ private:
      * @param frequency_hz Requested RF frequency
      * @return Precomputed tone register set
      */
-    ToneRegisterSet buildToneRegisterSet(double frequency_hz) const;
+    ToneRegisterSet buildToneRegisterSet(
+        double frequency_hz,
+        bool allow_pll_retune_candidate) const;
 
     /**
      * @brief Quantize a requested frequency to the achievable output

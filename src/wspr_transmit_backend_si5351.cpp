@@ -575,7 +575,7 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
                 event_tone_indexes_[i] != invalid_tone_index() &&
                 event_tone_indexes_[i] != current_tone_index_)
             {
-                if (!applyTone(event_tone_indexes_[i]))
+                if (!applyTone(event_tone_indexes_[i], rf_enabled))
                 {
                     result.error = device_error_or(
                         device_,
@@ -1019,7 +1019,9 @@ bool WsprSi5351Backend::applyIdleProgramming()
     return device_.writeRegisters(si5351_plan_.idle_writes);
 }
 
-bool WsprSi5351Backend::applyTone(std::size_t tone_index)
+bool WsprSi5351Backend::applyTone(
+    std::size_t tone_index,
+    bool rf_enabled)
 {
     if (tone_index >= si5351_plan_.tone_sets.size())
         return false;
@@ -1029,8 +1031,21 @@ bool WsprSi5351Backend::applyTone(std::size_t tone_index)
     if (tone.writes.empty())
         return false;
 
-    if (!config_.dry_run && !device_.writeRegisters(tone.writes))
-        return false;
+    if (!config_.dry_run)
+    {
+        if (tone.requires_output_inhibit && !disableTransmitOutput())
+            return false;
+
+        if (!device_.writeRegisters(tone.writes))
+            return false;
+
+        if (tone.requires_output_inhibit &&
+            rf_enabled &&
+            !enableTransmitOutput())
+        {
+            return false;
+        }
+    }
 
     current_tone_index_ = tone_index;
     {

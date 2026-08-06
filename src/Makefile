@@ -42,6 +42,7 @@ LOCAL_C_SOURCES   := $(shell find . -type f -name '*.c')
 LOCAL_CPP_SOURCES := $(shell find . -type f -name '*.cpp')
 SI5351_TEST_SOURCE := ./si5351_backend_harness.cpp
 SI5351_PLANNER_TEST_SOURCE := ./si5351_planner_test.cpp
+SI5351_TRANSITION_TEST_SOURCE := ./si5351_transition_test.cpp
 STARTUP_QUIESCE_TEST_SOURCE := ./startup_quiesce_test.cpp
 SI5351_QUALIFICATION_SOURCE := ./si5351_startup_quiesce_qualification.cpp
 SI5351_QUALIFICATION_MAIN_SOURCE := ./si5351_startup_quiesce_qualification_main.cpp
@@ -52,7 +53,7 @@ SI5351_QUALIFICATION_TEST_SOURCE := ./si5351_startup_quiesce_qualification_test.
 GPIO_QUALIFICATION_SOURCE := ./gpio_startup_quiesce_qualification.cc
 GPIO_QUALIFICATION_MAIN_SOURCE := ./gpio_startup_quiesce_qualification_main.cc
 GPIO_QUALIFICATION_TEST_SOURCE := ./gpio_startup_quiesce_qualification_test.cc
-LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE) $(SI5351_PLANNER_TEST_SOURCE) $(STARTUP_QUIESCE_TEST_SOURCE) $(SI5351_QUALIFICATION_SOURCE) $(SI5351_QUALIFICATION_MAIN_SOURCE) $(SI5351_QUALIFICATION_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
+LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE) $(SI5351_PLANNER_TEST_SOURCE) $(SI5351_TRANSITION_TEST_SOURCE) $(STARTUP_QUIESCE_TEST_SOURCE) $(SI5351_QUALIFICATION_SOURCE) $(SI5351_QUALIFICATION_MAIN_SOURCE) $(SI5351_QUALIFICATION_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
 
 # Find in each submodule—but explicitly skip any “main” there:
 SUBMODULE_C_SOURCES   := $(shell find $(SUBMODULE_SRCDIRS) -type f -name '*.c'   ! -name 'main.c')
@@ -78,6 +79,11 @@ SI5351_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o
 SI5351_PLANNER_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./si5351_planner_test.o \
+	$(OBJ_DIR_DEBUG)/./si5351_planner.o
+SI5351_TRANSITION_TEST_OBJECTS := \
+	$(OBJ_DIR_DEBUG)/./si5351_transition_test.o \
+	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_si5351.o \
+	$(OBJ_DIR_DEBUG)/./si5351_device.o \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o
 STARTUP_QUIESCE_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./startup_quiesce_test.o \
@@ -216,6 +222,11 @@ build/bin/si5351_planner_test: $(SI5351_PLANNER_TEST_OBJECTS)
 	$(Q)echo "Linking debug: si5351_planner_test"
 	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
 
+build/bin/si5351_transition_test: $(SI5351_TRANSITION_TEST_OBJECTS)
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)echo "Linking debug: si5351_transition_test"
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
 build/bin/startup_quiesce_test: $(STARTUP_QUIESCE_TEST_OBJECTS)
 	$(Q)mkdir -p $(BIN_DIR)
 	$(Q)echo "Linking debug: startup_quiesce_test"
@@ -281,7 +292,7 @@ build/bin/$(OUT): $(CPP_OBJECTS) $(C_OBJECTS)
 ##
 # Phony targets
 ##
-.PHONY: clean release debug test si5351-test si5351-planner-test startup-quiesce-test si5351-startup-quiesce-qualification si5351-startup-quiesce-qualification-test gpio-startup-quiesce-qualification gpio-startup-quiesce-qualification-test gdb lint macros help
+.PHONY: clean release debug test si5351-test si5351-planner-test si5351-transition-test startup-quiesce-test si5351-startup-quiesce-qualification si5351-startup-quiesce-qualification-test gpio-startup-quiesce-qualification gpio-startup-quiesce-qualification-test gdb lint macros help
 
 clean:
 	$(Q)echo "Cleaning up build artifacts."
@@ -301,6 +312,9 @@ si5351-test: build/bin/si5351_backend_harness
 
 si5351-planner-test: build/bin/si5351_planner_test
 	$(Q)./build/bin/si5351_planner_test
+
+si5351-transition-test: build/bin/si5351_transition_test
+	$(Q)./build/bin/si5351_transition_test
 
 startup-quiesce-test: build/bin/startup_quiesce_test
 	$(Q)./build/bin/startup_quiesce_test
@@ -342,6 +356,7 @@ help:
 	$(Q)echo "  test       Run tests"
 	$(Q)echo "  si5351-test Build temporary Si5351 backend harness"
 	$(Q)echo "  si5351-planner-test Build and run non-hardware planner tests"
+	$(Q)echo "  si5351-transition-test Build and run fake-I2C transition tests"
 	$(Q)echo "  startup-quiesce-test Build and run non-hardware startup-quiesce tests"
 	$(Q)echo "  gpio-startup-quiesce-qualification Build guarded live qualification executable only"
 	$(Q)echo "  gpio-startup-quiesce-qualification-test Run fake qualification tests"

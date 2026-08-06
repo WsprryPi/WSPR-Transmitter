@@ -421,6 +421,117 @@ namespace
                     "fixed-denominator resolution bound");
         }
     }
+
+    void test_direct_four_tone_2m_candidate_plan()
+    {
+        constexpr double tones_hz[] = {
+            144490497.802734375,
+            144490499.267578125,
+            144490500.732421875,
+            144490502.197265625};
+        constexpr std::uint32_t pll_numerators[] = {
+            31029,
+            113179,
+            109829,
+            50674};
+        constexpr std::uint32_t pll_denominators[] = {
+            284671,
+            1038341,
+            1007604,
+            464897};
+
+        Si5351Planner::Config config;
+        std::vector<Si5351Planner::ToneEntry> tones;
+        for (const double frequency_hz : tones_hz)
+            tones.push_back(Si5351Planner::ToneEntry{frequency_hz});
+
+        const Si5351Planner::Plan plan = Si5351Planner(config).buildPlan(
+            Si5351Planner::Mode::WSPR,
+            tones);
+        expect(plan.tone_sets.size() == 4,
+            "2 m WSPR should produce four candidate tone plans");
+        if (plan.tone_sets.size() != 4)
+            return;
+
+        for (std::size_t i = 0; i < plan.tone_sets.size(); ++i)
+        {
+            const Si5351Planner::ToneRegisterSet& tone = plan.tone_sets[i];
+            const Si5351Planner::PllRetuneCandidate& candidate =
+                tone.pll_retune_candidate;
+            expect(candidate.valid,
+                "2 m tone should have a PLL-retune candidate");
+            expect(tone.requires_output_inhibit,
+                "2 m tone must require output-inhibited transitions");
+            expect(tone.writes.size() == 18,
+                "2 m tone should contain PLL, MultiSynth, control, and "
+                "PLL-reset writes");
+            expect(candidate.r_divider == 1,
+                "2 m candidate should use R divider one");
+            expect(candidate.multisynth.valid &&
+                    candidate.multisynth.integer == 6 &&
+                    candidate.multisynth.numerator == 0 &&
+                    candidate.multisynth.denominator == 1,
+                "2 m candidate should use exact MultiSynth divide-by-6");
+            expect(candidate.pll.valid &&
+                    candidate.pll.integer == 32 &&
+                    candidate.pll.numerator == pll_numerators[i] &&
+                    candidate.pll.denominator == pll_denominators[i] &&
+                    candidate.pll.denominator <= kMaxDenominator,
+                "2 m candidate PLL ratio should match the reviewed bounded "
+                "rational and fit the register fields");
+            expect(candidate.pll_writes.size() == 8,
+                "2 m candidate should contain eight PLL parameter writes");
+            expect(candidate.multisynth_writes.size() == 8,
+                "2 m candidate should contain eight MultiSynth writes");
+            expect(tone.writes.front().address == kPllAParameterBaseRegister,
+                "2 m transition should program PLL parameters first");
+            expect(tone.writes[8].address == kMs0ParameterBaseRegister,
+                "2 m transition should program MultiSynth parameters second");
+            expect(tone.writes[16].address == kClkControlBaseRegister &&
+                    tone.writes[16].value ==
+                        (kIntegerMode | kMultisynthSource),
+                "2 m transition should select integer MultiSynth mode");
+            expect(tone.writes[17].address == kPllResetRegister &&
+                    tone.writes[17].value == 0x20,
+                "2 m transition should reset PLLA last");
+
+            const DecodedDivider pll = decode_divider(
+                candidate.pll_writes,
+                kPllAParameterBaseRegister);
+            const DecodedDivider multisynth = decode_divider(
+                candidate.multisynth_writes,
+                kMs0ParameterBaseRegister);
+            expect(pll.valid &&
+                    pll.a == candidate.pll.integer &&
+                    pll.b == candidate.pll.numerator &&
+                    pll.c == candidate.pll.denominator,
+                "2 m candidate PLL writes should decode to its metadata");
+            expect(multisynth.valid && multisynth.a == 6 &&
+                    multisynth.b == 0 && multisynth.c == 1,
+                "2 m candidate MultiSynth writes should decode to six");
+            expect(std::fabs(tone.actual_hz - tones_hz[i]) < 0.00001,
+                "2 m candidate error should remain below 10 microhertz");
+        }
+
+        expect(std::fabs(
+                (plan.tone_sets[1].actual_hz -
+                    plan.tone_sets[0].actual_hz) - 1.46484375) < 0.00002,
+            "first 2 m candidate tone spacing should remain WSPR-correct");
+        expect(std::fabs(
+                (plan.tone_sets[2].actual_hz -
+                    plan.tone_sets[1].actual_hz) - 1.46484375) < 0.00002,
+            "second 2 m candidate tone spacing should remain WSPR-correct");
+        expect(std::fabs(
+                (plan.tone_sets[3].actual_hz -
+                    plan.tone_sets[2].actual_hz) - 1.46484375) < 0.00002,
+            "third 2 m candidate tone spacing should remain WSPR-correct");
+
+        const Si5351Planner::Plan tone_mode = Si5351Planner(config).buildPlan(
+            Si5351Planner::Mode::TONE,
+            {Si5351Planner::ToneEntry{tones_hz[0]}});
+        expect(!tone_mode.tone_sets.front().pll_retune_candidate.valid,
+            "non-WSPR modes should not receive a PLL-retune candidate");
+    }
 }
 
 int main()
@@ -431,6 +542,7 @@ int main()
     test_bounded_rational_approximation();
     test_rejection_remains_output_disabled();
     test_representative_existing_frequencies();
+    test_direct_four_tone_2m_candidate_plan();
 
     if (failures != 0)
     {
