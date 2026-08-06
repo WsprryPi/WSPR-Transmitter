@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -71,6 +72,8 @@ namespace
 
             registers[address] = bytes[1];
             writes.push_back({address, bytes[1]});
+            if (after_write)
+                after_write(address, bytes[1], address_attempts[address]);
             return 2;
         }
 
@@ -97,6 +100,8 @@ namespace
         std::uint8_t selected_register = 0;
         std::uint8_t fail_address = 0xff;
         std::size_t fail_address_occurrence = 0;
+        std::function<void(std::uint8_t, std::uint8_t, std::size_t)>
+            after_write;
         int open_calls = 0;
         int select_calls = 0;
         int close_calls = 0;
@@ -115,11 +120,27 @@ namespace
             state_.store(state);
         }
 
-        bool backendShouldStop() const noexcept override { return false; }
-        void backendSignalStopRequest() noexcept override {}
-        void backendRequestStopTxNoJoin() noexcept override {}
+        bool backendShouldStop() const noexcept override
+        {
+            return stop_requested_.load();
+        }
+        void backendSignalStopRequest() noexcept override
+        {
+            stop_requested_.store(true);
+        }
+        void backendRequestStopTxNoJoin() noexcept override
+        {
+            backendSignalStopRequest();
+        }
         bool backendWaitInterruptableFor(std::chrono::nanoseconds) override
         {
+            ++wait_calls;
+            if (interrupt_on_wait_call != 0 &&
+                wait_calls == interrupt_on_wait_call)
+            {
+                backendSignalStopRequest();
+                return false;
+            }
             return true;
         }
         void backendThrowIfStopRequested(const char*) override {}
@@ -137,9 +158,12 @@ namespace
         bool backendRestartCurrentConfiguration() override { return false; }
 
         std::size_t progress_calls = 0;
+        std::size_t wait_calls = 0;
+        std::size_t interrupt_on_wait_call = 0;
 
     private:
         std::atomic<WsprTransmitState> state_{WsprTransmitState::ENABLED};
+        std::atomic<bool> stop_requested_{false};
     };
 
     WsprSi5351Backend::Config config(
@@ -156,7 +180,12 @@ namespace
         return result;
     }
 
-    wsprrypi::ExecutionPlan four_tone_plan(std::size_t symbol_count)
+    wsprrypi::ExecutionPlan four_tone_plan(
+        std::size_t symbol_count,
+        std::chrono::nanoseconds symbol_interval =
+            std::chrono::nanoseconds::zero(),
+        std::chrono::nanoseconds final_duration =
+            std::chrono::nanoseconds::zero())
     {
         constexpr double tones_hz[] = {
             144490497.802734375,
@@ -173,6 +202,11 @@ namespace
         for (std::size_t i = 0; i < symbol_count; ++i)
         {
             wsprrypi::RfEvent event;
+            event.offset_from_start = symbol_interval *
+                static_cast<std::int64_t>(i);
+            event.duration = i + 1 == symbol_count
+                ? final_duration
+                : std::chrono::nanoseconds::zero();
             event.type = wsprrypi::RfEventType::SET_FREQUENCY;
             event.frequency_hz = tones_hz[i % 4];
             event.rf_on = true;
@@ -274,6 +308,105 @@ namespace
             "PLL write failure should close the device session");
     }
 
+    void expect_interrupted_and_inhibited(
+        const wsprrypi::ExecutionResult& result,
+        const TestBridge& bridge,
+        const FakeI2CAdapter& adapter,
+        std::size_t expected_progress,
+        const std::string& label)
+    {
+        expect(result.ok && result.stopped && !result.faulted &&
+                result.error.empty(),
+            label + " should report a clean interruption");
+        expect(bridge.progress_calls == expected_progress,
+            label + " should stop at the expected event");
+        expect(adapter.registers[kOutputEnableRegister] ==
+                kOutputDisableAll,
+            label + " should leave all outputs disabled");
+        expect(adapter.close_calls == 1,
+            label + " should close the device session");
+    }
+
+    void test_transition_interruptions_stay_inhibited()
+    {
+        struct InterruptPoint
+        {
+            std::uint8_t address;
+            std::size_t occurrence;
+            const char* label;
+        };
+        const InterruptPoint points[] = {
+            {kOutputEnableRegister, 3, "output-inhibit interruption"},
+            {28, 2, "PLL-parameter interruption"},
+            {kPllResetRegister, 2, "PLL-reset interruption"}};
+
+        for (const InterruptPoint& point : points)
+        {
+            TestBridge bridge;
+            auto adapter = std::make_shared<FakeI2CAdapter>();
+            adapter->after_write =
+                [&bridge, point](
+                    std::uint8_t address,
+                    std::uint8_t,
+                    std::size_t occurrence)
+                {
+                    if (address == point.address &&
+                        occurrence == point.occurrence)
+                    {
+                        bridge.backendSignalStopRequest();
+                    }
+                };
+            WsprSi5351Backend backend(bridge, config(adapter));
+            const wsprrypi::ExecutionPlan plan = four_tone_plan(4);
+
+            expect(configure(backend, plan),
+                std::string(point.label) + " plan should configure");
+            const wsprrypi::ExecutionResult result = backend.execute(plan);
+            expect_interrupted_and_inhibited(
+                result, bridge, *adapter, 1, point.label);
+            expect(count_write(
+                    *adapter,
+                    kOutputEnableRegister,
+                    kClk0Enabled) == 0,
+                std::string(point.label) + " must not re-enable CLK0");
+        }
+    }
+
+    void test_symbol_wait_interruption_cleans_up()
+    {
+        TestBridge bridge;
+        bridge.interrupt_on_wait_call = 1;
+        auto adapter = std::make_shared<FakeI2CAdapter>();
+        WsprSi5351Backend backend(bridge, config(adapter));
+        const wsprrypi::ExecutionPlan plan = four_tone_plan(
+            4,
+            std::chrono::seconds(1));
+
+        expect(configure(backend, plan),
+            "symbol-wait interruption plan should configure");
+        const wsprrypi::ExecutionResult result = backend.execute(plan);
+        expect_interrupted_and_inhibited(
+            result, bridge, *adapter, 1, "symbol-wait interruption");
+    }
+
+    void test_final_wait_interruption_cleans_up()
+    {
+        TestBridge bridge;
+        bridge.interrupt_on_wait_call = 1;
+        auto adapter = std::make_shared<FakeI2CAdapter>();
+        WsprSi5351Backend backend(bridge, config(adapter));
+        const wsprrypi::ExecutionPlan plan = four_tone_plan(
+            4,
+            std::chrono::nanoseconds::zero(),
+            std::chrono::seconds(1));
+
+        expect(configure(backend, plan),
+            "final-wait interruption plan should configure");
+        const wsprrypi::ExecutionResult result = backend.execute(plan);
+        expect_interrupted_and_inhibited(
+            result, bridge, *adapter, 4, "final-wait interruption");
+    }
+
     void test_162_symbol_dry_run_avoids_i2c()
     {
         TestBridge bridge;
@@ -296,6 +429,9 @@ int main()
 {
     test_162_symbol_transition_order();
     test_transition_failure_stays_inhibited();
+    test_transition_interruptions_stay_inhibited();
+    test_symbol_wait_interruption_cleans_up();
+    test_final_wait_interruption_cleans_up();
     test_162_symbol_dry_run_avoids_i2c();
 
     if (failures != 0)

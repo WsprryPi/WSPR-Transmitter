@@ -577,6 +577,12 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
             {
                 if (!applyTone(event_tone_indexes_[i], rf_enabled))
                 {
+                    if (stop_requested_ || owner_.backendShouldStop())
+                    {
+                        execution_interrupted = true;
+                        break;
+                    }
+
                     result.error = device_error_or(
                         device_,
                         "Could not apply Si5351 tone programming.");
@@ -1031,13 +1037,28 @@ bool WsprSi5351Backend::applyTone(
     if (tone.writes.empty())
         return false;
 
+    if (stop_requested_ || owner_.backendShouldStop())
+        return false;
+
     if (!config_.dry_run)
     {
         if (tone.requires_output_inhibit && !disableTransmitOutput())
             return false;
 
-        if (!device_.writeRegisters(tone.writes))
+        if (stop_requested_ || owner_.backendShouldStop())
             return false;
+
+        for (const Si5351Device::RegisterWrite& write : tone.writes)
+        {
+            if (stop_requested_ || owner_.backendShouldStop())
+                return false;
+
+            if (!device_.writeRegister(write.address, write.value))
+                return false;
+
+            if (stop_requested_ || owner_.backendShouldStop())
+                return false;
+        }
 
         if (tone.requires_output_inhibit &&
             rf_enabled &&
