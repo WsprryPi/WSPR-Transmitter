@@ -135,7 +135,7 @@ namespace
         const double requested_hz =
             static_cast<double>(parked_pll_hz) / multisynth_ratio;
         return Si5351Planner(config).buildPlan(
-            Si5351Planner::Mode::TONE,
+            Si5351Planner::Mode::QRSS,
             {Si5351Planner::ToneEntry{requested_hz}});
     }
 
@@ -549,8 +549,91 @@ namespace
         const Si5351Planner::Plan tone_mode = Si5351Planner(config).buildPlan(
             Si5351Planner::Mode::TONE,
             {Si5351Planner::ToneEntry{tones_hz[0]}});
-        expect(!tone_mode.tone_sets.front().pll_retune_candidate.valid,
-            "non-WSPR modes should not receive a PLL-retune candidate");
+        expect(tone_mode.tone_sets.front().pll_retune_candidate.valid &&
+                tone_mode.tone_sets.front().requires_output_inhibit,
+            "single-tone 2 m mode should receive the guarded PLL-retune "
+            "candidate");
+
+        for (const Si5351Planner::Mode mode : {
+                 Si5351Planner::Mode::QRSS,
+                 Si5351Planner::Mode::FSKCW,
+                 Si5351Planner::Mode::DFCW})
+        {
+            const Si5351Planner::Plan nonqualified =
+                Si5351Planner(config).buildPlan(
+                    mode,
+                    {Si5351Planner::ToneEntry{tones_hz[0]}});
+            expect(!nonqualified.tone_sets.front().pll_retune_candidate.valid,
+                "unqualified CW modes should not receive a PLL-retune "
+                "candidate");
+        }
+    }
+
+    void test_calibrated_single_tone_planning()
+    {
+        constexpr double requested_hz = 144490497.802734375;
+        constexpr double corrections[] = {0.0, 2.409358, -2.409358};
+
+        Si5351Planner::Config parked_config;
+        const Si5351Planner::Plan parked_plan =
+            Si5351Planner(parked_config).buildPlan(
+                Si5351Planner::Mode::TONE,
+                {Si5351Planner::ToneEntry{14097100.0}});
+        expect(valid_tone(parked_plan) &&
+                !parked_plan.tone_sets.front().pll_retune_candidate.valid &&
+                !parked_plan.tone_sets.front().requires_output_inhibit,
+            "ordinary lower-frequency tones should retain the parked-PLL "
+            "plan without guarded retuning");
+
+        std::vector<Si5351Device::RegisterWrite> zero_writes;
+        for (const double ppm : corrections)
+        {
+            Si5351Planner::Config config;
+            config.calibration_ppm = ppm;
+            const Si5351Planner::Plan plan = Si5351Planner(config).buildPlan(
+                Si5351Planner::Mode::TONE,
+                {Si5351Planner::ToneEntry{requested_hz}});
+            expect(plan.tone_sets.size() == 1 &&
+                    plan.tone_sets.front().pll_retune_candidate.valid &&
+                    plan.tone_sets.front().requires_output_inhibit,
+                "zero, positive, and negative calibrated 2 m tones should "
+                "produce one guarded PLL-retune plan");
+            expect(plan.tone_sets.front().requested_hz == requested_hz,
+                "single-tone calibration must preserve requested RF");
+            expect(std::fabs(
+                    plan.tone_sets.front().actual_hz - requested_hz) <
+                    0.000025,
+                "single-tone calculated output should remain within 25 "
+                "microhertz");
+
+            if (ppm == 0.0)
+                zero_writes = plan.tone_sets.front().writes;
+            else
+                expect(!same_register_writes(
+                        zero_writes,
+                        plan.tone_sets.front().writes),
+                    "nonzero single-tone calibration should change the "
+                    "register plan");
+        }
+
+        constexpr double invalid_ppm[] = {
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),
+            -std::numeric_limits<double>::infinity(),
+            201.0};
+        for (const double ppm : invalid_ppm)
+        {
+            Si5351Planner::Config config;
+            config.calibration_ppm = ppm;
+            const Si5351Planner::Plan plan = Si5351Planner(config).buildPlan(
+                Si5351Planner::Mode::TONE,
+                {Si5351Planner::ToneEntry{requested_hz}});
+            expect(plan.effective_reference_hz == 0.0 &&
+                    plan.tone_sets.size() == 1 &&
+                    plan.tone_sets.front().actual_hz == 0.0 &&
+                    plan.tone_sets.front().writes.empty(),
+                "invalid single-tone calibration should fail closed");
+        }
     }
 
     void test_calibrated_reference_planning()
@@ -694,6 +777,7 @@ int main()
     test_rejection_remains_output_disabled();
     test_representative_existing_frequencies();
     test_direct_four_tone_2m_candidate_plan();
+    test_calibrated_single_tone_planning();
     test_calibrated_reference_planning();
     test_invalid_calibration_fails_closed();
     test_calibrated_four_tone_spacing_and_span();

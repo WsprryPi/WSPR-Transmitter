@@ -219,6 +219,29 @@ namespace
         return plan;
     }
 
+    wsprrypi::ExecutionPlan single_tone_plan(
+        double ppm = 2.409358,
+        std::chrono::nanoseconds duration =
+            std::chrono::nanoseconds::zero())
+    {
+        wsprrypi::ExecutionPlan plan;
+        plan.id.value = 383;
+        plan.request_id.value = 383;
+        plan.mode = wsprrypi::TransmissionMode::TONE;
+        plan.backend = wsprrypi::BackendKind::SI5351;
+        plan.reference_frequency_hz = 27000000.0;
+        plan.calibration.ppm = ppm;
+
+        wsprrypi::RfEvent event;
+        event.duration = duration;
+        event.type = wsprrypi::RfEventType::SET_FREQUENCY;
+        event.frequency_hz = 144490497.802734375;
+        event.rf_on = true;
+        plan.events.push_back(event);
+        plan.summary.event_count = 1;
+        return plan;
+    }
+
     bool configure(
         WsprSi5351Backend& backend,
         const wsprrypi::ExecutionPlan& plan)
@@ -251,6 +274,13 @@ namespace
         }
         return false;
     }
+
+    void expect_interrupted_and_inhibited(
+        const wsprrypi::ExecutionResult& result,
+        const TestBridge& bridge,
+        const FakeI2CAdapter& adapter,
+        std::size_t expected_progress,
+        const std::string& label);
 
     void test_committed_calibration_snapshot_and_reporting()
     {
@@ -308,6 +338,79 @@ namespace
                         kClk0Enabled) == 0,
                 "invalid calibration must fail before I2C output enable");
         }
+    }
+
+    void test_single_tone_calibration_reporting_and_cleanup()
+    {
+        TestBridge bridge;
+        auto adapter = std::make_shared<FakeI2CAdapter>();
+        WsprSi5351Backend backend(bridge, config(adapter));
+        const wsprrypi::ExecutionPlan plan = single_tone_plan();
+
+        expect(configure(backend, plan),
+            "calibrated single 2 m tone should configure");
+        expect(has_log(bridge, "Si5351 calibration: ppm=2.409358"),
+            "single tone should report committed calibration");
+        expect(has_log(bridge, "effective reference=26999934"),
+            "single tone should report effective reference");
+        expect(has_log(bridge, "requested RF=144490497"),
+            "single tone should report requested RF");
+        expect(has_log(bridge, "calculated output=144490497"),
+            "single tone should report calculated output");
+        expect(adapter->writes.empty(),
+            "single-tone configuration must not access I2C");
+
+        const wsprrypi::ExecutionResult result = backend.execute(plan);
+        expect(result.ok && !result.stopped && !result.faulted,
+            "calibrated single 2 m tone should execute");
+        expect(bridge.progress_calls == 1,
+            "single-tone execution should report one event");
+        expect(count_write(
+                *adapter,
+                kOutputEnableRegister,
+                kClk0Enabled) == 1,
+            "single-tone execution should enable CLK0 exactly once");
+        expect(adapter->address_attempts[kPllResetRegister] == 2,
+            "startup plus the single 2 m tone should reset PLLA twice");
+
+        bool output_inhibited = true;
+        for (const auto& write : adapter->writes)
+        {
+            if (write.first == kOutputEnableRegister)
+                output_inhibited = write.second == kOutputDisableAll;
+            if (write.first == kPllAParameterBaseRegister ||
+                write.first == kPllResetRegister)
+            {
+                expect(output_inhibited,
+                    "single-tone PLL programming must remain output "
+                    "inhibited");
+            }
+        }
+        expect(adapter->registers[kOutputEnableRegister] == kOutputDisableAll,
+            "single-tone cleanup should leave register 3 at 0xFF");
+        expect(adapter->close_calls == 1,
+            "single-tone cleanup should close the device session");
+    }
+
+    void test_single_tone_interruption_cleans_up()
+    {
+        TestBridge bridge;
+        bridge.interrupt_on_wait_call = 1;
+        auto adapter = std::make_shared<FakeI2CAdapter>();
+        WsprSi5351Backend backend(bridge, config(adapter));
+        const wsprrypi::ExecutionPlan plan = single_tone_plan(
+            2.409358,
+            std::chrono::seconds(1));
+
+        expect(configure(backend, plan),
+            "interruptible single 2 m tone should configure");
+        const wsprrypi::ExecutionResult result = backend.execute(plan);
+        expect_interrupted_and_inhibited(
+            result,
+            bridge,
+            *adapter,
+            1,
+            "single-tone wait interruption");
     }
 
     void test_162_symbol_transition_order()
@@ -500,6 +603,8 @@ int main()
 {
     test_committed_calibration_snapshot_and_reporting();
     test_invalid_calibration_fails_before_output_enable();
+    test_single_tone_calibration_reporting_and_cleanup();
+    test_single_tone_interruption_cleans_up();
     test_162_symbol_transition_order();
     test_transition_failure_stays_inhibited();
     test_transition_interruptions_stay_inhibited();

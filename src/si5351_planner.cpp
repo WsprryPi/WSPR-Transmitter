@@ -323,7 +323,7 @@ Si5351Planner::Plan Si5351Planner::buildPlan(
     {
         plan.tone_sets.push_back(buildToneRegisterSet(
             tone.frequency_hz,
-            mode == Mode::WSPR));
+            mode == Mode::WSPR || mode == Mode::TONE));
     }
 
     return plan;

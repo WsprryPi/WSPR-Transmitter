@@ -164,6 +164,8 @@ private:
      * @brief Build one tone register set
      *
      * @param frequency_hz Requested RF frequency
+     * @param allow_pll_retune_candidate Whether a guarded divide-by-6 PLL
+     * retune may be used when the parked-PLL plan is unavailable
      * @return Precomputed tone register set
      */
     ToneRegisterSet buildToneRegisterSet(
