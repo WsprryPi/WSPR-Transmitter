@@ -13,13 +13,16 @@ namespace
     static constexpr std::uint8_t kPllResetRegister = 177;
     static constexpr std::uint8_t kOutputDisableAll = 0xff;
     static constexpr std::uint8_t kClkPowerDown = 0x80;
+    static constexpr std::uint8_t kClkMultisynthIntegerMode = 0x40;
     static constexpr std::uint8_t kClkInputMultisynth = 0x0c;
+    static constexpr std::uint8_t kMultisynthDivideBy4 = 0x0c;
     static constexpr std::uint8_t kResetPllA = 0x20;
     static constexpr std::uint32_t kMaxFractionDenominator = 1048575;
     static constexpr std::uint32_t kMinPllMultiplier = 15;
     static constexpr std::uint32_t kMaxPllMultiplier = 90;
-    static constexpr std::uint32_t kMinMultisynthDivider = 6;
-    static constexpr std::uint32_t kMaxMultisynthDivider = 1800;
+    static constexpr std::uint64_t kMinPllFrequencyHz = 600000000;
+    static constexpr std::uint64_t kMaxPllFrequencyHz = 900000000;
+    static constexpr std::uint32_t kMaxMultisynthDivider = 2048;
 
     struct DividerParameters
     {
@@ -31,6 +34,8 @@ namespace
         std::uint32_t p2 = 0;
         std::uint32_t p3 = 1;
         double actual_ratio = 0.0;
+        bool integer_mode = false;
+        bool divide_by_4 = false;
     };
 
     static bool output_index(
@@ -99,6 +104,60 @@ namespace
         return params;
     }
 
+    static bool is_exact_ratio(double ratio, std::uint32_t value)
+    {
+        return ratio == static_cast<double>(value);
+    }
+
+    static DividerParameters build_multisynth_parameters(double ratio)
+    {
+        DividerParameters params;
+        if (!std::isfinite(ratio) || ratio <= 0.0)
+            return params;
+
+        if (is_exact_ratio(ratio, 4))
+        {
+            params.valid = true;
+            params.a = 4;
+            params.b = 0;
+            params.c = 1;
+            params.p1 = 0;
+            params.p2 = 0;
+            params.p3 = 1;
+            params.actual_ratio = 4.0;
+            params.integer_mode = true;
+            params.divide_by_4 = true;
+            return params;
+        }
+
+        const bool exact_six = is_exact_ratio(ratio, 6);
+        const bool exact_eight = is_exact_ratio(ratio, 8);
+        const double minimum_fractional_ratio = 8.0 +
+            1.0 / static_cast<double>(kMaxFractionDenominator);
+        if (!exact_six && !exact_eight &&
+            (ratio < minimum_fractional_ratio ||
+             ratio > static_cast<double>(kMaxMultisynthDivider)))
+        {
+            return params;
+        }
+
+        params = build_divider_parameters(
+            ratio,
+            exact_six ? 6U : 8U,
+            kMaxMultisynthDivider);
+        if (!params.valid)
+            return params;
+
+        params.integer_mode = params.b == 0 && (params.a % 2U) == 0;
+        return params;
+    }
+
+    static bool valid_parked_pll_frequency(std::uint64_t frequency_hz)
+    {
+        return frequency_hz >= kMinPllFrequencyHz &&
+            frequency_hz <= kMaxPllFrequencyHz;
+    }
+
     static void append_parameter_writes(
         std::vector<Si5351Device::RegisterWrite>& writes,
         std::uint8_t base_register,
@@ -112,7 +171,9 @@ namespace
             static_cast<std::uint8_t>(params.p3 & 0xff)});
         writes.push_back(Si5351Device::RegisterWrite{
             static_cast<std::uint8_t>(base_register + 2),
-            static_cast<std::uint8_t>((params.p1 >> 16) & 0x03)});
+            static_cast<std::uint8_t>(
+                (params.divide_by_4 ? kMultisynthDivideBy4 : 0U) |
+                ((params.p1 >> 16) & 0x03))});
         writes.push_back(Si5351Device::RegisterWrite{
             static_cast<std::uint8_t>(base_register + 3),
             static_cast<std::uint8_t>((params.p1 >> 8) & 0xff)});
@@ -212,7 +273,8 @@ Si5351Planner::buildStartupWrites() const
         }
     }
 
-    if (config_.reference_hz == 0 || config_.parked_pll_hz == 0)
+    if (config_.reference_hz == 0 ||
+        !valid_parked_pll_frequency(config_.parked_pll_hz))
         return writes;
 
     const double pll_ratio =
@@ -285,15 +347,14 @@ Si5351Planner::buildToneRegisterSet(double frequency_hz) const
     if (!output_index(config_.tx_output, tx_index))
         return tone;
 
-    if (frequency_hz <= 0.0 || config_.parked_pll_hz == 0)
+    if (frequency_hz <= 0.0 ||
+        !valid_parked_pll_frequency(config_.parked_pll_hz))
         return tone;
 
     const double multisynth_ratio =
         static_cast<double>(config_.parked_pll_hz) / frequency_hz;
-    const DividerParameters ms_params = build_divider_parameters(
-        multisynth_ratio,
-        kMinMultisynthDivider,
-        kMaxMultisynthDivider);
+    const DividerParameters ms_params =
+        build_multisynth_parameters(multisynth_ratio);
 
     if (!ms_params.valid)
     {
@@ -307,22 +368,23 @@ Si5351Planner::buildToneRegisterSet(double frequency_hz) const
         ms_params);
     tone.writes.push_back(Si5351Device::RegisterWrite{
         clock_control_register(tx_index),
-        kClkInputMultisynth});
+        static_cast<std::uint8_t>(
+            kClkInputMultisynth |
+            (ms_params.integer_mode ? kClkMultisynthIntegerMode : 0U))});
 
     return tone;
 }
 
 double Si5351Planner::quantizeFrequency(double requested_hz) const
 {
-    if (requested_hz <= 0.0 || config_.parked_pll_hz == 0)
+    if (requested_hz <= 0.0 ||
+        !valid_parked_pll_frequency(config_.parked_pll_hz))
         return 0.0;
 
     const double multisynth_ratio =
         static_cast<double>(config_.parked_pll_hz) / requested_hz;
-    const DividerParameters ms_params = build_divider_parameters(
-        multisynth_ratio,
-        kMinMultisynthDivider,
-        kMaxMultisynthDivider);
+    const DividerParameters ms_params =
+        build_multisynth_parameters(multisynth_ratio);
 
     if (!ms_params.valid || ms_params.actual_ratio <= 0.0)
         return 0.0;
