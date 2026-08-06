@@ -23,6 +23,7 @@ namespace
     static constexpr std::uint64_t kMinPllFrequencyHz = 600000000;
     static constexpr std::uint64_t kMaxPllFrequencyHz = 900000000;
     static constexpr std::uint32_t kMaxMultisynthDivider = 2048;
+    static constexpr double kMaxCalibrationPpm = 200.0;
 
     struct DividerParameters
     {
@@ -312,6 +313,8 @@ Si5351Planner::Plan Si5351Planner::buildPlan(
 {
     Plan plan;
     plan.mode = mode;
+    plan.calibration_ppm = config_.calibration_ppm;
+    plan.effective_reference_hz = effectiveReferenceHz();
     plan.startup_writes = buildStartupWrites();
     plan.idle_writes = buildIdleWrites();
     plan.tone_sets.reserve(tones.size());
@@ -364,13 +367,14 @@ Si5351Planner::buildStartupWrites() const
         }
     }
 
-    if (config_.reference_hz == 0 ||
+    const double effective_reference_hz = effectiveReferenceHz();
+    if (effective_reference_hz <= 0.0 ||
         !valid_parked_pll_frequency(config_.parked_pll_hz))
         return writes;
 
     const double pll_ratio =
         static_cast<double>(config_.parked_pll_hz) /
-        static_cast<double>(config_.reference_hz);
+        effective_reference_hz;
     const DividerParameters pll_params = build_divider_parameters(
         pll_ratio,
         kMinPllMultiplier,
@@ -456,7 +460,8 @@ Si5351Planner::buildToneRegisterSet(
         // Direct 2 m WSPR requires a distinct PLL setting for each tone with
         // an exact divide-by-6 MultiSynth.  The backend must inhibit the
         // output around this complete PLL/MultiSynth/reset transition.
-        if (!allow_pll_retune_candidate || config_.reference_hz == 0)
+        const double effective_reference_hz = effectiveReferenceHz();
+        if (!allow_pll_retune_candidate || effective_reference_hz <= 0.0)
             return tone;
 
         const double target_pll_hz = frequency_hz * 6.0;
@@ -467,7 +472,7 @@ Si5351Planner::buildToneRegisterSet(
         }
 
         const DividerParameters pll_params = build_divider_parameters(
-            target_pll_hz / static_cast<double>(config_.reference_hz),
+            target_pll_hz / effective_reference_hz,
             kMinPllMultiplier,
             kMaxPllMultiplier);
         const DividerParameters candidate_ms_params =
@@ -479,7 +484,7 @@ Si5351Planner::buildToneRegisterSet(
         candidate.valid = true;
         candidate.target_pll_hz = target_pll_hz;
         candidate.actual_pll_hz =
-            static_cast<double>(config_.reference_hz) *
+            effective_reference_hz *
             pll_params.actual_ratio;
         candidate.r_divider = 1;
         candidate.pll = divider_plan(pll_params);
@@ -539,4 +544,29 @@ double Si5351Planner::quantizeFrequency(double requested_hz) const
 
     return static_cast<double>(config_.parked_pll_hz) /
         ms_params.actual_ratio;
+}
+
+double Si5351Planner::effectiveReferenceHz() const noexcept
+{
+    if (config_.reference_hz == 0 ||
+        !std::isfinite(config_.calibration_ppm) ||
+        std::fabs(config_.calibration_ppm) > kMaxCalibrationPpm)
+    {
+        return 0.0;
+    }
+
+    const double correction_scale =
+        1.0 - config_.calibration_ppm * 1.0e-6;
+    if (!std::isfinite(correction_scale) || correction_scale <= 0.0)
+        return 0.0;
+
+    const double effective_reference_hz =
+        static_cast<double>(config_.reference_hz) * correction_scale;
+    if (!std::isfinite(effective_reference_hz) ||
+        effective_reference_hz <= 0.0)
+    {
+        return 0.0;
+    }
+
+    return effective_reference_hz;
 }

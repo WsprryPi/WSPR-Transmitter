@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,25 @@ namespace
         }
 
         return false;
+    }
+
+    bool same_register_writes(
+        const std::vector<Si5351Device::RegisterWrite>& lhs,
+        const std::vector<Si5351Device::RegisterWrite>& rhs)
+    {
+        if (lhs.size() != rhs.size())
+            return false;
+
+        for (std::size_t i = 0; i < lhs.size(); ++i)
+        {
+            if (lhs[i].address != rhs[i].address ||
+                lhs[i].value != rhs[i].value)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     DecodedDivider decode_divider(
@@ -532,6 +552,137 @@ namespace
         expect(!tone_mode.tone_sets.front().pll_retune_candidate.valid,
             "non-WSPR modes should not receive a PLL-retune candidate");
     }
+
+    void test_calibrated_reference_planning()
+    {
+        constexpr double requested_hz = 144490497.802734375;
+
+        Si5351Planner::Config zero_config;
+        const Si5351Planner::Plan zero_plan =
+            Si5351Planner(zero_config).buildPlan(
+                Si5351Planner::Mode::WSPR,
+                {Si5351Planner::ToneEntry{requested_hz}});
+        expect(zero_plan.calibration_ppm == 0.0,
+            "zero correction should remain visible in planner metadata");
+        expect(zero_plan.effective_reference_hz == 27000000.0,
+            "zero correction should preserve the nominal reference");
+
+        Si5351Planner::Config positive_config = zero_config;
+        positive_config.calibration_ppm = 2.409358;
+        const Si5351Planner::Plan positive_plan =
+            Si5351Planner(positive_config).buildPlan(
+                Si5351Planner::Mode::WSPR,
+                {Si5351Planner::ToneEntry{requested_hz}});
+        expect(std::fabs(
+                positive_plan.effective_reference_hz -
+                    27000000.0 * (1.0 - 2.409358e-6)) < 1.0e-9,
+            "positive correction should lower the effective reference using "
+            "the GPIO-compatible sign convention");
+        expect(positive_plan.tone_sets.front().requested_hz == requested_hz,
+            "positive correction must preserve requested RF metadata");
+        expect(positive_plan.tone_sets.front().pll_retune_candidate.valid,
+            "positive correction should produce a usable 2 m plan");
+        expect(!same_register_writes(
+                positive_plan.tone_sets.front().writes,
+                zero_plan.tone_sets.front().writes),
+            "positive correction should change the Si5351 register plan");
+
+        Si5351Planner::Config negative_config = zero_config;
+        negative_config.calibration_ppm = -2.409358;
+        const Si5351Planner::Plan negative_plan =
+            Si5351Planner(negative_config).buildPlan(
+                Si5351Planner::Mode::WSPR,
+                {Si5351Planner::ToneEntry{requested_hz}});
+        expect(std::fabs(
+                negative_plan.effective_reference_hz -
+                    27000000.0 * (1.0 + 2.409358e-6)) < 1.0e-9,
+            "negative correction should raise the effective reference using "
+            "the GPIO-compatible sign convention");
+        expect(negative_plan.tone_sets.front().requested_hz == requested_hz,
+            "negative correction must preserve requested RF metadata");
+        expect(negative_plan.tone_sets.front().pll_retune_candidate.valid,
+            "negative correction should produce a usable 2 m plan");
+        expect(!same_register_writes(
+                negative_plan.tone_sets.front().writes,
+                zero_plan.tone_sets.front().writes),
+            "negative correction should change the Si5351 register plan");
+    }
+
+    void test_invalid_calibration_fails_closed()
+    {
+        constexpr double requested_hz = 144490497.802734375;
+        constexpr double invalid_ppm[] = {
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),
+            -std::numeric_limits<double>::infinity(),
+            1000000.0};
+
+        for (const double ppm : invalid_ppm)
+        {
+            Si5351Planner::Config config;
+            config.calibration_ppm = ppm;
+            const Si5351Planner::Plan plan = Si5351Planner(config).buildPlan(
+                Si5351Planner::Mode::WSPR,
+                {Si5351Planner::ToneEntry{requested_hz}});
+            expect(plan.effective_reference_hz == 0.0,
+                "invalid correction should produce no effective reference");
+            expect(!plan.startup_writes.empty() &&
+                    plan.startup_writes.front().address ==
+                        kOutputEnableRegister &&
+                    plan.startup_writes.front().value == 0xff,
+                "invalid correction should retain fail-closed startup");
+            expect(plan.tone_sets.size() == 1 &&
+                    plan.tone_sets.front().actual_hz == 0.0 &&
+                    plan.tone_sets.front().writes.empty(),
+                "invalid correction should produce no usable RF plan");
+        }
+    }
+
+    void test_calibrated_four_tone_spacing_and_span()
+    {
+        constexpr double tones_hz[] = {
+            144490497.802734375,
+            144490499.267578125,
+            144490500.732421875,
+            144490502.197265625};
+        constexpr double spacing_hz = 1.46484375;
+
+        Si5351Planner::Config config;
+        config.calibration_ppm = 2.409358;
+        std::vector<Si5351Planner::ToneEntry> tones;
+        for (const double frequency_hz : tones_hz)
+            tones.push_back(Si5351Planner::ToneEntry{frequency_hz});
+
+        const Si5351Planner::Plan plan = Si5351Planner(config).buildPlan(
+            Si5351Planner::Mode::WSPR,
+            tones);
+        expect(plan.tone_sets.size() == 4,
+            "calibrated 2 m WSPR should retain all four tones");
+        if (plan.tone_sets.size() != 4)
+            return;
+
+        for (std::size_t i = 0; i < 4; ++i)
+        {
+            expect(plan.tone_sets[i].requested_hz == tones_hz[i],
+                "calibration should preserve each requested RF tone");
+            expect(std::fabs(plan.tone_sets[i].actual_hz - tones_hz[i]) <
+                    0.000025,
+                "calibrated 2 m tone error should remain below 25 microhertz");
+            if (i != 0)
+            {
+                expect(std::fabs(
+                        (plan.tone_sets[i].actual_hz -
+                            plan.tone_sets[i - 1].actual_hz) - spacing_hz) <
+                        0.00003,
+                    "calibrated adjacent 2 m spacing should remain WSPR-correct");
+            }
+        }
+        expect(std::fabs(
+                (plan.tone_sets.back().actual_hz -
+                    plan.tone_sets.front().actual_hz) -
+                    3.0 * spacing_hz) < 0.00004,
+            "calibrated four-tone span should remain WSPR-correct");
+    }
 }
 
 int main()
@@ -543,6 +694,9 @@ int main()
     test_rejection_remains_output_disabled();
     test_representative_existing_frequencies();
     test_direct_four_tone_2m_candidate_plan();
+    test_calibrated_reference_planning();
+    test_invalid_calibration_fails_closed();
+    test_calibrated_four_tone_spacing_and_span();
 
     if (failures != 0)
     {
