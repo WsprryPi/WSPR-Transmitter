@@ -11,6 +11,7 @@ namespace
     constexpr std::uint8_t kOutputEnableRegister = 3;
     constexpr std::uint8_t kClkControlBaseRegister = 16;
     constexpr std::uint8_t kPllResetRegister = 177;
+    constexpr std::uint8_t kPllAParameterBaseRegister = 26;
     constexpr std::uint8_t kMs0ParameterBaseRegister = 42;
     constexpr std::uint8_t kIntegerMode = 0x40;
     constexpr std::uint8_t kMultisynthSource = 0x0c;
@@ -18,6 +19,14 @@ namespace
     constexpr std::uint32_t kMaxDenominator = 1048575;
 
     int failures = 0;
+
+    struct DecodedDivider
+    {
+        bool valid = false;
+        std::uint32_t a = 0;
+        std::uint32_t b = 0;
+        std::uint32_t c = 1;
+    };
 
     void expect(bool condition, const std::string& message)
     {
@@ -43,6 +52,54 @@ namespace
         }
 
         return false;
+    }
+
+    DecodedDivider decode_divider(
+        const std::vector<Si5351Device::RegisterWrite>& writes,
+        std::uint8_t base)
+    {
+        std::uint8_t values[8] = {};
+        for (std::uint8_t offset = 0; offset < 8; ++offset)
+        {
+            if (!register_value(
+                    writes,
+                    static_cast<std::uint8_t>(base + offset),
+                    values[offset]))
+            {
+                return DecodedDivider{};
+            }
+        }
+
+        const std::uint32_t p3 =
+            (static_cast<std::uint32_t>((values[5] >> 4) & 0x0f) << 16) |
+            (static_cast<std::uint32_t>(values[0]) << 8) |
+            values[1];
+        const std::uint32_t p1 =
+            (static_cast<std::uint32_t>(values[2] & 0x03) << 16) |
+            (static_cast<std::uint32_t>(values[3]) << 8) |
+            values[4];
+        const std::uint32_t p2 =
+            (static_cast<std::uint32_t>(values[5] & 0x0f) << 16) |
+            (static_cast<std::uint32_t>(values[6]) << 8) |
+            values[7];
+        if (p3 == 0)
+            return DecodedDivider{};
+
+        DecodedDivider divider;
+        divider.a = (p1 + 512U) / 128U;
+        const std::uint32_t intermediate =
+            p1 + 512U - 128U * divider.a;
+        const std::uint64_t fractional_numerator =
+            static_cast<std::uint64_t>(p2) +
+            static_cast<std::uint64_t>(p3) * intermediate;
+        if ((fractional_numerator % 128U) != 0)
+            return DecodedDivider{};
+
+        divider.b = static_cast<std::uint32_t>(
+            fractional_numerator / 128U);
+        divider.c = p3;
+        divider.valid = divider.b < divider.c;
+        return divider;
     }
 
     Si5351Planner::Plan build_plan(
@@ -230,6 +287,73 @@ namespace
         }
     }
 
+    void test_bounded_rational_approximation()
+    {
+        const double exact_ratio = 32.0 +
+            31029.0 / 284671.0;
+        const Si5351Planner::Plan output_plan =
+            build_plan(600000000, exact_ratio);
+        expect(valid_tone(output_plan),
+            "bounded-rational output plan should be valid");
+        if (valid_tone(output_plan))
+        {
+            const DecodedDivider divider = decode_divider(
+                output_plan.tone_sets.front().writes,
+                kMs0ParameterBaseRegister);
+            expect(divider.valid,
+                "bounded-rational output parameters should decode");
+            expect(
+                divider.a == 32 &&
+                    divider.b == 31029 &&
+                    divider.c == 284671,
+                "bounded-rational output should recover the exact "
+                "in-range fraction");
+
+            const double bounded_ratio = static_cast<double>(divider.a) +
+                static_cast<double>(divider.b) /
+                    static_cast<double>(divider.c);
+            const std::uint32_t fixed_numerator =
+                static_cast<std::uint32_t>(std::llround(
+                    (exact_ratio - std::floor(exact_ratio)) *
+                    kMaxDenominator));
+            const double fixed_ratio = std::floor(exact_ratio) +
+                static_cast<double>(fixed_numerator) /
+                    static_cast<double>(kMaxDenominator);
+            expect(
+                std::fabs(bounded_ratio - exact_ratio) <
+                    std::fabs(fixed_ratio - exact_ratio),
+                "bounded rational should improve on the forced maximum "
+                "denominator");
+        }
+
+        const Si5351Planner::Plan pll_plan = build_plan(850000000, 10.0);
+        const DecodedDivider pll_divider = decode_divider(
+            pll_plan.startup_writes,
+            kPllAParameterBaseRegister);
+        expect(pll_divider.valid,
+            "bounded-rational PLL parameters should decode");
+        expect(
+            pll_divider.a == 31 &&
+                pll_divider.b == 13 &&
+                pll_divider.c == 27,
+            "850 MHz from 27 MHz should use the exact reduced 31 + 13/27 "
+            "feedback ratio");
+
+        for (const double ratio : {6.0, 8.0, 10.0})
+        {
+            const Si5351Planner::Plan integer_plan =
+                build_plan(600000000, ratio);
+            const DecodedDivider integer_divider = decode_divider(
+                integer_plan.tone_sets.front().writes,
+                kMs0ParameterBaseRegister);
+            expect(
+                integer_divider.valid &&
+                    integer_divider.b == 0 &&
+                    integer_divider.c == 1,
+                "integer ratios should use denominator one");
+        }
+    }
+
     void test_rejection_remains_output_disabled()
     {
         const Si5351Planner::Plan plan = build_plan(600000000, 6.1);
@@ -304,6 +428,7 @@ int main()
     test_documented_ratio_domain();
     test_special_integer_encoding();
     test_pll_frequency_domain();
+    test_bounded_rational_approximation();
     test_rejection_remains_output_disabled();
     test_representative_existing_frequencies();
 

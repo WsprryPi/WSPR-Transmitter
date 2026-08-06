@@ -38,6 +38,13 @@ namespace
         bool divide_by_4 = false;
     };
 
+    struct RationalApproximation
+    {
+        bool valid = false;
+        std::uint64_t numerator = 0;
+        std::uint32_t denominator = 1;
+    };
+
     static bool output_index(
         Si5351Device::Output output,
         std::uint8_t& index)
@@ -58,37 +65,105 @@ namespace
         return false;
     }
 
+    static RationalApproximation approximate_ratio(double ratio)
+    {
+        RationalApproximation approximation;
+        if (!std::isfinite(ratio) || ratio <= 0.0)
+            return approximation;
+
+        // Walk continued-fraction convergents, then compare the final legal
+        // semiconvergent with the last full convergent.  This finds the
+        // closest fraction whose denominator fits the Si5351 register field.
+        const long double target = static_cast<long double>(ratio);
+        long double remainder = target;
+        std::uint64_t p0 = 0;
+        std::uint64_t q0 = 1;
+        std::uint64_t p1 = 1;
+        std::uint64_t q1 = 0;
+
+        while (true)
+        {
+            const std::uint64_t coefficient =
+                static_cast<std::uint64_t>(std::floor(remainder));
+            if (q1 != 0 && coefficient >
+                (kMaxFractionDenominator - q0) / q1)
+            {
+                break;
+            }
+
+            const std::uint64_t q2 = q0 + coefficient * q1;
+            if (q2 > kMaxFractionDenominator)
+                break;
+
+            const std::uint64_t p2 = p0 + coefficient * p1;
+            p0 = p1;
+            q0 = q1;
+            p1 = p2;
+            q1 = q2;
+
+            const long double fractional = remainder -
+                static_cast<long double>(coefficient);
+            if (fractional == 0.0L)
+                break;
+
+            remainder = 1.0L / fractional;
+        }
+
+        if (q1 == 0)
+            return approximation;
+
+        std::uint64_t best_numerator = p1;
+        std::uint64_t best_denominator = q1;
+        if (q0 != 0 && q1 <= kMaxFractionDenominator)
+        {
+            const std::uint64_t scale =
+                (kMaxFractionDenominator - q0) / q1;
+            const std::uint64_t bound_numerator = p0 + scale * p1;
+            const std::uint64_t bound_denominator = q0 + scale * q1;
+            const long double convergent_error = std::fabs(
+                target - static_cast<long double>(p1) /
+                    static_cast<long double>(q1));
+            const long double bound_error = std::fabs(
+                target - static_cast<long double>(bound_numerator) /
+                    static_cast<long double>(bound_denominator));
+            if (bound_error < convergent_error)
+            {
+                best_numerator = bound_numerator;
+                best_denominator = bound_denominator;
+            }
+        }
+
+        approximation.valid = true;
+        approximation.numerator = best_numerator;
+        approximation.denominator =
+            static_cast<std::uint32_t>(best_denominator);
+        return approximation;
+    }
+
     static DividerParameters build_divider_parameters(
         double ratio,
-        std::uint32_t minimum_integer,
-        std::uint32_t maximum_integer)
+        std::uint32_t minimum_ratio,
+        std::uint32_t maximum_ratio)
     {
         DividerParameters params;
-        if (!std::isfinite(ratio) || ratio <= 0.0)
-            return params;
-
-        const double integer_part = std::floor(ratio);
-        if (integer_part < static_cast<double>(minimum_integer) ||
-            integer_part > static_cast<double>(maximum_integer))
+        if (!std::isfinite(ratio) ||
+            ratio < static_cast<double>(minimum_ratio) ||
+            ratio > static_cast<double>(maximum_ratio))
         {
             return params;
         }
 
-        params.a = static_cast<std::uint32_t>(integer_part);
-        params.c = kMaxFractionDenominator;
+        const RationalApproximation approximation =
+            approximate_ratio(ratio);
+        if (!approximation.valid || approximation.denominator == 0)
+            return params;
 
-        const double fractional_part =
-            ratio - static_cast<double>(params.a);
+        params.a = static_cast<std::uint32_t>(
+            approximation.numerator / approximation.denominator);
         params.b = static_cast<std::uint32_t>(
-            std::llround(fractional_part * params.c));
-
-        if (params.b >= params.c)
-        {
-            params.a += 1;
-            params.b = 0;
-        }
-
-        if (params.a < minimum_integer || params.a > maximum_integer)
+            approximation.numerator % approximation.denominator);
+        params.c = approximation.denominator;
+        if (params.a < minimum_ratio || params.a > maximum_ratio)
             return params;
 
         const std::uint32_t intermediate =
