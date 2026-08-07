@@ -15,8 +15,9 @@ void handle_stop(int) noexcept
 int main(int argc, char** argv)
 {
     using namespace si5351_min_drive_qualification;
+    Options options;
     std::string error;
-    if (!parse_acknowledgement(argc, argv, error))
+    if (!parse_options(argc, argv, options, error))
     {
         std::cerr << error << '\n';
         return 2;
@@ -26,10 +27,12 @@ int main(int argc, char** argv)
     std::signal(SIGTERM, handle_stop);
     std::cout << std::fixed << std::setprecision(9)
               << "LIVE RF QUALIFICATION: /dev/i2c-1 address=0x60 CLK0"
-              << " requested_hz=" << frequency_hz
+              << " tone_index=" << options.tone_index
+              << " requested_hz=" << frequency_hz(options)
+              << " calibration_ppm=" << options.calibration_ppm
               << " drive=2mA duration_ms=" << duration_ms
               << " cycles=1\n";
-    const Result result = run(make_system_adapter(), system_wait_ms);
+    const Result result = run(make_system_adapter(), system_wait_ms, options);
     std::cout << "actual_hz=" << result.actual_hz
               << " register3-before=0x" << std::hex
               << static_cast<unsigned>(result.before)

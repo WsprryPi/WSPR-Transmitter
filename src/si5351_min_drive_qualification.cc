@@ -5,6 +5,8 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cmath>
+#include <cstdlib>
 #include <fcntl.h>
 #include <linux/i2c-dev.h>
 #include <sys/ioctl.h>
@@ -42,27 +44,78 @@ std::string error_or(const Si5351Device& device, const char* fallback)
 
 namespace si5351_min_drive_qualification
 {
-bool parse_acknowledgement(int argc, char** argv, std::string& error)
+double frequency_hz(const Options& options) noexcept
 {
-    if (argc == 2 && argv != nullptr && argv[1] != nullptr &&
-        std::string(argv[1]) == acknowledgement)
-        return true;
-    error = std::string("Refusing RF output: require exactly ") +
-        acknowledgement + ".";
-    return false;
+    return base_frequency_hz +
+        static_cast<double>(options.tone_index) * tone_spacing_hz;
+}
+
+bool parse_options(int argc, char** argv, Options& options, std::string& error)
+{
+    if (argc != 6 || argv == nullptr)
+    {
+        error = std::string("Refusing RF output: require exactly ") +
+            acknowledgement +
+            " --tone-index 0..3 --calibration-ppm VALUE.";
+        return false;
+    }
+    bool acknowledged = false;
+    bool have_tone = false;
+    bool have_ppm = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string argument = argv[i] == nullptr ? "" : argv[i];
+        if (argument == acknowledgement)
+        {
+            if (acknowledged) { error = "Duplicate acknowledgement."; return false; }
+            acknowledged = true;
+        }
+        else if (argument == "--tone-index" && i + 1 < argc)
+        {
+            char* end = nullptr;
+            const unsigned long value = std::strtoul(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || value > 3)
+            { error = "Tone index must be one of 0, 1, 2, or 3."; return false; }
+            options.tone_index = static_cast<unsigned>(value);
+            have_tone = true;
+        }
+        else if (argument == "--calibration-ppm" && i + 1 < argc)
+        {
+            char* end = nullptr;
+            const double value = std::strtod(argv[++i], &end);
+            if (end == argv[i] || *end != '\0' || !std::isfinite(value) ||
+                std::fabs(value) > 100.0)
+            { error = "Calibration PPM must be finite and within +/-100."; return false; }
+            options.calibration_ppm = value;
+            have_ppm = true;
+        }
+        else
+        {
+            error = "Unknown or incomplete qualification argument.";
+            return false;
+        }
+    }
+    if (!acknowledged || !have_tone || !have_ppm)
+    {
+        error = "Acknowledgement, tone index, and calibration PPM are required.";
+        return false;
+    }
+    return true;
 }
 
 Result run(
     std::shared_ptr<Si5351Device::I2CAdapter> adapter,
-    const std::function<bool(unsigned)>& wait_ms)
+    const std::function<bool(unsigned)>& wait_ms,
+    const Options& options)
 {
     Result result;
     Si5351Planner::Config planner_config;
     planner_config.reference_hz = 27000000;
+    planner_config.calibration_ppm = options.calibration_ppm;
     planner_config.tx_output = Si5351Device::Output::CLK0;
     const auto plan = Si5351Planner(planner_config).buildPlan(
         Si5351Planner::Mode::WSPR,
-        {Si5351Planner::ToneEntry{frequency_hz}});
+        {Si5351Planner::ToneEntry{frequency_hz(options)}});
     if (plan.tone_sets.size() != 1)
     {
         result.error = "Planner did not produce exactly one tone.";

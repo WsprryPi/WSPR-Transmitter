@@ -124,7 +124,7 @@ LDFLAGS := -lpthread  -latomic
 LDFLAGS := $(strip $(LDFLAGS))
 
 # Collect dependency files
-DEPFILES := $(wildcard $(DEP_DIR)/**/*.d)
+DEPFILES := $(shell find $(DEP_DIR) -type f -name '*.d' 2>/dev/null)
 -include $(DEPFILES)
 
 # Compiler Executables

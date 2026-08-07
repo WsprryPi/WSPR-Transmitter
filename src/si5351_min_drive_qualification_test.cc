@@ -55,15 +55,24 @@ int main()
     std::string error;
     char p0[] = "qualification";
     char p1[] = "--i-understand-this-enables-one-2m-si5351-burst";
-    char* good[] = {p0, p1};
-    require(parse_acknowledgement(2, good, error), "exact acknowledgement accepted");
-    require(!parse_acknowledgement(1, good, error), "missing acknowledgement refused");
+    char p2[] = "--tone-index";
+    char p3[] = "3";
+    char p4[] = "--calibration-ppm";
+    char p5[] = "2.246308555";
+    char* good[] = {p0, p1, p2, p3, p4, p5};
+    Options options;
+    require(parse_options(6, good, options, error), "guarded options accepted");
+    require(options.tone_index == 3 && options.calibration_ppm == 2.246308555,
+        "guarded options retained");
+    require(frequency_hz(options) == base_frequency_hz + 3.0 * tone_spacing_hz,
+        "tone index selects only an approved WSPR frequency");
+    require(!parse_options(1, good, options, error), "missing options refused");
 
     auto success_adapter = std::make_shared<FakeAdapter>();
     success_adapter->registers[3] = 0xff;
     unsigned waits = 0;
     const Result success = run(success_adapter, [&waits](unsigned milliseconds)
-    { ++waits; return milliseconds == duration_ms; });
+    { ++waits; return milliseconds == duration_ms; }, options);
     require(success.ok && waits == 1 && success.after_inhibit == 0xff &&
             success.after_cleanup == 0xff && success.writes.size() == 19,
         "one bounded burst succeeds and cleans up");

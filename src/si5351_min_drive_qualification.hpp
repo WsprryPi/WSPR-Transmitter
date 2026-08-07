@@ -11,8 +11,15 @@
 
 namespace si5351_min_drive_qualification
 {
-constexpr double frequency_hz = 144490497.802734375;
-constexpr unsigned duration_ms = 600000;
+constexpr double base_frequency_hz = 144490497.802734375;
+constexpr double tone_spacing_hz = 1.46484375;
+constexpr unsigned duration_ms = 60000;
+
+struct Options
+{
+    unsigned tone_index{0};
+    double calibration_ppm{0.0};
+};
 
 struct Result
 {
@@ -25,10 +32,12 @@ struct Result
     std::vector<std::pair<std::uint8_t, std::uint8_t>> writes;
 };
 
-bool parse_acknowledgement(int argc, char** argv, std::string& error);
+double frequency_hz(const Options& options) noexcept;
+bool parse_options(int argc, char** argv, Options& options, std::string& error);
 Result run(
     std::shared_ptr<Si5351Device::I2CAdapter> adapter,
-    const std::function<bool(unsigned)>& wait_ms);
+    const std::function<bool(unsigned)>& wait_ms,
+    const Options& options = {});
 std::shared_ptr<Si5351Device::I2CAdapter> make_system_adapter();
 bool system_wait_ms(unsigned milliseconds);
 void request_stop() noexcept;
