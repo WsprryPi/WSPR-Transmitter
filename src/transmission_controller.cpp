@@ -1,5 +1,7 @@
 #include "transmission_controller.hpp"
 
+#include "gpio_band_policy.hpp"
+
 namespace wsprrypi
 {
 
@@ -16,6 +18,14 @@ BackendCompileResult TransmissionController::prepare(
     const TransmissionPrepareOptions& options)
 {
     prepared_plan_ = compiler_.compile(request);
+    const GpioBandPolicyDecision policy =
+        evaluate_gpio_band_policy(*prepared_plan_);
+    if (!policy.allowed)
+    {
+        prepared_plan_.reset();
+        return BackendCompileResult{false, {}, policy.error};
+    }
+
     const BackendCompileResult configure_result = backend_.configure(
         *prepared_plan_,
         build_backend_inputs(request, options));
