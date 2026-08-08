@@ -36,10 +36,13 @@ inline GpioBandPolicyDecision evaluate_gpio_band_policy(
     };
 
     // These ranges intentionally match WsprryPi's canonical HamBand lookup.
-    static constexpr std::array<DisqualifiedBand, 3> disqualified_bands{{
+    static constexpr std::array<DisqualifiedBand, 6> disqualified_bands{{
         {"12 m", 24890000.0, 24990000.0},
         {"6 m", 50000000.0, 52000000.0},
+        {"4 m", 70000000.0, 71000000.0},
         {"2 m", 144000000.0, 148000000.0},
+        {"1.25 m", 222000000.0, 225000000.0},
+        {"70 cm", 420000000.0, 450000000.0},
     }};
 
     for (const auto& band : disqualified_bands)
@@ -53,8 +56,9 @@ inline GpioBandPolicyDecision evaluate_gpio_band_policy(
         decision.error =
             "Direct GPIO transmission is blocked on the " + decision.band +
             " band because that band is not qualified for usable output. "
-            "This restriction applies only to direct GPIO; select the Si5351 "
-            "backend or choose a GPIO-qualified band.";
+            "This restriction applies only to direct GPIO; choose a "
+            "GPIO-qualified band or a transmitter backend separately "
+            "qualified for the requested band.";
         return decision;
     }
 
