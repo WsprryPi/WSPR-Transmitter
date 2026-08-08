@@ -347,15 +347,10 @@ bool safeState(
     const bool dma_safe =
         (after.dma_control_status & 1u) == 0 &&
         after.dma_control_block_address == 0 &&
-        after.dma_transfer_information == 0 &&
-        after.dma_source_address == 0 &&
-        after.dma_destination_address == 0 &&
-        after.dma_transfer_length == 0 &&
-        after.dma_stride == 0 &&
         after.dma_next_control_block == 0;
     if (!dma_safe)
     {
-        error = "DMA channel 0 did not reach the required inactive cleared state.";
+        error = "DMA channel 0 did not reach the required inactive detached state.";
         return false;
     }
     if (after.pwm_control != 0 || after.pwm_dma_configuration != 0)

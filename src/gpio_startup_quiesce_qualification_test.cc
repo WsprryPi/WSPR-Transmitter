@@ -72,6 +72,7 @@ public:
     int fail_map_at{0};
     bool fail_unmap{false};
     bool fail_close{false};
+    bool retain_inactive_descriptor_state{false};
 
     bool supportedPlatform(std::string &) override { return true; }
 
@@ -128,6 +129,13 @@ public:
             return reject(error, "fake write lifecycle or register");
         if (fail_write_at == writes)
             return reject(error, "injected write failure");
+        if (retain_inactive_descriptor_state && value == 0 &&
+            (reg == RpiStartupQuiesceRegister::Dma0TransferInformation ||
+             reg == RpiStartupQuiesceRegister::Dma0SourceAddress ||
+             reg == RpiStartupQuiesceRegister::Dma0DestinationAddress ||
+             reg == RpiStartupQuiesceRegister::Dma0TransferLength ||
+             reg == RpiStartupQuiesceRegister::Dma0Stride))
+            return true;
         registers[reg] = value;
         return true;
     }
@@ -244,6 +252,23 @@ void testSuccessfulQualification(int gpio)
            "successful qualification must satisfy the audit policy");
 }
 
+void testInactiveDescriptorStateMayRemainVisible()
+{
+    using namespace gpio_startup_quiesce_qualification;
+    auto fake = std::make_shared<FakeAccess>();
+    fake->retain_inactive_descriptor_state = true;
+    const Result result = run(Options{4, 2}, fake);
+    expect(result.ok && result.backend_calls == 2,
+           "inactive DMA descriptor fields retained by hardware must not fail qualification");
+    expect((result.after_second.dma_control_status & 1u) == 0 &&
+               result.after_second.dma_control_block_address == 0 &&
+               result.after_second.dma_next_control_block == 0 &&
+               result.after_second.dma_transfer_information != 0 &&
+               result.after_second.dma_source_address != 0 &&
+               result.after_second.dma_destination_address != 0,
+           "retained descriptor test must still prove inactive detached DMA state");
+}
+
 void testAuditRejections()
 {
     using namespace gpio_startup_quiesce_qualification;
@@ -334,6 +359,7 @@ int main()
     testStrictCli();
     testSuccessfulQualification(4);
     testSuccessfulQualification(20);
+    testInactiveDescriptorStateMayRemainVisible();
     testAuditRejections();
     testFailureCleanup();
     testBuildOnlyTargetSourceContract();

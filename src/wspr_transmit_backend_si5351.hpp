@@ -227,9 +227,10 @@ private:
      * @brief Switch the active output to the specified tone index
      *
      * @param tone_index Tone index in the planned tone-set array
+     * @param rf_enabled Whether the output is currently enabled
      * @return True on success
      */
-    bool applyTone(std::size_t tone_index);
+    bool applyTone(std::size_t tone_index, bool rf_enabled);
 
     /**
      * @brief Enable the transmit output
@@ -253,7 +254,6 @@ private:
     IControllerBridge& owner_;
     Config config_;
     Si5351Device device_;
-    Si5351Planner planner_;
     wsprrypi::ExecutionPlan current_plan_;
     std::vector<double> unique_tone_frequencies_;
     std::vector<std::size_t> event_tone_indexes_;

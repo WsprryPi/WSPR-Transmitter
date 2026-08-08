@@ -43,6 +43,7 @@ public:
     struct Config
     {
         std::uint32_t reference_hz = 27000000;
+        double calibration_ppm = 0.0;
         std::uint64_t parked_pll_hz = 850000000;
         Si5351Device::Output tx_output = Si5351Device::Output::CLK0;
         bool park_unused_outputs = true;
@@ -58,6 +59,40 @@ public:
     };
 
     /**
+     * @brief Decoded Si5351 divider parameters
+     */
+    struct DividerPlan
+    {
+        bool valid = false;
+        std::uint32_t integer = 0;
+        std::uint32_t numerator = 0;
+        std::uint32_t denominator = 1;
+        std::uint32_t p1 = 0;
+        std::uint32_t p2 = 0;
+        std::uint32_t p3 = 1;
+        double actual_ratio = 0.0;
+    };
+
+    /**
+     * @brief Per-tone PLL-retune plan
+     *
+     * The plan records the complete divider and register data.  The containing
+     * tone set marks that the backend must inhibit the output around these
+     * writes.
+     */
+    struct PllRetuneCandidate
+    {
+        bool valid = false;
+        double target_pll_hz = 0.0;
+        double actual_pll_hz = 0.0;
+        std::uint32_t r_divider = 1;
+        DividerPlan pll;
+        DividerPlan multisynth;
+        std::vector<Si5351Device::RegisterWrite> pll_writes;
+        std::vector<Si5351Device::RegisterWrite> multisynth_writes;
+    };
+
+    /**
      * @brief Precomputed register set for one tone
      *
      * This should contain only the writes needed to move the active output
@@ -68,6 +103,8 @@ public:
         double requested_hz = 0.0;
         double actual_hz = 0.0;
         std::vector<Si5351Device::RegisterWrite> writes;
+        bool requires_output_inhibit = false;
+        PllRetuneCandidate pll_retune_candidate;
     };
 
     /**
@@ -76,6 +113,8 @@ public:
     struct Plan
     {
         Mode mode = Mode::TONE;
+        double calibration_ppm = 0.0;
+        double effective_reference_hz = 0.0;
         std::vector<Si5351Device::RegisterWrite> startup_writes;
         std::vector<Si5351Device::RegisterWrite> idle_writes;
         std::vector<ToneRegisterSet> tone_sets;
@@ -125,9 +164,13 @@ private:
      * @brief Build one tone register set
      *
      * @param frequency_hz Requested RF frequency
+     * @param allow_pll_retune_candidate Whether a guarded divide-by-6 PLL
+     * retune may be used when the parked-PLL plan is unavailable
      * @return Precomputed tone register set
      */
-    ToneRegisterSet buildToneRegisterSet(double frequency_hz) const;
+    ToneRegisterSet buildToneRegisterSet(
+        double frequency_hz,
+        bool allow_pll_retune_candidate) const;
 
     /**
      * @brief Quantize a requested frequency to the achievable output
@@ -136,6 +179,16 @@ private:
      * @return Achievable output frequency
      */
     double quantizeFrequency(double requested_hz) const;
+
+    /**
+     * @brief Return the calibrated reference used for synthesis planning
+     *
+     * Uses the existing GPIO-compatible convention: a positive correction
+     * lowers the effective reference by the requested parts per million.
+     *
+     * @return Finite positive effective reference, or zero when unusable
+     */
+    double effectiveReferenceHz() const noexcept;
 
     Config config_;
 };

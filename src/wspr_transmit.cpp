@@ -50,6 +50,7 @@
 
 // Project headers
 #include "wspr_transmit.hpp" // Class Declarations
+#include "gpio_band_policy.hpp"
 #include "wspr_transmit_backend_rpi.hpp"
 #include "wspr_transmit_backend_si5351.hpp"
 
@@ -593,6 +594,15 @@ void WsprTransmitter::clearExecutionStateAfterStop() noexcept
 void WsprTransmitter::configureExecution(
     const TransmissionRequest &request)
 {
+    if (!request.isSkipWindow())
+    {
+        const auto policy = wsprrypi::evaluate_gpio_band_policy(
+            selected_backend_,
+            request.actual_rf_frequency_hz);
+        if (!policy.allowed)
+            throw std::invalid_argument(policy.error);
+    }
+
     if (request.isTone() && selected_backend_ == wsprrypi::BackendKind::SI5351)
     {
         wsprrypi::TransmissionRequest controller_request;
@@ -725,6 +735,22 @@ void WsprTransmitter::configureExecution(
             "Canonical WSPR configuration received tone legacy context.");
     }
 
+    if (request.mode == wsprrypi::TransmissionMode::WSPR &&
+        !legacy_request.isSkipWindow() &&
+        legacy_request.payload.frames.empty())
+    {
+        throw std::invalid_argument(
+            "WSPR transmission request contains no frames.");
+    }
+
+    // Compile and enforce the GPIO band policy before stopping or preparing
+    // any transmission hardware. TransmissionController repeats this check
+    // immediately before backend configuration as defense in depth.
+    const auto policy = wsprrypi::evaluate_gpio_band_policy(
+        execution_plan_compiler_.compile(request));
+    if (!policy.allowed)
+        throw std::invalid_argument(policy.error);
+
     // Reconfiguration is only safe when the transmit thread is not actively
     // feeding DMA. If a transmission is in progress, stop it first.
     if (state_.load(std::memory_order_acquire) == State::TRANSMITTING)
@@ -736,14 +762,6 @@ void WsprTransmitter::configureExecution(
     cleanupTransmissionBackend();
 
     stop_requested_.store(false);
-
-    if (request.mode == wsprrypi::TransmissionMode::WSPR &&
-        !legacy_request.isSkipWindow() &&
-        legacy_request.payload.frames.empty())
-    {
-        throw std::invalid_argument(
-            "WSPR transmission request contains no frames.");
-    }
 
     current_request_ = legacy_request;
     current_execution_plan_ = wsprrypi::ExecutionPlan{};
