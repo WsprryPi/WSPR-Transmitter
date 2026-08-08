@@ -108,6 +108,15 @@ std::shared_ptr<IRpiStartupQuiesceAccess>
 makeProductionRpiStartupQuiesceAccess();
 
 /**
+ * @brief Calculate the GPIO backend's effective PLLD rate.
+ *
+ * @details GPIO PPM is a source-clock rate estimate: positive means the
+ * source runs fast and negative means it runs slow. The value is bounded to
+ * the configuration contract so invalid execution plans fail closed.
+ */
+double gpioCorrectedPlldFrequency(double nominal_hz, double source_rate_ppm);
+
+/**
  * @class WsprRpiBackend
  * @brief Raspberry Pi implementation of the generic transmission backend.
  *
