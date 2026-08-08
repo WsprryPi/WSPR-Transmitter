@@ -460,6 +460,28 @@ makeProductionRpiStartupQuiesceAccess()
     return std::make_shared<ProductionRpiStartupQuiesceAccess>();
 }
 
+double gpioCorrectedPlldFrequency(double nominal_hz, double source_rate_ppm)
+{
+    static constexpr double kMaxSourceRatePpm = 200.0;
+
+    if (!std::isfinite(nominal_hz) || nominal_hz <= 0.0)
+    {
+        throw std::invalid_argument(
+            "GPIO nominal PLLD frequency must be finite and positive.");
+    }
+    if (!std::isfinite(source_rate_ppm) ||
+        std::fabs(source_rate_ppm) > kMaxSourceRatePpm)
+    {
+        throw std::invalid_argument(
+            "GPIO source-rate PPM must be finite and within +/-200.");
+    }
+
+    // A positive estimate means the physical source runs fast. Increasing
+    // the assumed PLLD rate increases the programmed divisor and moves the
+    // physical GPIO RF output lower toward the requested frequency.
+    return nominal_hz * (1.0 + source_rate_ppm * 1.0e-6);
+}
+
 WsprRpiBackend::DMAConfig::DMAConfig()
     : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
       plld_clock_frequency(plld_nominal_freq),
@@ -2705,8 +2727,9 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
 
     configure_transmit_gpio(plan.tx_gpio);
 
-    dma_config_.plld_clock_frequency =
-        dma_config_.plld_nominal_freq * (1.0 - (plan.ppm * 1.0e-6));
+    dma_config_.plld_clock_frequency = gpioCorrectedPlldFrequency(
+        dma_config_.plld_nominal_freq,
+        plan.ppm);
 
     if (!std::isfinite(dma_config_.plld_clock_frequency) ||
         dma_config_.plld_clock_frequency <= 0.0)

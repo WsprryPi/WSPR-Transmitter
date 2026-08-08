@@ -5,10 +5,12 @@
 #include "wspr_transmit_backend_si5351.hpp"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -602,6 +604,59 @@ namespace
                context + ": no forbidden startup operation may occur");
     }
 
+    void test_gpio_ppm_sign_and_bounds()
+    {
+        constexpr double nominal_hz = 500000000.0;
+        constexpr double requested_rf_hz = 28126100.0;
+        constexpr double ppm = 100.0;
+        constexpr double physical_fast_plld_hz =
+            nominal_hz * (1.0 + ppm * 1.0e-6);
+
+        const double zero_hz = gpioCorrectedPlldFrequency(nominal_hz, 0.0);
+        const double positive_hz = gpioCorrectedPlldFrequency(nominal_hz, ppm);
+        const double negative_hz = gpioCorrectedPlldFrequency(nominal_hz, -ppm);
+        expect(zero_hz == nominal_hz,
+               "zero GPIO source-rate PPM must leave PLLD unchanged");
+        expect(positive_hz > zero_hz && negative_hz < zero_hz,
+               "positive GPIO source-rate PPM must raise assumed PLLD and negative must lower it");
+
+        const double zero_divisor = zero_hz / requested_rf_hz;
+        const double positive_divisor = positive_hz / requested_rf_hz;
+        const double negative_divisor = negative_hz / requested_rf_hz;
+        const double zero_actual_rf_hz = physical_fast_plld_hz / zero_divisor;
+        const double positive_actual_rf_hz = physical_fast_plld_hz / positive_divisor;
+        const double negative_actual_rf_hz = physical_fast_plld_hz / negative_divisor;
+        expect(positive_actual_rf_hz < zero_actual_rf_hz &&
+                   negative_actual_rf_hz > zero_actual_rf_hz,
+               "positive GPIO source-rate PPM must move fast-clock RF lower and negative must move it higher");
+        expect(std::fabs(positive_actual_rf_hz - requested_rf_hz) < 1.0e-6,
+               "matching positive GPIO source-rate PPM must correct the modeled 10 m RF frequency");
+
+        expect(gpioCorrectedPlldFrequency(nominal_hz, 200.0) > nominal_hz &&
+                   gpioCorrectedPlldFrequency(nominal_hz, -200.0) < nominal_hz,
+               "GPIO source-rate PPM bounds must remain valid");
+
+        for (const double invalid_ppm : {
+                 200.000001,
+                 -200.000001,
+                 std::numeric_limits<double>::infinity(),
+                 -std::numeric_limits<double>::infinity(),
+                 std::numeric_limits<double>::quiet_NaN()})
+        {
+            bool rejected = false;
+            try
+            {
+                (void)gpioCorrectedPlldFrequency(nominal_hz, invalid_ppm);
+            }
+            catch (const std::invalid_argument&)
+            {
+                rejected = true;
+            }
+            expect(rejected,
+                   "invalid GPIO source-rate PPM must fail closed");
+        }
+    }
+
     void test_rpi_gpio4_exact_safe_trace()
     {
         TestBridge bridge;
@@ -755,6 +810,7 @@ int main()
     test_si5351_quiesce_success_and_repeat();
     test_si5351_quiesce_failures_close_handles();
     test_si5351_dry_run_avoids_i2c();
+    test_gpio_ppm_sign_and_bounds();
     test_rpi_gpio4_exact_safe_trace();
     test_rpi_gpio20_exact_safe_trace();
     test_rpi_repeated_call_safety();
