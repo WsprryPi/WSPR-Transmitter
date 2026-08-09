@@ -17,6 +17,7 @@ namespace
     constexpr std::uint8_t kIntegerMode = 0x40;
     constexpr std::uint8_t kMultisynthSource = 0x0c;
     constexpr std::uint8_t kDivideBy4 = 0x0c;
+    constexpr std::uint8_t kRDividerMask = 0x70;
     constexpr std::uint32_t kMaxDenominator = 1048575;
 
     int failures = 0;
@@ -146,6 +147,25 @@ namespace
             !plan.tone_sets.front().writes.empty();
     }
 
+    void expect_r_divider(
+        const Si5351Planner::ToneRegisterSet& tone,
+        std::uint32_t divider,
+        std::uint8_t code,
+        const std::string& label)
+    {
+        expect(tone.r_divider == divider,
+            label + " should expose the selected R divider");
+        std::uint8_t parameter_byte = 0;
+        expect(register_value(
+                tone.writes,
+                static_cast<std::uint8_t>(kMs0ParameterBaseRegister + 2),
+                parameter_byte),
+            label + " should program the CLK0 MultiSynth parameter byte");
+        expect((parameter_byte & kRDividerMask) ==
+                static_cast<std::uint8_t>(code << 4),
+            label + " should encode the selected R divider");
+    }
+
     void expect_valid_ratio(double ratio, const std::string& label)
     {
         const Si5351Planner::Plan plan = build_plan(600000000, ratio);
@@ -189,7 +209,18 @@ namespace
             "documented minimum fractional ratio");
         expect_valid_ratio(9.5, "representative fractional ratio");
         expect_valid_ratio(2048.0, "maximum ratio");
-        expect_invalid_ratio(2048.001, "ratio above maximum");
+        const Si5351Planner::Plan r_divided =
+            build_plan(600000000, 2048.001);
+        expect(valid_tone(r_divided),
+            "output beyond the direct ratio limit should use an R divider");
+        if (valid_tone(r_divided))
+        {
+            expect_r_divider(
+                r_divided.tone_sets.front(),
+                4,
+                2,
+                "output beyond the direct ratio limit");
+        }
     }
 
     void test_special_integer_encoding()
@@ -440,6 +471,78 @@ namespace
                     " Hz error should remain below the existing "
                     "fixed-denominator resolution bound");
         }
+    }
+
+    void test_low_frequency_r_divider_plans()
+    {
+        struct Case
+        {
+            const char* label;
+            double base_hz;
+            std::uint32_t r_divider;
+            std::uint8_t r_code;
+        };
+        constexpr Case cases[] = {
+            {"160 m", 1838100.0, 1, 0},
+            {"630 m", 475700.0, 4, 2},
+            {"2200 m", 137500.0, 8, 3}};
+        constexpr double spacing_hz = 1.46484375;
+
+        for (const Case& test : cases)
+        {
+            Si5351Planner::Config config;
+            std::vector<Si5351Planner::ToneEntry> tones;
+            for (std::size_t i = 0; i < 4; ++i)
+            {
+                tones.push_back(Si5351Planner::ToneEntry{
+                    test.base_hz + spacing_hz * static_cast<double>(i)});
+            }
+
+            const Si5351Planner::Plan plan = Si5351Planner(config).buildPlan(
+                Si5351Planner::Mode::WSPR,
+                tones);
+            expect(plan.tone_sets.size() == 4,
+                std::string(test.label) + " should produce four tone sets");
+            if (plan.tone_sets.size() != 4)
+                continue;
+
+            for (std::size_t i = 0; i < 4; ++i)
+            {
+                const Si5351Planner::ToneRegisterSet& tone =
+                    plan.tone_sets[i];
+                expect(tone.actual_hz > 0.0 && !tone.writes.empty(),
+                    std::string(test.label) + " tone should be plannable");
+                expect(!tone.requires_output_inhibit &&
+                        !tone.pll_retune_candidate.valid,
+                    std::string(test.label) +
+                        " should retain the fixed parked PLL");
+                expect_r_divider(
+                    tone,
+                    test.r_divider,
+                    test.r_code,
+                    std::string(test.label));
+                expect(std::fabs(tone.actual_hz - tones[i].frequency_hz) <
+                        0.000001,
+                    std::string(test.label) +
+                        " frequency error should remain below one microhertz");
+                if (i != 0)
+                {
+                    expect(std::fabs(
+                            (tone.actual_hz - plan.tone_sets[i - 1].actual_hz) -
+                                spacing_hz) < 0.000002,
+                        std::string(test.label) +
+                            " adjacent tone spacing should remain WSPR-correct");
+                }
+            }
+        }
+
+        Si5351Planner::Config config;
+        const Si5351Planner::Plan below_limit =
+            Si5351Planner(config).buildPlan(
+                Si5351Planner::Mode::TONE,
+                {Si5351Planner::ToneEntry{7812.49}});
+        expect(!valid_tone(below_limit),
+            "frequency below the R-divider synthesis floor should fail closed");
     }
 
     void test_direct_four_tone_2m_candidate_plan()
@@ -776,6 +879,7 @@ int main()
     test_bounded_rational_approximation();
     test_rejection_remains_output_disabled();
     test_representative_existing_frequencies();
+    test_low_frequency_r_divider_plans();
     test_direct_four_tone_2m_candidate_plan();
     test_calibrated_single_tone_planning();
     test_calibrated_reference_planning();

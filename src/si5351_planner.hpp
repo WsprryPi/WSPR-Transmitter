@@ -102,6 +102,7 @@ public:
     {
         double requested_hz = 0.0;
         double actual_hz = 0.0;
+        std::uint32_t r_divider = 1;
         std::vector<Si5351Device::RegisterWrite> writes;
         bool requires_output_inhibit = false;
         PllRetuneCandidate pll_retune_candidate;
@@ -170,6 +171,7 @@ private:
      */
     ToneRegisterSet buildToneRegisterSet(
         double frequency_hz,
+        std::uint32_t r_divider,
         bool allow_pll_retune_candidate) const;
 
     /**
@@ -178,7 +180,9 @@ private:
      * @param requested_hz Requested output frequency
      * @return Achievable output frequency
      */
-    double quantizeFrequency(double requested_hz) const;
+    double quantizeFrequency(
+        double requested_hz,
+        std::uint32_t r_divider) const;
 
     /**
      * @brief Return the calibrated reference used for synthesis planning

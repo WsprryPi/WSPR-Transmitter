@@ -23,6 +23,11 @@ namespace
     static constexpr std::uint64_t kMinPllFrequencyHz = 600000000;
     static constexpr std::uint64_t kMaxPllFrequencyHz = 900000000;
     static constexpr std::uint32_t kMaxMultisynthDivider = 2048;
+    // QRP Labs' documented low-frequency practice keeps the MultiSynth at or
+    // above 1 MHz and uses the final R-divider below that point.  This leaves
+    // margin above the Si5351's absolute 500 kHz MultiSynth floor.
+    static constexpr double kMinMultisynthOutputHz = 1000000.0;
+    static constexpr double kMaxMultisynthOutputHz = 200000000.0;
     static constexpr double kMaxCalibrationPpm = 200.0;
 
     struct DividerParameters
@@ -37,6 +42,7 @@ namespace
         double actual_ratio = 0.0;
         bool integer_mode = false;
         bool divide_by_4 = false;
+        std::uint8_t r_divider_code = 0;
     };
 
     struct RationalApproximation
@@ -234,6 +240,80 @@ namespace
             frequency_hz <= kMaxPllFrequencyHz;
     }
 
+    static std::uint32_t select_r_divider(
+        const std::vector<Si5351Planner::ToneEntry>& tones,
+        std::uint64_t parked_pll_hz)
+    {
+        static constexpr std::uint32_t dividers[] = {
+            1, 2, 4, 8, 16, 32, 64, 128};
+        std::uint32_t output_domain_fallback = 0;
+
+        for (std::uint8_t code = 0; code < 8; ++code)
+        {
+            const std::uint32_t divider = dividers[code];
+            bool valid = !tones.empty();
+            for (const Si5351Planner::ToneEntry& tone : tones)
+            {
+                const double internal_hz =
+                    tone.frequency_hz * static_cast<double>(divider);
+                if (!std::isfinite(internal_hz) ||
+                    internal_hz < kMinMultisynthOutputHz ||
+                    internal_hz > kMaxMultisynthOutputHz)
+                {
+                    valid = false;
+                    break;
+                }
+
+                const double multisynth_ratio =
+                    static_cast<double>(parked_pll_hz) / internal_hz;
+                if (!build_multisynth_parameters(multisynth_ratio).valid)
+                    valid = false;
+            }
+            if (valid)
+                return divider;
+
+            bool in_output_domain = !tones.empty();
+            for (const Si5351Planner::ToneEntry& tone : tones)
+            {
+                const double internal_hz =
+                    tone.frequency_hz * static_cast<double>(divider);
+                if (!std::isfinite(internal_hz) ||
+                    internal_hz < kMinMultisynthOutputHz ||
+                    internal_hz > kMaxMultisynthOutputHz)
+                {
+                    in_output_domain = false;
+                    break;
+                }
+            }
+            if (output_domain_fallback == 0 && in_output_domain)
+                output_domain_fallback = divider;
+        }
+
+        // Preserve the existing guarded PLL-retune path for frequencies such
+        // as 2 m whose output stage is legal but whose parked-PLL ratio is not.
+        return output_domain_fallback;
+    }
+
+    static bool set_r_divider_code(
+        DividerParameters& params,
+        std::uint32_t r_divider)
+    {
+        std::uint32_t value = r_divider;
+        std::uint8_t code = 0;
+        while (value > 1 && code < 7)
+        {
+            if ((value % 2U) != 0)
+                return false;
+            value /= 2U;
+            ++code;
+        }
+        if (value != 1)
+            return false;
+
+        params.r_divider_code = code;
+        return true;
+    }
+
     static void append_parameter_writes(
         std::vector<Si5351Device::RegisterWrite>& writes,
         std::uint8_t base_register,
@@ -249,6 +329,7 @@ namespace
             static_cast<std::uint8_t>(base_register + 2),
             static_cast<std::uint8_t>(
                 (params.divide_by_4 ? kMultisynthDivideBy4 : 0U) |
+                ((params.r_divider_code & 0x07U) << 4) |
                 ((params.p1 >> 16) & 0x03))});
         writes.push_back(Si5351Device::RegisterWrite{
             static_cast<std::uint8_t>(base_register + 3),
@@ -319,10 +400,14 @@ Si5351Planner::Plan Si5351Planner::buildPlan(
     plan.idle_writes = buildIdleWrites();
     plan.tone_sets.reserve(tones.size());
 
+    const std::uint32_t r_divider =
+        select_r_divider(tones, config_.parked_pll_hz);
+
     for (const ToneEntry& tone : tones)
     {
         plan.tone_sets.push_back(buildToneRegisterSet(
             tone.frequency_hz,
+            r_divider,
             mode == Mode::WSPR || mode == Mode::TONE));
     }
 
@@ -434,24 +519,29 @@ Si5351Planner::buildIdleWrites() const
 Si5351Planner::ToneRegisterSet
 Si5351Planner::buildToneRegisterSet(
     double frequency_hz,
+    std::uint32_t r_divider,
     bool allow_pll_retune_candidate) const
 {
     ToneRegisterSet tone;
     tone.requested_hz = frequency_hz;
-    tone.actual_hz = quantizeFrequency(frequency_hz);
+    tone.r_divider = r_divider == 0 ? 1 : r_divider;
+    tone.actual_hz = quantizeFrequency(frequency_hz, r_divider);
 
     std::uint8_t tx_index = 0;
     if (!output_index(config_.tx_output, tx_index))
         return tone;
 
-    if (frequency_hz <= 0.0 ||
+    if (frequency_hz <= 0.0 || r_divider == 0 ||
         !valid_parked_pll_frequency(config_.parked_pll_hz))
         return tone;
 
     const double multisynth_ratio =
-        static_cast<double>(config_.parked_pll_hz) / frequency_hz;
-    const DividerParameters ms_params =
+        static_cast<double>(config_.parked_pll_hz) /
+        (frequency_hz * static_cast<double>(r_divider));
+    DividerParameters ms_params =
         build_multisynth_parameters(multisynth_ratio);
+    if (ms_params.valid && !set_r_divider_code(ms_params, r_divider))
+        ms_params.valid = false;
 
     if (!ms_params.valid)
     {
@@ -510,6 +600,7 @@ Si5351Planner::buildToneRegisterSet(
             kPllResetRegister,
             kResetPllA});
         tone.requires_output_inhibit = true;
+        tone.r_divider = 1;
         tone.actual_hz = candidate.actual_pll_hz /
             candidate_ms_params.actual_ratio;
         return tone;
@@ -528,14 +619,17 @@ Si5351Planner::buildToneRegisterSet(
     return tone;
 }
 
-double Si5351Planner::quantizeFrequency(double requested_hz) const
+double Si5351Planner::quantizeFrequency(
+    double requested_hz,
+    std::uint32_t r_divider) const
 {
-    if (requested_hz <= 0.0 ||
+    if (requested_hz <= 0.0 || r_divider == 0 ||
         !valid_parked_pll_frequency(config_.parked_pll_hz))
         return 0.0;
 
     const double multisynth_ratio =
-        static_cast<double>(config_.parked_pll_hz) / requested_hz;
+        static_cast<double>(config_.parked_pll_hz) /
+        (requested_hz * static_cast<double>(r_divider));
     const DividerParameters ms_params =
         build_multisynth_parameters(multisynth_ratio);
 
@@ -543,7 +637,7 @@ double Si5351Planner::quantizeFrequency(double requested_hz) const
         return 0.0;
 
     return static_cast<double>(config_.parked_pll_hz) /
-        ms_params.actual_ratio;
+        (ms_params.actual_ratio * static_cast<double>(r_divider));
 }
 
 double Si5351Planner::effectiveReferenceHz() const noexcept
