@@ -27,6 +27,8 @@ namespace
     // above 1 MHz and uses the final R-divider below that point.  This leaves
     // margin above the Si5351's absolute 500 kHz MultiSynth floor.
     static constexpr double kMinMultisynthOutputHz = 1000000.0;
+    static constexpr double kVeryLowFrequencyThresholdHz = 200000.0;
+    static constexpr double kVeryLowFrequencyMultisynthOutputHz = 2000000.0;
     static constexpr double kMaxMultisynthOutputHz = 200000000.0;
     static constexpr double kMaxCalibrationPpm = 200.0;
 
@@ -254,10 +256,14 @@ namespace
             bool valid = !tones.empty();
             for (const Si5351Planner::ToneEntry& tone : tones)
             {
+                const double minimum_internal_hz =
+                    tone.frequency_hz < kVeryLowFrequencyThresholdHz
+                        ? kVeryLowFrequencyMultisynthOutputHz
+                        : kMinMultisynthOutputHz;
                 const double internal_hz =
                     tone.frequency_hz * static_cast<double>(divider);
                 if (!std::isfinite(internal_hz) ||
-                    internal_hz < kMinMultisynthOutputHz ||
+                    internal_hz < minimum_internal_hz ||
                     internal_hz > kMaxMultisynthOutputHz)
                 {
                     valid = false;
@@ -275,10 +281,14 @@ namespace
             bool in_output_domain = !tones.empty();
             for (const Si5351Planner::ToneEntry& tone : tones)
             {
+                const double minimum_internal_hz =
+                    tone.frequency_hz < kVeryLowFrequencyThresholdHz
+                        ? kVeryLowFrequencyMultisynthOutputHz
+                        : kMinMultisynthOutputHz;
                 const double internal_hz =
                     tone.frequency_hz * static_cast<double>(divider);
                 if (!std::isfinite(internal_hz) ||
-                    internal_hz < kMinMultisynthOutputHz ||
+                    internal_hz < minimum_internal_hz ||
                     internal_hz > kMaxMultisynthOutputHz)
                 {
                     in_output_domain = false;

@@ -485,7 +485,7 @@ namespace
         constexpr Case cases[] = {
             {"160 m", 1838100.0, 1, 0},
             {"630 m", 475700.0, 4, 2},
-            {"2200 m", 137500.0, 8, 3}};
+            {"2200 m", 137500.0, 16, 4}};
         constexpr double spacing_hz = 1.46484375;
 
         for (const Case& test : cases)
