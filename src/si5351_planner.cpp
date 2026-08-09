@@ -23,7 +23,10 @@ namespace
     static constexpr std::uint64_t kMinPllFrequencyHz = 600000000;
     static constexpr std::uint64_t kMaxPllFrequencyHz = 900000000;
     static constexpr std::uint32_t kMaxMultisynthDivider = 2048;
-    static constexpr double kMinMultisynthOutputHz = 500000.0;
+    // QRP Labs' documented low-frequency practice keeps the MultiSynth at or
+    // above 1 MHz and uses the final R-divider below that point.  This leaves
+    // margin above the Si5351's absolute 500 kHz MultiSynth floor.
+    static constexpr double kMinMultisynthOutputHz = 1000000.0;
     static constexpr double kMaxMultisynthOutputHz = 200000000.0;
     static constexpr double kMaxCalibrationPpm = 200.0;
 

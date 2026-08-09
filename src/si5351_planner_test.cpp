@@ -217,8 +217,8 @@ namespace
         {
             expect_r_divider(
                 r_divided.tone_sets.front(),
+                4,
                 2,
-                1,
                 "output beyond the direct ratio limit");
         }
     }
@@ -484,8 +484,8 @@ namespace
         };
         constexpr Case cases[] = {
             {"160 m", 1838100.0, 1, 0},
-            {"630 m", 475700.0, 2, 1},
-            {"2200 m", 137500.0, 4, 2}};
+            {"630 m", 475700.0, 4, 2},
+            {"2200 m", 137500.0, 8, 3}};
         constexpr double spacing_hz = 1.46484375;
 
         for (const Case& test : cases)
@@ -540,7 +540,7 @@ namespace
         const Si5351Planner::Plan below_limit =
             Si5351Planner(config).buildPlan(
                 Si5351Planner::Mode::TONE,
-                {Si5351Planner::ToneEntry{3906.24}});
+                {Si5351Planner::ToneEntry{7812.49}});
         expect(!valid_tone(below_limit),
             "frequency below the R-divider synthesis floor should fail closed");
     }
