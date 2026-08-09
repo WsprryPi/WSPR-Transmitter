@@ -116,6 +116,36 @@ makeProductionRpiStartupQuiesceAccess();
  */
 double gpioCorrectedPlldFrequency(double nominal_hz, double source_rate_ppm);
 
+enum class GpioProcessorClockProfile
+{
+    Legacy500Mhz,
+    Bcm2711
+};
+
+enum class GpioRfClockSource : std::uint32_t
+{
+    Oscillator = 1,
+    PllD = 6
+};
+
+struct GpioRfClockPlan
+{
+    GpioRfClockSource source{GpioRfClockSource::PllD};
+    double nominal_hz{0.0};
+    double corrected_hz{0.0};
+};
+
+GpioRfClockPlan gpioPlanRfClock(
+    GpioProcessorClockProfile profile,
+    double minimum_tone_hz,
+    double maximum_tone_hz,
+    double source_rate_ppm);
+
+std::uint32_t gpioBuildDividerWord(
+    double source_hz,
+    double tone_hz,
+    bool round_up_one_lsb);
+
 /**
  * @class WsprRpiBackend
  * @brief Raspberry Pi implementation of the generic transmission backend.
@@ -296,6 +326,10 @@ private:
     {
         double plld_nominal_freq;
         double plld_clock_frequency;
+        double gpclk_nominal_freq;
+        double gpclk_clock_frequency;
+        GpioProcessorClockProfile processor_profile;
+        GpioRfClockSource gpclk_source;
         volatile uint8_t *peripheral_base_virtual;
         uint32_t orig_gp0ctl;
         uint32_t orig_gp0div;
@@ -452,6 +486,7 @@ private:
     bool dma_setup_done_{false};
     std::uint32_t dma_buf_ptr_{0};
     double pwm_clock_init_{0};
+    std::array<std::uint32_t, 8> active_gpclk_words_{};
     int watchdog_cpu_{1};
     int configured_tx_gpio_{4};
     std::optional<ExecutionPlanConfig> configured_plan_{};

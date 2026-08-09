@@ -482,9 +482,112 @@ double gpioCorrectedPlldFrequency(double nominal_hz, double source_rate_ppm)
     return nominal_hz * (1.0 + source_rate_ppm * 1.0e-6);
 }
 
+namespace
+{
+    constexpr std::uint32_t kGpclkDividerMask = 0x00FFFFFFu;
+    constexpr double kGpclkDividerScale = 4096.0;
+    constexpr double kGpclkMash3MinimumDivisor = 5.0;
+
+    bool gpioClockCanRepresent(
+        double source_hz,
+        double minimum_tone_hz,
+        double maximum_tone_hz)
+    {
+        if (!std::isfinite(source_hz) || source_hz <= 0.0 ||
+            !std::isfinite(minimum_tone_hz) || minimum_tone_hz <= 0.0 ||
+            !std::isfinite(maximum_tone_hz) ||
+            maximum_tone_hz < minimum_tone_hz)
+        {
+            return false;
+        }
+
+        for (const double tone_hz : {minimum_tone_hz, maximum_tone_hz})
+        {
+            const double scaled = source_hz / tone_hz * kGpclkDividerScale;
+            const double lower = std::floor(scaled);
+            const double upper = lower + 1.0;
+            if (!std::isfinite(scaled) ||
+                lower < kGpclkMash3MinimumDivisor * kGpclkDividerScale ||
+                upper > static_cast<double>(kGpclkDividerMask))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+GpioRfClockPlan gpioPlanRfClock(
+    GpioProcessorClockProfile profile,
+    double minimum_tone_hz,
+    double maximum_tone_hz,
+    double source_rate_ppm)
+{
+    const double plld_nominal_hz =
+        profile == GpioProcessorClockProfile::Bcm2711 ? 750e6 : 500e6;
+    const double corrected_plld_hz =
+        gpioCorrectedPlldFrequency(plld_nominal_hz, source_rate_ppm);
+    if (gpioClockCanRepresent(
+            corrected_plld_hz,
+            minimum_tone_hz,
+            maximum_tone_hz))
+    {
+        return {
+            GpioRfClockSource::PllD,
+            plld_nominal_hz,
+            corrected_plld_hz};
+    }
+
+    if (profile == GpioProcessorClockProfile::Bcm2711)
+    {
+        constexpr double oscillator_nominal_hz = 54e6;
+        const double corrected_oscillator_hz =
+            gpioCorrectedPlldFrequency(
+                oscillator_nominal_hz,
+                source_rate_ppm);
+        if (gpioClockCanRepresent(
+                corrected_oscillator_hz,
+                minimum_tone_hz,
+                maximum_tone_hz))
+        {
+            return {
+                GpioRfClockSource::Oscillator,
+                oscillator_nominal_hz,
+                corrected_oscillator_hz};
+        }
+    }
+
+    throw std::out_of_range(
+        "GPIO RF frequency cannot be represented by an available GPCLK source.");
+}
+
+std::uint32_t gpioBuildDividerWord(
+    double source_hz,
+    double tone_hz,
+    bool round_up_one_lsb)
+{
+    if (!gpioClockCanRepresent(source_hz, tone_hz, tone_hz))
+    {
+        throw std::out_of_range(
+            "GPIO RF tuning word is outside the GPCLK 12.12 divisor range.");
+    }
+    const double scaled = source_hz / tone_hz * kGpclkDividerScale;
+    const double word = std::floor(scaled) + (round_up_one_lsb ? 1.0 : 0.0);
+    if (word < 0.0 || word > static_cast<double>(kGpclkDividerMask))
+    {
+        throw std::out_of_range(
+            "GPIO RF tuning word exceeds the GPCLK divider field.");
+    }
+    return static_cast<std::uint32_t>(word);
+}
+
 WsprRpiBackend::DMAConfig::DMAConfig()
     : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
       plld_clock_frequency(plld_nominal_freq),
+      gpclk_nominal_freq(plld_nominal_freq),
+      gpclk_clock_frequency(gpclk_nominal_freq),
+      processor_profile(GpioProcessorClockProfile::Legacy500Mhz),
+      gpclk_source(GpioRfClockSource::PllD),
       peripheral_base_virtual(nullptr),
       orig_gp0ctl(0),
       orig_gp0div(0),
@@ -2028,10 +2131,14 @@ void WsprRpiBackend::get_plld()
     case BCMChip::BCM_HOST_PROCESSOR_BCM2836:
     case BCMChip::BCM_HOST_PROCESSOR_BCM2837:
         base_freq_hz = 500e6;
+        dma_config_.processor_profile =
+            GpioProcessorClockProfile::Legacy500Mhz;
         break;
 
     case BCMChip::BCM_HOST_PROCESSOR_BCM2711:
         base_freq_hz = 750e6;
+        dma_config_.processor_profile =
+            GpioProcessorClockProfile::Bcm2711;
         break;
 
     default:
@@ -2042,6 +2149,9 @@ void WsprRpiBackend::get_plld()
 
     dma_config_.plld_nominal_freq = base_freq_hz;
     dma_config_.plld_clock_frequency = base_freq_hz;
+    dma_config_.gpclk_nominal_freq = base_freq_hz;
+    dma_config_.gpclk_clock_frequency = base_freq_hz;
+    dma_config_.gpclk_source = GpioRfClockSource::PllD;
 
     if (dma_config_.plld_clock_frequency <= 0)
     {
@@ -2054,6 +2164,11 @@ void WsprRpiBackend::get_plld()
             0.0);
         dma_config_.plld_nominal_freq = 500e6;
         dma_config_.plld_clock_frequency = 500e6;
+        dma_config_.gpclk_nominal_freq = 500e6;
+        dma_config_.gpclk_clock_frequency = 500e6;
+        dma_config_.processor_profile =
+            GpioProcessorClockProfile::Legacy500Mhz;
+        dma_config_.gpclk_source = GpioRfClockSource::PllD;
     }
 }
 
@@ -2188,12 +2303,46 @@ void WsprRpiBackend::transmit_on(const WsprTransmissionPlan &plan)
 
     access_bus_address(PADS_GPIO_0_27_BUS) = 0x5a000018 + plan.power_level;
 
-    struct GPCTL setupword = {6, 0, 0, 0, 0, 3, 0x5A};
-    setupword = {6, 1, 0, 0, 0, 3, 0x5A};
+    const auto source = static_cast<std::uint32_t>(dma_config_.gpclk_source);
+    struct GPCTL setupword = {source, 0, 0, 0, 0, 3, 0x5A};
+    setupword = {source, 1, 0, 0, 0, 3, 0x5A};
     int temp;
     std::memcpy(&temp, &setupword, sizeof(int));
 
     access_bus_address(CM_GP0CTL_BUS) = temp;
+
+    bool verified = false;
+    std::uint32_t observed_control = 0;
+    std::uint32_t observed_divider = 0;
+    for (int attempt = 0; attempt < 20 && !verified; ++attempt)
+    {
+        observed_control = access_bus_address(CM_GP0CTL_BUS);
+        observed_divider =
+            access_bus_address(CM_GP0DIV_BUS) & kGpclkDividerMask;
+        verified = (observed_control & 0xFu) == source &&
+            (observed_control & (1u << 4)) != 0 &&
+            std::find(
+                active_gpclk_words_.begin(),
+                active_gpclk_words_.end(),
+                observed_divider) != active_gpclk_words_.end();
+        if (!verified)
+        {
+            (void)owner_.backendWaitInterruptableFor(
+                std::chrono::milliseconds(1));
+        }
+    }
+    if (!verified)
+    {
+        gpclk0_disable_wait(access_bus_address(CM_GP0CTL_BUS));
+        std::ostringstream oss;
+        oss << "GPCLK source/divider readback did not match the validated RF plan:"
+            << " control=0x" << std::hex << observed_control
+            << " divider=0x" << observed_divider
+            << " expected_source=0x" << source
+            << " expected_divider=0x" << active_gpclk_words_[0]
+            << std::dec << ".";
+        throw std::runtime_error(oss.str());
+    }
     owner_.backendSetStateValue(WsprTransmitState::TRANSMITTING);
 }
 
@@ -2364,12 +2513,12 @@ void WsprRpiBackend::transmit_symbol(
     std::int64_t n_f0_transmitted = 0;
 
     const double f0_freq =
-        dma_config_.plld_clock_frequency /
+        dma_config_.gpclk_clock_frequency /
         (static_cast<double>(
              reinterpret_cast<std::uint32_t *>(const_page_.v)[f0_idx] & 0x00FFFFFFu) /
          std::pow(2.0, 12));
     const double f1_freq =
-        dma_config_.plld_clock_frequency /
+        dma_config_.gpclk_clock_frequency /
         (static_cast<double>(
              reinterpret_cast<std::uint32_t *>(const_page_.v)[f1_idx] & 0x00FFFFFFu) /
          std::pow(2.0, 12));
@@ -2731,11 +2880,43 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
         dma_config_.plld_nominal_freq,
         plan.ppm);
 
+    const double minimum_tone_hz =
+        plan.frequency_hz - 1.5 * plan.tone_spacing_hz;
+    const double maximum_tone_hz =
+        plan.frequency_hz + 1.5 * plan.tone_spacing_hz;
+    const GpioRfClockPlan rf_clock = gpioPlanRfClock(
+        dma_config_.processor_profile,
+        minimum_tone_hz,
+        maximum_tone_hz,
+        plan.ppm);
+    dma_config_.gpclk_nominal_freq = rf_clock.nominal_hz;
+    dma_config_.gpclk_clock_frequency = rf_clock.corrected_hz;
+    dma_config_.gpclk_source = rf_clock.source;
+
+    {
+        std::ostringstream oss;
+        oss << "GPIO RF clock source="
+            << (rf_clock.source == GpioRfClockSource::Oscillator
+                    ? "oscillator"
+                    : "PLLD")
+            << " nominal_hz=" << std::fixed << std::setprecision(0)
+            << rf_clock.nominal_hz
+            << " corrected_hz=" << std::fixed << std::setprecision(3)
+            << rf_clock.corrected_hz;
+        owner_.backendFireTransmitCallback(
+            WsprTransmissionCallbackEvent::LOGGING,
+            WsprTransmitLogLevel::DEBUG,
+            oss.str(),
+            0.0);
+    }
+
     if (!std::isfinite(dma_config_.plld_clock_frequency) ||
-        dma_config_.plld_clock_frequency <= 0.0)
+        dma_config_.plld_clock_frequency <= 0.0 ||
+        !std::isfinite(dma_config_.gpclk_clock_frequency) ||
+        dma_config_.gpclk_clock_frequency <= 0.0)
     {
         throw std::runtime_error(
-            "configureTransmission(): invalid PLLD frequency after PPM correction.");
+            "configureTransmission(): invalid PLLD or GPCLK frequency after PPM correction.");
     }
 
     uint32_t div_reg = static_cast<uint32_t>(
@@ -2751,19 +2932,19 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
     pwm_clock_init_ = dma_config_.plld_clock_frequency / double(divisor);
 
     double div_lo = bit_trunc(
-                        dma_config_.plld_clock_frequency /
+                        dma_config_.gpclk_clock_frequency /
                             (plan.frequency_hz - 1.5 * plan.tone_spacing_hz),
                         -12) +
                     std::pow(2.0, -12);
     double div_hi = bit_trunc(
-        dma_config_.plld_clock_frequency /
+        dma_config_.gpclk_clock_frequency /
             (plan.frequency_hz + 1.5 * plan.tone_spacing_hz),
         -12);
 
     if (std::floor(div_lo) != std::floor(div_hi))
     {
         result.applied_frequency_hz =
-            dma_config_.plld_clock_frequency / std::floor(div_lo) -
+            dma_config_.gpclk_clock_frequency / std::floor(div_lo) -
             1.6 * plan.tone_spacing_hz;
         if (plan.frequency_hz != 0.0)
         {
@@ -2788,14 +2969,11 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
     for (int i = 0; i < 8; i++)
     {
         double tone_freq = tone0_freq + (i >> 1) * plan.tone_spacing_hz;
-        double div = bit_trunc(dma_config_.plld_clock_frequency / tone_freq, -12);
-
-        if (i % 2 == 0)
-        {
-            div += std::pow(2.0, -12);
-        }
-
-        tuning_word[i] = static_cast<std::uint32_t>(div * std::pow(2.0, 12));
+        tuning_word[i] = gpioBuildDividerWord(
+            dma_config_.gpclk_clock_frequency,
+            tone_freq,
+            i % 2 == 0);
+        active_gpclk_words_[i] = tuning_word[i];
     }
 
     if (trace_wspr_tones_enabled())
@@ -2811,6 +2989,10 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
             << plan.ppm
             << " plld_hz=" << std::fixed << std::setprecision(3)
             << dma_config_.plld_clock_frequency
+            << " gpclk_source="
+            << static_cast<std::uint32_t>(dma_config_.gpclk_source)
+            << " gpclk_hz=" << std::fixed << std::setprecision(3)
+            << dma_config_.gpclk_clock_frequency
             << " pwm_clock_hz=" << std::fixed << std::setprecision(3)
             << pwm_clock_init_
             << " dither_block_clocks="
@@ -2823,10 +3005,10 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
             const double requested_hz =
                 tone0_freq + static_cast<double>(symbol) * plan.tone_spacing_hz;
             const double lower_hz =
-                dma_config_.plld_clock_frequency /
+                dma_config_.gpclk_clock_frequency /
                 (static_cast<double>(tuning_word[lower_index]) / std::pow(2.0, 12));
             const double upper_hz =
-                dma_config_.plld_clock_frequency /
+                dma_config_.gpclk_clock_frequency /
                 (static_cast<double>(tuning_word[upper_index]) / std::pow(2.0, 12));
             oss
                 << " tone" << symbol
@@ -2854,14 +3036,17 @@ WsprTransmissionConfigureResult WsprRpiBackend::setup_dma_freq_table(
 
     for (int i = 8; i < 1024; i++)
     {
-        double div = 500 + i;
-        tuning_word[i] = static_cast<std::uint32_t>(div * std::pow(2.0, 12));
+        // DMA control blocks initially reference an otherwise unused table
+        // entry before transmit_symbol() assigns the active tone pair.  Keep
+        // every placeholder on a validated in-plan divider so enabling GPCLK
+        // can never expose an arbitrary stale frequency.
+        tuning_word[i] = tuning_word[0];
     }
 
     for (int i = 0; i < 1024; i++)
     {
         reinterpret_cast<std::uint32_t *>(const_page_.v)[i] =
-            (0x5Au << 24) + tuning_word[i];
+            (0x5Au << 24) | (tuning_word[i] & kGpclkDividerMask);
 
         if ((i % 2 == 0) && (i < 8))
         {

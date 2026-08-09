@@ -16,6 +16,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -657,6 +658,97 @@ namespace
         }
     }
 
+    void test_gpio_rf_clock_planning_and_divider_bounds()
+    {
+        constexpr double spacing_hz = 12000.0 / 8192.0;
+        const auto tone_range = [spacing_hz](double center_hz) {
+            return std::pair<double, double>{
+                center_hz - 1.5 * spacing_hz,
+                center_hz + 1.5 * spacing_hz};
+        };
+
+        const auto pi4_2200m_range = tone_range(137500.0);
+        const auto pi4_2200m = gpioPlanRfClock(
+            GpioProcessorClockProfile::Bcm2711,
+            pi4_2200m_range.first,
+            pi4_2200m_range.second,
+            0.0);
+        expect(pi4_2200m.source == GpioRfClockSource::Oscillator &&
+                   pi4_2200m.nominal_hz == 54e6 &&
+                   pi4_2200m.corrected_hz == 54e6,
+               "Pi 4 2200 m must select the representable 54 MHz oscillator source");
+
+        const auto pi4_630m_range = tone_range(475700.0);
+        const auto pi4_630m = gpioPlanRfClock(
+            GpioProcessorClockProfile::Bcm2711,
+            pi4_630m_range.first,
+            pi4_630m_range.second,
+            0.0);
+        expect(pi4_630m.source == GpioRfClockSource::PllD &&
+                   pi4_630m.nominal_hz == 750e6,
+               "Pi 4 630 m must retain the preferred 750 MHz PLLD source");
+
+        const auto legacy_2200m = gpioPlanRfClock(
+            GpioProcessorClockProfile::Legacy500Mhz,
+            pi4_2200m_range.first,
+            pi4_2200m_range.second,
+            0.0);
+        expect(legacy_2200m.source == GpioRfClockSource::PllD &&
+                   legacy_2200m.nominal_hz == 500e6,
+               "500 MHz processors must retain PLLD for representable 2200 m output");
+
+        constexpr double pi4_plld_boundary_hz =
+            750e6 / (static_cast<double>(0x00FFFFFFu) / 4096.0);
+        const auto below_boundary = gpioPlanRfClock(
+            GpioProcessorClockProfile::Bcm2711,
+            pi4_plld_boundary_hz - 100.0,
+            pi4_plld_boundary_hz - 100.0,
+            0.0);
+        const auto above_boundary = gpioPlanRfClock(
+            GpioProcessorClockProfile::Bcm2711,
+            pi4_plld_boundary_hz + 100.0,
+            pi4_plld_boundary_hz + 100.0,
+            0.0);
+        expect(below_boundary.source == GpioRfClockSource::Oscillator &&
+                   above_boundary.source == GpioRfClockSource::PllD,
+               "Pi 4 source selection must switch safely across the PLLD divisor boundary");
+
+        const auto ppm_plan = gpioPlanRfClock(
+            GpioProcessorClockProfile::Bcm2711,
+            pi4_2200m_range.first,
+            pi4_2200m_range.second,
+            100.0);
+        expect(ppm_plan.source == GpioRfClockSource::Oscillator &&
+                   ppm_plan.corrected_hz == 54e6 * 1.0001,
+               "GPIO PPM correction must apply to the selected oscillator source");
+
+        const auto lower_word = gpioBuildDividerWord(54e6, 137500.0, false);
+        const auto upper_word = gpioBuildDividerWord(54e6, 137500.0, true);
+        expect(lower_word <= 0x00FFFFFFu && upper_word == lower_word + 1,
+               "representable oscillator tuning words must remain inside the 24-bit field");
+
+        for (const auto& invalid : {
+                 std::tuple<double, double, bool>{750e6, 137500.0, false},
+                 std::tuple<double, double, bool>{500e6, 100000.0, false},
+                 std::tuple<double, double, bool>{500e6, 120000000.0, false}})
+        {
+            bool rejected = false;
+            try
+            {
+                (void)gpioBuildDividerWord(
+                    std::get<0>(invalid),
+                    std::get<1>(invalid),
+                    std::get<2>(invalid));
+            }
+            catch (const std::out_of_range&)
+            {
+                rejected = true;
+            }
+            expect(rejected,
+                   "unrepresentable GPIO divider words must fail closed");
+        }
+    }
+
     void test_rpi_gpio4_exact_safe_trace()
     {
         TestBridge bridge;
@@ -811,6 +903,7 @@ int main()
     test_si5351_quiesce_failures_close_handles();
     test_si5351_dry_run_avoids_i2c();
     test_gpio_ppm_sign_and_bounds();
+    test_gpio_rf_clock_planning_and_divider_bounds();
     test_rpi_gpio4_exact_safe_trace();
     test_rpi_gpio20_exact_safe_trace();
     test_rpi_repeated_call_safety();
