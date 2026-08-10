@@ -490,6 +490,52 @@ namespace
         }
     }
 
+    void test_si5351_reference_source_initialization()
+    {
+        for (const auto& expected :
+             {std::pair<int, std::uint8_t>{6, 0x52},
+              std::pair<int, std::uint8_t>{8, 0x92},
+              std::pair<int, std::uint8_t>{10, 0xD2}})
+        {
+            auto adapter = std::make_shared<FakeI2CAdapter>();
+            Si5351Device::Config config;
+            config.reference_source = Si5351Device::ReferenceSource::CRYSTAL;
+            config.crystal_load_capacitance_pf = expected.first;
+            Si5351Device device(config, adapter);
+            expect(device.open(), "crystal-mode fake I2C open must succeed");
+            expect(device.initialize(), "valid crystal capacitance must initialize");
+            expect(adapter->writes.size() == 2,
+                   "crystal initialization must disable outputs then write XTAL_CL");
+            expect(adapter->writes[0] == std::make_pair<std::uint8_t, std::uint8_t>(3, 0xff),
+                   "crystal initialization must disable all outputs first");
+            expect(adapter->writes[1] ==
+                       std::pair<std::uint8_t, std::uint8_t>{183, expected.second},
+                   "crystal initialization must preserve Register 183 reserved bits");
+        }
+
+        auto external_adapter = std::make_shared<FakeI2CAdapter>();
+        Si5351Device external_device(Si5351Device::Config{}, external_adapter);
+        expect(external_device.open(), "external-TCXO fake I2C open must succeed");
+        expect(external_device.initialize(), "external-TCXO initialization must succeed");
+        expect(external_adapter->writes.size() == 1 &&
+                   external_adapter->writes.front() ==
+                       std::make_pair<std::uint8_t, std::uint8_t>(3, 0xff),
+               "external-TCXO initialization must not write Register 183");
+
+        for (const int invalid : {0, 7, 9, 12})
+        {
+            auto adapter = std::make_shared<FakeI2CAdapter>();
+            Si5351Device::Config config;
+            config.reference_source = Si5351Device::ReferenceSource::CRYSTAL;
+            config.crystal_load_capacitance_pf = invalid;
+            Si5351Device device(config, adapter);
+            expect(device.open(), "invalid crystal test fake I2C open must succeed");
+            expect(!device.initialize(), "invalid crystal capacitance must be rejected");
+            expect(adapter->writes.empty(),
+                   "invalid crystal capacitance must be rejected before any register write");
+        }
+    }
+
     void test_si5351_quiesce_failures_close_handles()
     {
         TestBridge bridge;
@@ -934,6 +980,7 @@ int main()
 {
     test_controller_dispatch();
     test_si5351_quiesce_success_and_repeat();
+    test_si5351_reference_source_initialization();
     test_si5351_quiesce_failures_close_handles();
     test_si5351_dry_run_avoids_i2c();
     test_gpio_ppm_sign_and_bounds();

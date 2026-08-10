@@ -42,6 +42,18 @@ namespace
     static constexpr std::uint8_t kClkControlBaseRegister = 16;
     static constexpr std::uint8_t kOutputDisableAll = 0xff;
     static constexpr std::uint8_t kDriveStrengthMask = 0x03;
+    static constexpr std::uint8_t kCrystalLoadRegister = 183;
+
+    static bool crystal_load_register_value(int capacitance_pf, std::uint8_t& value)
+    {
+        switch (capacitance_pf)
+        {
+            case 6: value = 0x52; return true;
+            case 8: value = 0x92; return true;
+            case 10: value = 0xD2; return true;
+        }
+        return false;
+    }
 
     static bool output_index(
         Si5351Device::Output output,
@@ -214,7 +226,20 @@ bool Si5351Device::initialize()
 
     clearRegisterCache();
 
+    std::uint8_t crystal_register_value = 0;
+    if (config_.reference_source == ReferenceSource::CRYSTAL &&
+        !crystal_load_register_value(
+            config_.crystal_load_capacitance_pf, crystal_register_value))
+    {
+        setLastError("Si5351 crystal load capacitance must be 6, 8, or 10 pF.");
+        return false;
+    }
+
     if (!disableAllOutputs())
+        return false;
+
+    if (config_.reference_source == ReferenceSource::CRYSTAL &&
+        !writeRegister(kCrystalLoadRegister, crystal_register_value))
         return false;
 
     last_error_.clear();

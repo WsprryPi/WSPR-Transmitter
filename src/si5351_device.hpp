@@ -106,6 +106,7 @@ public:
         std::uint32_t reference_hz = 27000000;
         ReferenceSource reference_source =
             ReferenceSource::EXTERNAL_TCXO;
+        int crystal_load_capacitance_pf = 10;
         bool enable_register_cache = true;
     };
 
