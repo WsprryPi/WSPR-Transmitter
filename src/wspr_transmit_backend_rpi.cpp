@@ -581,6 +581,27 @@ std::uint32_t gpioBuildDividerWord(
     return static_cast<std::uint32_t>(word);
 }
 
+std::int64_t gpioDitherLowerClockCount(
+    double lower_ratio,
+    std::int64_t block_clocks,
+    std::int64_t clocks_scheduled,
+    std::int64_t lower_clocks_scheduled)
+{
+    if (!std::isfinite(lower_ratio) || lower_ratio < 0.0 || lower_ratio > 1.0 ||
+        block_clocks < 0 || clocks_scheduled < 0 || lower_clocks_scheduled < 0 ||
+        lower_clocks_scheduled > clocks_scheduled)
+    {
+        throw std::invalid_argument("Invalid GPIO divider-dither state.");
+    }
+
+    std::int64_t lower_clocks =
+        static_cast<std::int64_t>(std::llround(
+            lower_ratio * static_cast<double>(clocks_scheduled + block_clocks))) -
+        lower_clocks_scheduled;
+
+    return std::clamp(lower_clocks, std::int64_t{0}, block_clocks);
+}
+
 WsprRpiBackend::DMAConfig::DMAConfig()
     : plld_nominal_freq(500000000.0 * (1 - 2.500e-6)),
       plld_clock_frequency(plld_nominal_freq),
@@ -2434,14 +2455,40 @@ void WsprRpiBackend::transmit_symbol(
     const std::int64_t pwm_clocks_per_iter =
         static_cast<std::int64_t>(PWM_CLOCKS_PER_ITER_NOMINAL);
 
+    const double f0_freq =
+        dma_config_.gpclk_clock_frequency /
+        (static_cast<double>(
+             reinterpret_cast<std::uint32_t *>(const_page_.v)[f0_idx] & 0x00FFFFFFu) /
+         std::pow(2.0, 12));
+    const double f1_freq =
+        dma_config_.gpclk_clock_frequency /
+        (static_cast<double>(
+             reinterpret_cast<std::uint32_t *>(const_page_.v)[f1_idx] & 0x00FFFFFFu) /
+         std::pow(2.0, 12));
+    const double tone_freq =
+        plan.frequency_hz - 1.5 * plan.tone_spacing_hz +
+        static_cast<double>(sym_num) * plan.tone_spacing_hz;
+    const double f0_ratio = std::clamp(
+        1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq),
+        0.0,
+        1.0);
+
     advance_with_lead();
 
     if (is_tone)
     {
+        std::int64_t clocks_scheduled = 0;
+        std::int64_t lower_clocks_scheduled = 0;
+
         while (!owner_.backendShouldStop())
         {
-            const std::uint32_t n_pwmclk =
-                static_cast<std::uint32_t>(pwm_clocks_per_iter);
+            const std::int64_t lower_clocks = gpioDitherLowerClockCount(
+                f0_ratio,
+                pwm_clocks_per_iter,
+                clocks_scheduled,
+                lower_clocks_scheduled);
+            const std::int64_t upper_clocks =
+                pwm_clocks_per_iter - lower_clocks;
 
             dma_buf_ptr_ = (dma_buf_ptr_ + 1) & kMask;
             if (!wait_cb_not_active(dma_buf_ptr_))
@@ -2456,7 +2503,27 @@ void WsprRpiBackend::transmit_symbol(
             if (!wait_cb_not_active(dma_buf_ptr_))
                 return;
 
-            reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->TXFR_LEN = n_pwmclk;
+            reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->TXFR_LEN =
+                static_cast<std::uint32_t>(lower_clocks);
+
+            dma_buf_ptr_ = (dma_buf_ptr_ + 1) & kMask;
+            if (!wait_cb_not_active(dma_buf_ptr_))
+                return;
+
+            reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->SOURCE_AD =
+                static_cast<std::uint32_t>(
+                    static_cast<std::uintptr_t>(const_page_.b) +
+                    static_cast<std::uintptr_t>(f1_idx * 4));
+
+            dma_buf_ptr_ = (dma_buf_ptr_ + 1) & kMask;
+            if (!wait_cb_not_active(dma_buf_ptr_))
+                return;
+
+            reinterpret_cast<CB *>(instructions_[dma_buf_ptr_].v)->TXFR_LEN =
+                static_cast<std::uint32_t>(upper_clocks);
+
+            clocks_scheduled += pwm_clocks_per_iter;
+            lower_clocks_scheduled += lower_clocks;
         }
 
         return;
@@ -2512,23 +2579,6 @@ void WsprRpiBackend::transmit_symbol(
     std::int64_t n_pwmclk_transmitted = 0;
     std::int64_t n_f0_transmitted = 0;
 
-    const double f0_freq =
-        dma_config_.gpclk_clock_frequency /
-        (static_cast<double>(
-             reinterpret_cast<std::uint32_t *>(const_page_.v)[f0_idx] & 0x00FFFFFFu) /
-         std::pow(2.0, 12));
-    const double f1_freq =
-        dma_config_.gpclk_clock_frequency /
-        (static_cast<double>(
-             reinterpret_cast<std::uint32_t *>(const_page_.v)[f1_idx] & 0x00FFFFFFu) /
-         std::pow(2.0, 12));
-    const double tone_freq =
-        plan.frequency_hz - 1.5 * plan.tone_spacing_hz +
-        static_cast<double>(sym_num) * plan.tone_spacing_hz;
-
-    const double f0_ratio =
-        1.0 - (tone_freq - f0_freq) / (f1_freq - f0_freq);
-
     if (trace_wspr_tones_enabled())
     {
         std::ostringstream oss;
@@ -2571,15 +2621,11 @@ void WsprRpiBackend::transmit_symbol(
         if (n_pwmclk_transmitted + n_pwmclk > n_pwmclk_per_sym)
             n_pwmclk = n_pwmclk_per_sym - n_pwmclk_transmitted;
 
-        std::int64_t n_f0 =
-            static_cast<std::int64_t>(std::llround(
-                f0_ratio * static_cast<double>(n_pwmclk_transmitted + n_pwmclk))) -
-            n_f0_transmitted;
-
-        if (n_f0 < 0)
-            n_f0 = 0;
-        if (n_f0 > n_pwmclk)
-            n_f0 = n_pwmclk;
+        const std::int64_t n_f0 = gpioDitherLowerClockCount(
+            f0_ratio,
+            n_pwmclk,
+            n_pwmclk_transmitted,
+            n_f0_transmitted);
 
         const std::int64_t n_f1 = n_pwmclk - n_f0;
 
