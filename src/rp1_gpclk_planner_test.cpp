@@ -162,6 +162,23 @@ void test_sequence_lengths_and_tolerance()
         inputFor(14097100.0, 200000000.0, 1, 0.01));
     expect(!too_short.ok && too_short.error.find("average-error") != std::string::npos,
            "an insufficient finite block must fail the arithmetic tolerance");
+
+    const auto rp1_dma_tick = wsprrypi::planRp1GpclkWspr(
+        inputFor(14097100.0, 50000000.0, 66792, 0.01));
+    expect(rp1_dma_tick.ok,
+           "the RP1 511-cycle DMA-tick block must meet the 20 m arithmetic tolerance");
+    if (rp1_dma_tick.ok)
+    {
+        constexpr std::array<std::uint32_t, 4> expected_lower_counts{
+            66312, 1134, 2747, 4360};
+        for (std::size_t i = 0; i < rp1_dma_tick.plan.tones.size(); ++i)
+        {
+            expect(rp1_dma_tick.plan.tones[i].lower_word_count == expected_lower_counts[i],
+                   "RP1 DMA-tick plan must retain its validated lower-word count");
+            expect(std::fabs(rp1_dma_tick.plan.tones[i].average_error_hz) < 0.0005,
+                   "RP1 DMA-tick plan must keep each 20 m tone within 0.0005 Hz");
+        }
+    }
 }
 
 void test_integer_boundary_and_invalid_inputs()
