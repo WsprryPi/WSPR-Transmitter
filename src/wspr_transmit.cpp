@@ -437,6 +437,13 @@ void WsprTransmitter::selectBackend(
                 static_cast<std::uint8_t>(runtime_config.i2c_address);
             si5351_config.device.reference_hz =
                 static_cast<std::uint32_t>(runtime_config.reference_hz);
+            si5351_config.device.reference_source =
+                runtime_config.reference_source ==
+                        Si5351RuntimeConfig::ReferenceSource::CRYSTAL
+                    ? Si5351Device::ReferenceSource::CRYSTAL
+                    : Si5351Device::ReferenceSource::EXTERNAL_TCXO;
+            si5351_config.device.crystal_load_capacitance_pf =
+                runtime_config.crystal_load_capacitance_pf;
             si5351_config.planner.reference_hz =
                 static_cast<std::uint32_t>(runtime_config.reference_hz);
             si5351_config.planner.tx_output =

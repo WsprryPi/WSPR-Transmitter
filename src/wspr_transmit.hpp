@@ -122,9 +122,17 @@ public:
 
     struct Si5351RuntimeConfig
     {
+        enum class ReferenceSource
+        {
+            EXTERNAL_TCXO,
+            CRYSTAL
+        };
+
         int i2c_bus = 1;
         int i2c_address = 0x60;
         int reference_hz = 27000000;
+        ReferenceSource reference_source = ReferenceSource::EXTERNAL_TCXO;
+        int crystal_load_capacitance_pf = 10;
         int tx_output = 0;
         int power_level = 1;
         bool app_managed = false;
