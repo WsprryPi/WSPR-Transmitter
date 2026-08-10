@@ -146,6 +146,12 @@ std::uint32_t gpioBuildDividerWord(
     double tone_hz,
     bool round_up_one_lsb);
 
+std::int64_t gpioDitherLowerClockCount(
+    double lower_ratio,
+    std::int64_t block_clocks,
+    std::int64_t clocks_scheduled,
+    std::int64_t lower_clocks_scheduled);
+
 /**
  * @class WsprRpiBackend
  * @brief Raspberry Pi implementation of the generic transmission backend.

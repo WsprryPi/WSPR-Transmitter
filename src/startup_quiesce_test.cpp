@@ -749,6 +749,40 @@ namespace
         }
     }
 
+    void test_gpio_continuous_tone_fractional_dither()
+    {
+        for (const double ratio : {0.0, 0.125, 0.5, 0.876543, 1.0})
+        {
+            std::int64_t clocks = 0;
+            std::int64_t lower_clocks = 0;
+            for (int block = 0; block < 1000; ++block)
+            {
+                const auto selected = gpioDitherLowerClockCount(
+                    ratio, 1000, clocks, lower_clocks);
+                expect(selected >= 0 && selected <= 1000,
+                       "continuous-tone dither must stay inside each DMA block");
+                clocks += 1000;
+                lower_clocks += selected;
+                expect(std::abs(
+                           static_cast<double>(lower_clocks) - ratio * clocks) <=
+                           0.5,
+                       "continuous-tone dither must track the requested cumulative ratio");
+            }
+        }
+
+        bool rejected = false;
+        try
+        {
+            (void)gpioDitherLowerClockCount(
+                std::numeric_limits<double>::quiet_NaN(), 1000, 0, 0);
+        }
+        catch (const std::invalid_argument&)
+        {
+            rejected = true;
+        }
+        expect(rejected, "continuous-tone dither must reject invalid ratios");
+    }
+
     void test_rpi_gpio4_exact_safe_trace()
     {
         TestBridge bridge;
@@ -904,6 +938,7 @@ int main()
     test_si5351_dry_run_avoids_i2c();
     test_gpio_ppm_sign_and_bounds();
     test_gpio_rf_clock_planning_and_divider_bounds();
+    test_gpio_continuous_tone_fractional_dither();
     test_rpi_gpio4_exact_safe_trace();
     test_rpi_gpio20_exact_safe_trace();
     test_rpi_repeated_call_safety();
