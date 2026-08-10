@@ -35,24 +35,25 @@ void test_drive_profiles() {
 void test_program_and_finite_stop() {
  Provider p; wsprrypi::Rp1GpclkBackend b(p); std::string e; auto planned=plan();
  expect(b.prepare(2,e), "prepare must acquire provider");
- for (std::size_t tone=0; tone<4; ++tone) {
-  expect(b.emit(planned,tone,e), "all four profiles must submit"); auto program=p.programs.back();
+ std::array<std::uint8_t,162> symbols{}; for (std::size_t i=0;i<symbols.size();++i) symbols[i]=i%4;
+ {
+  expect(b.emitFrame(planned,symbols,e), "complete frame must submit"); auto program=p.programs.back();
   expect(program.writes_per_symbol==66792 && program.tick_divider==511, "production timing constants must be preserved");
-  expect(program.lower_divider_word==planned.tones[tone].lower_divider_word && program.fractional_bits==16, "provider must receive the unpacked lower divider word");
-  expect(program.upper_divider_word==planned.tones[tone].upper_divider_word, "provider must receive the unpacked upper divider word");
+  expect(program.symbols.size()==162 && program.fractional_bits==16, "provider must receive exactly 162 symbols");
+  for (std::size_t i=0;i<symbols.size();++i) expect(program.symbols[i]==symbols[i], "provider must preserve symbol order");
+  for (std::size_t tone=0;tone<4;++tone) expect(program.tones[tone].lower_divider_word==planned.tones[tone].lower_divider_word && program.tones[tone].upper_divider_word==planned.tones[tone].upper_divider_word, "provider must preserve unpacked tone words");
   expect(b.cancel(e), "cancel must request finite stop");
   expect(!b.cleanup(e), "cleanup must not release a draining descriptor");
   p.current=wsprrypi::Rp1GpclkCompletionState::complete;
   expect(b.cleanup(e), "cleanup must release after finite completion");
-  if (tone != 3) expect(b.prepare(2,e), "channel must be reusable after completion");
  }
- expect(p.releases==4 && p.stops.size()==4, "every generation must stop and release exactly once");
+ expect(p.releases==1 && p.stops.size()==1, "frame must stop and release exactly once");
 }
 
 void test_timeout_and_generation() {
- Provider p; wsprrypi::Rp1GpclkBackend b(p); std::string e; auto planned=plan(); b.prepare(2,e); b.emit(planned,0,e);
+ Provider p; wsprrypi::Rp1GpclkBackend b(p); std::string e; auto planned=plan(); std::array<std::uint8_t,162> symbols{}; b.prepare(2,e); b.emitFrame(planned,symbols,e);
  const auto first=b.generation(); expect(b.timedOut(e), "timeout must use finite-stop path"); expect(p.stops.back()==first, "timeout must identify active generation");
- p.current=wsprrypi::Rp1GpclkCompletionState::complete; b.cleanup(e); b.prepare(2,e); b.emit(planned,1,e);
+ p.current=wsprrypi::Rp1GpclkCompletionState::complete; b.cleanup(e); b.prepare(2,e); symbols.fill(1); b.emitFrame(planned,symbols,e);
  expect(b.generation()==first+1, "reuse must advance generation"); p.current=wsprrypi::Rp1GpclkCompletionState::failed; expect(b.cleanup(e), "failed provider generation must still release ownership");
 }
 }

@@ -13,6 +13,7 @@ namespace wsprrypi
 enum class BackendKind
 {
     RPI_CLOCK_GPIO,
+    RP1_GPCLK,
     SI5351
 };
 

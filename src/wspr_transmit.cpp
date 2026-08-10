@@ -51,6 +51,7 @@
 // Project headers
 #include "wspr_transmit.hpp" // Class Declarations
 #include "gpio_band_policy.hpp"
+#include "rp1_gpclk_transmit_backend.hpp"
 #include "wspr_transmit_backend_rpi.hpp"
 #include "wspr_transmit_backend_si5351.hpp"
 
@@ -84,6 +85,8 @@ namespace
         {
         case wsprrypi::BackendKind::RPI_CLOCK_GPIO:
             return "GPIO";
+        case wsprrypi::BackendKind::RP1_GPCLK:
+            return "RP1 GPCLK";
         case wsprrypi::BackendKind::SI5351:
             return "SI5351";
         }
@@ -429,6 +432,9 @@ void WsprTransmitter::selectBackend(
             backend_ = std::move(rpi_backend);
             break;
         }
+        case wsprrypi::BackendKind::RP1_GPCLK:
+            backend_ = std::make_unique<WsprRp1GpclkBackend>(*this);
+            break;
         case wsprrypi::BackendKind::SI5351:
         {
             WsprSi5351Backend::Config si5351_config;

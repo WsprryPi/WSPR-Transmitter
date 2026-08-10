@@ -10,11 +10,13 @@
 typedef uint16_t __u16;
 typedef uint32_t __u32;
 typedef uint64_t __u64;
+typedef uint8_t __u8;
 #endif
 
 #define RP1_GPCLK_UAPI_VERSION 1U
 #define RP1_GPCLK_IOC_MAGIC 0xb7
 #define RP1_GPCLK_WRITES_PER_SYMBOL 66792U
+#define RP1_GPCLK_WSPR_SYMBOL_COUNT 162U
 #define RP1_GPCLK_TICK_DIVIDER 511U
 
 enum rp1_gpclk_state {
@@ -33,17 +35,26 @@ struct rp1_gpclk_acquire {
 	__u32 reserved;
 };
 
-struct rp1_gpclk_program {
-	__u16 version;
-	__u16 size;
-	__u32 fractional_bits;
+struct rp1_gpclk_symbol {
 	__u64 lower_divider_word;
 	__u64 upper_divider_word;
 	__u32 lower_count;
 	__u32 upper_count;
+};
+
+struct rp1_gpclk_program {
+	__u16 version;
+	__u16 size;
+	__u32 fractional_bits;
 	__u32 writes_per_symbol;
 	__u32 tick_divider;
+	__u32 symbol_count;
+	__u32 tone_count;
+	__u32 reserved;
 	__u64 generation;
+	struct rp1_gpclk_symbol tones[4];
+	__u8 symbols[RP1_GPCLK_WSPR_SYMBOL_COUNT];
+	__u8 reserved_tail[6];
 };
 
 struct rp1_gpclk_generation {

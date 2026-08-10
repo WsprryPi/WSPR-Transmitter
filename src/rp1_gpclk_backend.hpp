@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <string>
 
 namespace wsprrypi
@@ -18,16 +19,22 @@ enum class Rp1GpclkCompletionState
     failed
 };
 
-struct Rp1GpclkProviderProgram
+struct Rp1GpclkProviderSymbol
 {
     std::uint64_t lower_divider_word{0};
     std::uint64_t upper_divider_word{0};
-    std::uint32_t fractional_bits{0};
     std::uint32_t lower_count{0};
     std::uint32_t upper_count{0};
+};
+
+struct Rp1GpclkProviderProgram
+{
+    std::uint32_t fractional_bits{0};
     std::uint32_t writes_per_symbol{0};
     std::uint32_t tick_divider{0};
     std::uint64_t generation{0};
+    std::array<Rp1GpclkProviderSymbol, 4> tones{};
+    std::array<std::uint8_t, 162> symbols{};
 };
 
 /** Provider-owned RP1 clock/DMA boundary.  Implementations must serialize
@@ -55,7 +62,10 @@ public:
     ~Rp1GpclkBackend();
 
     bool prepare(std::uint32_t drive_ma, std::string& error);
-    bool emit(const Rp1GpclkPlan&, std::size_t tone, std::string& error);
+    bool emitFrame(
+        const Rp1GpclkPlan&,
+        const std::array<std::uint8_t, 162>& symbols,
+        std::string& error);
     bool cancel(std::string& error);
     bool timedOut(std::string& error);
     bool cleanup(std::string& error);

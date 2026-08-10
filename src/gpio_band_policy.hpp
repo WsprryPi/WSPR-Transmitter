@@ -22,7 +22,8 @@ inline GpioBandPolicyDecision evaluate_gpio_band_policy(
     BackendKind backend,
     double frequency_hz)
 {
-    if (backend != BackendKind::RPI_CLOCK_GPIO ||
+    if ((backend != BackendKind::RPI_CLOCK_GPIO &&
+         backend != BackendKind::RP1_GPCLK) ||
         !std::isfinite(frequency_hz) || frequency_hz <= 0.0)
     {
         return {};
@@ -68,7 +69,8 @@ inline GpioBandPolicyDecision evaluate_gpio_band_policy(
 inline GpioBandPolicyDecision evaluate_gpio_band_policy(
     const ExecutionPlan& plan)
 {
-    if (plan.backend != BackendKind::RPI_CLOCK_GPIO)
+    if (plan.backend != BackendKind::RPI_CLOCK_GPIO &&
+        plan.backend != BackendKind::RP1_GPCLK)
         return {};
 
     for (const auto& event : plan.events)

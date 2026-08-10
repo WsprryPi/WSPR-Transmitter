@@ -37,31 +37,49 @@ bool Rp1GpclkBackend::prepare(std::uint32_t drive_ma, std::string& error)
     return true;
 }
 
-bool Rp1GpclkBackend::emit(
-    const Rp1GpclkPlan& plan, std::size_t tone, std::string& error)
+bool Rp1GpclkBackend::emitFrame(
+    const Rp1GpclkPlan& plan,
+    const std::array<std::uint8_t, 162>& symbols,
+    std::string& error)
 {
-    if (!acquired_ || in_flight_ || tone >= plan.tones.size() ||
+    if (!acquired_ || in_flight_ ||
         plan.fractional_bits != 16 ||
         generation_ == std::numeric_limits<std::uint64_t>::max())
     {
         error = "RP1 GPCLK emit state or plan is invalid.";
         return false;
     }
-    const auto& selected = plan.tones[tone];
-    if (selected.lower_word_count + selected.upper_word_count != kWritesPerSymbol)
-    {
-        error = "RP1 GPCLK symbol must contain exactly 66792 divider writes.";
-        return false;
-    }
     Rp1GpclkProviderProgram program;
-    program.lower_divider_word = selected.lower_divider_word;
-    program.upper_divider_word = selected.upper_divider_word;
     program.fractional_bits = plan.fractional_bits;
-    program.lower_count = selected.lower_word_count;
-    program.upper_count = selected.upper_word_count;
     program.writes_per_symbol = kWritesPerSymbol;
     program.tick_divider = kTickDivider;
     program.generation = ++generation_;
+    for (std::size_t tone = 0; tone < plan.tones.size(); ++tone)
+    {
+        const auto& selected = plan.tones[tone];
+        if (selected.lower_word_count + selected.upper_word_count !=
+            kWritesPerSymbol)
+        {
+            error = "Every RP1 GPCLK symbol must contain exactly 66792 divider writes.";
+            --generation_;
+            return false;
+        }
+        program.tones[tone] = Rp1GpclkProviderSymbol{
+            selected.lower_divider_word,
+            selected.upper_divider_word,
+            selected.lower_word_count,
+            selected.upper_word_count};
+    }
+    for (std::size_t i = 0; i < symbols.size(); ++i)
+    {
+        if (symbols[i] >= plan.tones.size())
+        {
+            error = "RP1 GPCLK frame contains an invalid tone index.";
+            --generation_;
+            return false;
+        }
+        program.symbols[i] = symbols[i];
+    }
     if (!provider_.submit(program, error))
         return false;
     in_flight_ = true;

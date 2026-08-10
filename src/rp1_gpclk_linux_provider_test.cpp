@@ -32,10 +32,10 @@ void test_wire_contract() {
  Io io; wsprrypi::Rp1GpclkLinuxProvider provider(io); std::string error;
  expect(provider.acquire(2,error), "acquire must succeed");
  expect(io.path=="/dev/rp1-gpclk0" && io.acquire.version==1 && io.acquire.size==sizeof(io.acquire) && io.acquire.drive_ma==2, "acquire must carry version, size, path, and drive");
- wsprrypi::Rp1GpclkProviderProgram p{}; p.lower_divider_word=232445; p.upper_divider_word=232446; p.fractional_bits=16; p.lower_count=66312; p.upper_count=480; p.writes_per_symbol=66792; p.tick_divider=511; p.generation=9;
+ wsprrypi::Rp1GpclkProviderProgram p{}; p.fractional_bits=16; p.writes_per_symbol=66792; p.tick_divider=511; p.generation=9; for (std::size_t i=0;i<p.tones.size();++i) p.tones[i]={232445+(i&1),232446,66312,480}; for (std::size_t i=0;i<p.symbols.size();++i) p.symbols[i]=i%4;
  expect(provider.submit(p,error), "submit must succeed");
- expect(io.program.version==1 && io.program.size==sizeof(io.program) && io.program.lower_divider_word==232445 && io.program.upper_divider_word==232446 && io.program.fractional_bits==16, "client must send logical unpacked divider words");
- expect(io.program.writes_per_symbol==66792 && io.program.tick_divider==511 && io.program.generation==9, "client must preserve finite descriptor contract");
+ expect(io.program.version==1 && io.program.size==sizeof(io.program) && io.program.tones[0].lower_divider_word==232445 && io.program.tones[1].lower_divider_word==232446 && io.program.symbols[161]==1 && io.program.fractional_bits==16, "client must send ordered logical tones and symbol indexes");
+ expect(io.program.writes_per_symbol==66792 && io.program.tick_divider==511 && io.program.symbol_count==162 && io.program.tone_count==4 && io.program.generation==9, "client must preserve complete-frame descriptor contract");
  expect(provider.requestFiniteStop(9,error) && io.stop.generation==9, "stop must name generation");
  for (const auto& pair : {std::pair<unsigned,wsprrypi::Rp1GpclkCompletionState>{RP1_GPCLK_STATE_RUNNING,wsprrypi::Rp1GpclkCompletionState::running},{RP1_GPCLK_STATE_DRAINING,wsprrypi::Rp1GpclkCompletionState::draining},{RP1_GPCLK_STATE_COMPLETE,wsprrypi::Rp1GpclkCompletionState::complete},{RP1_GPCLK_STATE_FAILED,wsprrypi::Rp1GpclkCompletionState::failed}}) { io.state_value=pair.first; expect(provider.state(9)==pair.second,"wire state must map to backend state"); }
  provider.release(); expect(io.closes==1 && io.requests.back()==RP1_GPCLK_IOC_RELEASE,"release must issue ioctl before close");

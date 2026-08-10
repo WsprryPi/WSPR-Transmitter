@@ -51,11 +51,22 @@ bool Rp1GpclkLinuxProvider::submit(
     rp1_gpclk_program request{};
     request.version = RP1_GPCLK_UAPI_VERSION; request.size = sizeof(request);
     request.fractional_bits = source.fractional_bits;
-    request.lower_divider_word = source.lower_divider_word;
-    request.upper_divider_word = source.upper_divider_word;
-    request.lower_count = source.lower_count; request.upper_count = source.upper_count;
     request.writes_per_symbol = source.writes_per_symbol;
-    request.tick_divider = source.tick_divider; request.generation = source.generation;
+    request.tick_divider = source.tick_divider;
+    request.symbol_count = RP1_GPCLK_WSPR_SYMBOL_COUNT;
+    request.tone_count = source.tones.size();
+    request.generation = source.generation;
+    for (std::size_t i = 0; i < source.tones.size(); ++i)
+    {
+        request.tones[i].lower_divider_word =
+            source.tones[i].lower_divider_word;
+        request.tones[i].upper_divider_word =
+            source.tones[i].upper_divider_word;
+        request.tones[i].lower_count = source.tones[i].lower_count;
+        request.tones[i].upper_count = source.tones[i].upper_count;
+    }
+    for (std::size_t i = 0; i < source.symbols.size(); ++i)
+        request.symbols[i] = source.symbols[i];
     if (io_.control(fd_, RP1_GPCLK_IOC_SUBMIT, &request) < 0)
         return failed("Could not submit RP1 GPCLK program", error);
     return true;
