@@ -20,8 +20,9 @@ enum class Rp1GpclkCompletionState
 
 struct Rp1GpclkProviderProgram
 {
-    std::uint32_t lower_div_frac{0};
-    std::uint32_t upper_div_frac{0};
+    std::uint64_t lower_divider_word{0};
+    std::uint64_t upper_divider_word{0};
+    std::uint32_t fractional_bits{0};
     std::uint32_t lower_count{0};
     std::uint32_t upper_count{0};
     std::uint32_t writes_per_symbol{0};
@@ -60,8 +61,6 @@ public:
     bool cleanup(std::string& error);
 
     static bool validDrive(std::uint32_t drive_ma) noexcept;
-    static std::uint32_t packDivFrac(std::uint64_t divider_word,
-                                     std::uint32_t fractional_bits) noexcept;
     std::uint64_t generation() const noexcept;
 
 private:

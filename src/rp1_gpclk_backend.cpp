@@ -19,14 +19,6 @@ bool Rp1GpclkBackend::validDrive(std::uint32_t drive_ma) noexcept
     return drive_ma == 2 || drive_ma == 4 || drive_ma == 8 || drive_ma == 12;
 }
 
-std::uint32_t Rp1GpclkBackend::packDivFrac(
-    std::uint64_t divider_word, std::uint32_t fractional_bits) noexcept
-{
-    if (fractional_bits != 16)
-        return 0;
-    return static_cast<std::uint32_t>(divider_word & 0xffffu) << 16;
-}
-
 bool Rp1GpclkBackend::prepare(std::uint32_t drive_ma, std::string& error)
 {
     if (acquired_)
@@ -62,8 +54,9 @@ bool Rp1GpclkBackend::emit(
         return false;
     }
     Rp1GpclkProviderProgram program;
-    program.lower_div_frac = packDivFrac(selected.lower_divider_word, 16);
-    program.upper_div_frac = packDivFrac(selected.upper_divider_word, 16);
+    program.lower_divider_word = selected.lower_divider_word;
+    program.upper_divider_word = selected.upper_divider_word;
+    program.fractional_bits = plan.fractional_bits;
     program.lower_count = selected.lower_word_count;
     program.upper_count = selected.upper_word_count;
     program.writes_per_symbol = kWritesPerSymbol;

@@ -38,8 +38,8 @@ void test_program_and_finite_stop() {
  for (std::size_t tone=0; tone<4; ++tone) {
   expect(b.emit(planned,tone,e), "all four profiles must submit"); auto program=p.programs.back();
   expect(program.writes_per_symbol==66792 && program.tick_divider==511, "production timing constants must be preserved");
-  expect(program.lower_div_frac==(planned.tones[tone].lower_divider_word & 0xffffu)*65536u, "lower fraction must occupy upper 16 bits");
-  expect(program.upper_div_frac==(planned.tones[tone].upper_divider_word & 0xffffu)*65536u, "upper fraction must occupy upper 16 bits");
+  expect(program.lower_divider_word==planned.tones[tone].lower_divider_word && program.fractional_bits==16, "provider must receive the unpacked lower divider word");
+  expect(program.upper_divider_word==planned.tones[tone].upper_divider_word, "provider must receive the unpacked upper divider word");
   expect(b.cancel(e), "cancel must request finite stop");
   expect(!b.cleanup(e), "cleanup must not release a draining descriptor");
   p.current=wsprrypi::Rp1GpclkCompletionState::complete;
