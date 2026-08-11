@@ -35,8 +35,10 @@ public:
 
     bool acquire(std::uint32_t drive_ma, std::string& error) override;
     bool submit(const Rp1GpclkProviderProgram&, std::string& error) override;
+    bool submitEvents(const Rp1GpclkProviderEventProgram&, std::string& error) override;
     bool requestFiniteStop(std::uint64_t generation, std::string& error) override;
     Rp1GpclkCompletionState state(std::uint64_t generation) const noexcept override;
+    Rp1GpclkProviderEventState eventState(std::uint64_t generation) const noexcept override;
     void release() noexcept override;
 
 private:

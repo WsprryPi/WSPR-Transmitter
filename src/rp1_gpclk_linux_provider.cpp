@@ -72,6 +72,43 @@ bool Rp1GpclkLinuxProvider::submit(
     return true;
 }
 
+bool Rp1GpclkLinuxProvider::submitEvents(
+    const Rp1GpclkProviderEventProgram& source, std::string& error)
+{
+    if (fd_ < 0) { error = "RP1 GPCLK provider is not acquired."; return false; }
+    if (source.tones.size() > RP1_GPCLK_EVENT_MAX_TONES ||
+        source.events.size() > RP1_GPCLK_EVENT_MAX_EVENTS)
+    {
+        error = "RP1 GPCLK event program exceeds the wire bounds.";
+        return false;
+    }
+    rp1_gpclk_event_program request{};
+    request.version = RP1_GPCLK_EVENT_UAPI_VERSION;
+    request.size = sizeof(request);
+    request.fractional_bits = source.fractional_bits;
+    request.tick_divider = source.tick_divider;
+    request.tone_count = source.tones.size();
+    request.event_count = source.events.size();
+    request.generation = source.generation;
+    request.total_duration_ns = source.total_duration_ns;
+    for (std::size_t i = 0; i < source.tones.size(); ++i)
+    {
+        request.tones[i].lower_divider_word = source.tones[i].lower_divider_word;
+        request.tones[i].upper_divider_word = source.tones[i].upper_divider_word;
+        request.tones[i].lower_count = source.tones[i].lower_count;
+        request.tones[i].upper_count = source.tones[i].upper_count;
+    }
+    for (std::size_t i = 0; i < source.events.size(); ++i)
+    {
+        request.events[i].duration_ns = source.events[i].duration_ns;
+        request.events[i].tone_index = source.events[i].tone_index;
+        request.events[i].flags = source.events[i].rf_on ? RP1_GPCLK_EVENT_RF_ON : 0;
+    }
+    if (io_.control(fd_, RP1_GPCLK_IOC_SUBMIT_EVENTS, &request) < 0)
+        return failed("Could not submit RP1 GPCLK event program", error);
+    return true;
+}
+
 bool Rp1GpclkLinuxProvider::requestFiniteStop(
     std::uint64_t generation, std::string& error)
 {
@@ -98,6 +135,26 @@ Rp1GpclkCompletionState Rp1GpclkLinuxProvider::state(
     case RP1_GPCLK_STATE_COMPLETE: return Rp1GpclkCompletionState::complete;
     default: return Rp1GpclkCompletionState::failed;
     }
+}
+
+Rp1GpclkProviderEventState Rp1GpclkLinuxProvider::eventState(
+    std::uint64_t generation) const noexcept
+{
+    rp1_gpclk_event_state request{};
+    request.version = RP1_GPCLK_EVENT_UAPI_VERSION;
+    request.size = sizeof(request);
+    request.generation = generation;
+    if (fd_ < 0 || io_.control(fd_, RP1_GPCLK_IOC_EVENT_STATE, &request) < 0)
+        return {Rp1GpclkCompletionState::failed, 0, 0};
+    Rp1GpclkCompletionState completion = Rp1GpclkCompletionState::failed;
+    switch (request.state) {
+    case RP1_GPCLK_STATE_IDLE: completion = Rp1GpclkCompletionState::idle; break;
+    case RP1_GPCLK_STATE_RUNNING: completion = Rp1GpclkCompletionState::running; break;
+    case RP1_GPCLK_STATE_DRAINING: completion = Rp1GpclkCompletionState::draining; break;
+    case RP1_GPCLK_STATE_COMPLETE: completion = Rp1GpclkCompletionState::complete; break;
+    default: break;
+    }
+    return {completion, request.current_event, request.terminal_reason};
 }
 
 void Rp1GpclkLinuxProvider::release() noexcept

@@ -59,20 +59,37 @@ wsprrypi::BackendCompileResult WsprRp1GpclkBackend::configure(
 {
     wsprrypi::BackendCompileResult result;
     configured_.reset();
-    if (plan.backend != wsprrypi::BackendKind::RP1_GPCLK ||
-        plan.mode != wsprrypi::TransmissionMode::WSPR)
+    if (plan.backend != wsprrypi::BackendKind::RP1_GPCLK)
     {
-        result.error = "RP1 GPCLK supports only WSPR execution plans.";
-        return result;
-    }
-    if (plan.events.size() != 162)
-    {
-        result.error = "RP1 GPCLK requires exactly one 162-symbol WSPR frame.";
+        result.error = "Execution plan is not targeted for RP1 GPCLK.";
         return result;
     }
     if (!wsprrypi::Rp1GpclkBackend::validDrive(inputs.power_level))
     {
         result.error = "RP1 GPIO drive must be 2, 4, 8, or 12 mA.";
+        return result;
+    }
+    if (plan.mode != wsprrypi::TransmissionMode::WSPR)
+    {
+        const auto compiled = wsprrypi::compileRp1GpclkEventProgram(plan);
+        if (!compiled.ok)
+        {
+            result.error = compiled.error;
+            return result;
+        }
+        ConfiguredFrame frame;
+        frame.plan_id = plan.id;
+        frame.event_program = compiled.program;
+        frame.finite_events = true;
+        frame.drive_ma = static_cast<std::uint32_t>(inputs.power_level);
+        configured_ = std::move(frame);
+        stop_requested_.store(false, std::memory_order_release);
+        result.ok = true;
+        return result;
+    }
+    if (plan.events.size() != 162)
+    {
+        result.error = "RP1 GPCLK requires exactly one 162-symbol WSPR frame.";
         return result;
     }
 
@@ -147,8 +164,10 @@ wsprrypi::ExecutionResult WsprRp1GpclkBackend::execute(
             result.error = error;
             return result;
         }
-        if (!backend_->emitFrame(
-                configured_->clock_plan, configured_->symbols, error))
+        const bool submitted = configured_->finite_events
+            ? backend_->emitEvents(configured_->event_program, error)
+            : backend_->emitFrame(configured_->clock_plan, configured_->symbols, error);
+        if (!submitted)
         {
             const std::string submit_error = error;
             std::string cleanup_error;
@@ -178,7 +197,14 @@ wsprrypi::ExecutionResult WsprRp1GpclkBackend::execute(
 
         {
             std::lock_guard<std::mutex> lock(backend_mutex_);
-            const auto state = provider_->state(backend_->generation());
+            const auto event_state = configured_->finite_events
+                ? provider_->eventState(backend_->generation())
+                : wsprrypi::Rp1GpclkProviderEventState{
+                      provider_->state(backend_->generation()), 0, 0};
+            const auto state = event_state.completion;
+            if (configured_->finite_events &&
+                event_state.current_event < plan.events.size())
+                owner_.backendReportExecutionProgress(event_state.current_event);
             if (state == wsprrypi::Rp1GpclkCompletionState::complete ||
                 state == wsprrypi::Rp1GpclkCompletionState::failed)
             {

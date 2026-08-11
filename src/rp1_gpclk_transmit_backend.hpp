@@ -2,6 +2,7 @@
 
 #include "rp1_gpclk_backend.hpp"
 #include "rp1_gpclk_linux_provider.hpp"
+#include "rp1_gpclk_event_program.hpp"
 #include "transmission_backend.hpp"
 
 #include <array>
@@ -39,6 +40,8 @@ private:
         wsprrypi::PlanId plan_id{};
         wsprrypi::Rp1GpclkPlan clock_plan{};
         std::array<std::uint8_t, 162> symbols{};
+        wsprrypi::Rp1GpclkProviderEventProgram event_program{};
+        bool finite_events{false};
         std::uint32_t drive_ma{2};
     };
 

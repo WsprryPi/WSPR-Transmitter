@@ -58,6 +58,10 @@ struct ExecutionPlan
     CalibrationSnapshot calibration{};
     ExecutionPolicy policy{};
 
+    // Relevant only to finite TONE plans.  Backends that cannot safely accept
+    // an implicit long-running tone must reject false.
+    bool duration_was_explicit{false};
+
     std::vector<RfEvent> events{};
     PlanSummary summary{};
 };

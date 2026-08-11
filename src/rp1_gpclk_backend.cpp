@@ -83,6 +83,29 @@ bool Rp1GpclkBackend::emitFrame(
     if (!provider_.submit(program, error))
         return false;
     in_flight_ = true;
+    in_flight_events_ = false;
+    return true;
+}
+
+bool Rp1GpclkBackend::emitEvents(
+    Rp1GpclkProviderEventProgram program, std::string& error)
+{
+    if (!acquired_ || in_flight_)
+    {
+        error = acquired_ ? "RP1 GPCLK provider is already running."
+                          : "RP1 GPCLK provider is not prepared.";
+        return false;
+    }
+    if (generation_ == std::numeric_limits<std::uint64_t>::max())
+    {
+        error = "RP1 GPCLK generation is exhausted.";
+        return false;
+    }
+    program.generation = ++generation_;
+    if (!provider_.submitEvents(program, error))
+        return false;
+    in_flight_ = true;
+    in_flight_events_ = true;
     return true;
 }
 
@@ -102,7 +125,9 @@ bool Rp1GpclkBackend::cleanup(std::string& error)
         return true;
     if (in_flight_)
     {
-        const auto state = provider_.state(generation_);
+        const auto state = in_flight_events_
+            ? provider_.eventState(generation_).completion
+            : provider_.state(generation_);
         if (state != Rp1GpclkCompletionState::complete &&
             state != Rp1GpclkCompletionState::failed)
         {
@@ -110,6 +135,7 @@ bool Rp1GpclkBackend::cleanup(std::string& error)
             return false;
         }
         in_flight_ = false;
+        in_flight_events_ = false;
     }
     provider_.release();
     acquired_ = false;

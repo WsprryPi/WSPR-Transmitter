@@ -12,13 +12,16 @@ class Provider final : public wsprrypi::Rp1GpclkProvider {
 public:
  bool acquire(std::uint32_t drive, std::string&) override { drives.push_back(drive); return acquire_ok; }
  bool submit(const wsprrypi::Rp1GpclkProviderProgram& p, std::string&) override { programs.push_back(p); current = wsprrypi::Rp1GpclkCompletionState::running; return submit_ok; }
+ bool submitEvents(const wsprrypi::Rp1GpclkProviderEventProgram& p, std::string&) override { event_programs.push_back(p); current = wsprrypi::Rp1GpclkCompletionState::running; return submit_ok; }
  bool requestFiniteStop(std::uint64_t g, std::string&) override { stops.push_back(g); current = wsprrypi::Rp1GpclkCompletionState::draining; return true; }
  wsprrypi::Rp1GpclkCompletionState state(std::uint64_t) const noexcept override { return current; }
+ wsprrypi::Rp1GpclkProviderEventState eventState(std::uint64_t) const noexcept override { return {current,0,0}; }
  void release() noexcept override { ++releases; }
  bool acquire_ok{true}, submit_ok{true}; int releases{0};
  wsprrypi::Rp1GpclkCompletionState current{wsprrypi::Rp1GpclkCompletionState::idle};
  std::vector<std::uint32_t> drives; std::vector<std::uint64_t> stops;
  std::vector<wsprrypi::Rp1GpclkProviderProgram> programs;
+ std::vector<wsprrypi::Rp1GpclkProviderEventProgram> event_programs;
 };
 
 wsprrypi::Rp1GpclkPlan plan() {
@@ -56,6 +59,16 @@ void test_timeout_and_generation() {
  p.current=wsprrypi::Rp1GpclkCompletionState::complete; b.cleanup(e); b.prepare(2,e); symbols.fill(1); b.emitFrame(planned,symbols,e);
  expect(b.generation()==first+1, "reuse must advance generation"); p.current=wsprrypi::Rp1GpclkCompletionState::failed; expect(b.cleanup(e), "failed provider generation must still release ownership");
 }
+
+void test_event_program_submission() {
+ Provider p; wsprrypi::Rp1GpclkBackend b(p); std::string e;
+ wsprrypi::Rp1GpclkProviderEventProgram program; program.fractional_bits=16; program.tick_divider=511; program.total_duration_ns=10;
+ program.tones.push_back({1,2,1,1}); program.events.push_back({10,0,true});
+ expect(b.prepare(2,e) && b.emitEvents(program,e), "finite event program must submit");
+ expect(p.event_programs.size()==1 && p.event_programs[0].generation==1, "event submission must assign generation");
+ p.current=wsprrypi::Rp1GpclkCompletionState::complete;
+ expect(b.cleanup(e), "completed event program must release");
+}
 }
 
-int main() { test_drive_profiles(); test_program_and_finite_stop(); test_timeout_and_generation(); if (failures) return 1; std::cout << "RP1 GPCLK production backend contract tests passed\n"; }
+int main() { test_drive_profiles(); test_program_and_finite_stop(); test_timeout_and_generation(); test_event_program_submission(); if (failures) return 1; std::cout << "RP1 GPCLK production backend contract tests passed\n"; }

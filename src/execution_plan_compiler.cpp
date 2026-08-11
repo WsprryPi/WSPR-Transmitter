@@ -572,6 +572,7 @@ ExecutionPlan ExecutionPlanCompiler::compile_tone(
     plan.reference_frequency_hz = payload.frequency_hz;
     plan.calibration = request.calibration;
     plan.policy = request.policy;
+    plan.duration_was_explicit = payload.duration.has_value();
 
     RfEvent on_event;
     on_event.offset_from_start = std::chrono::nanoseconds::zero();
