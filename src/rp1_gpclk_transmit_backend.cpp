@@ -142,11 +142,20 @@ wsprrypi::ExecutionResult WsprRp1GpclkBackend::execute(
     std::string error;
     {
         std::lock_guard<std::mutex> lock(backend_mutex_);
-        if (!backend_->prepare(configured_->drive_ma, error) ||
-            !backend_->emitFrame(
-                configured_->clock_plan, configured_->symbols, error))
+        if (!backend_->prepare(configured_->drive_ma, error))
         {
             result.error = error;
+            return result;
+        }
+        if (!backend_->emitFrame(
+                configured_->clock_plan, configured_->symbols, error))
+        {
+            const std::string submit_error = error;
+            std::string cleanup_error;
+            if (!backend_->cleanup(cleanup_error) && !cleanup_error.empty())
+                result.error = submit_error + " Cleanup failed: " + cleanup_error;
+            else
+                result.error = submit_error;
             return result;
         }
     }

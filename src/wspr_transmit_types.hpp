@@ -50,6 +50,7 @@ enum class WsprTransmitState
     RECOVERING,
     COMPLETE,
     CANCELLED,
+    FAILED,
     HUNG
 };
 
@@ -69,6 +70,8 @@ constexpr const char *wsprTransmitStateToString(WsprTransmitState state) noexcep
         return "COMPLETE";
     case WsprTransmitState::CANCELLED:
         return "CANCELLED";
+    case WsprTransmitState::FAILED:
+        return "FAILED";
     case WsprTransmitState::HUNG:
         return "HUNG";
     default:
@@ -91,6 +94,7 @@ enum class WsprTransmissionCallbackEvent
     PROGRESS,
     COMPLETE,
     CANCELLED,
+    FAILED,
     SKIPPED,
     LOGGING
 };

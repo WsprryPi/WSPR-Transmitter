@@ -886,7 +886,7 @@ void WsprTransmitter::startAsync()
 
         const State prior = state_.load(std::memory_order_acquire);
         if (prior == State::DISABLED || prior == State::COMPLETE ||
-            prior == State::CANCELLED)
+            prior == State::CANCELLED || prior == State::FAILED)
         {
             state_.store(State::ENABLED, std::memory_order_release);
         }
@@ -924,7 +924,7 @@ void WsprTransmitter::startAsync()
     {
         const State prior = state_.load(std::memory_order_acquire);
         if (prior == State::DISABLED || prior == State::COMPLETE ||
-            prior == State::CANCELLED)
+            prior == State::CANCELLED || prior == State::FAILED)
         {
             state_.store(State::ENABLED, std::memory_order_release);
         }
@@ -1808,12 +1808,22 @@ void WsprTransmitter::transmit()
         const auto execute_result = transmission_controller_->execute_prepared();
         const bool canceled = execute_result.stopped ||
                               (shouldStop() && symbol_count > 0);
-        if (!execute_result.ok && execute_result.faulted)
+        if (!execute_result.ok)
         {
-            throw std::runtime_error(
-                execute_result.error.empty()
-                    ? "Execution-plan backend fault."
-                    : execute_result.error);
+            const auto t_end_chrono = std::chrono::steady_clock::now();
+            const double actual =
+                std::chrono::duration<double>(t_end_chrono - t0_chrono).count();
+            const std::string error = execute_result.error.empty()
+                ? "Execution-plan backend failed."
+                : execute_result.error;
+            current_cw_active_char_index_.store(-1, std::memory_order_release);
+            state_.store(State::FAILED, std::memory_order_release);
+            fire_transmit_cb(
+                TransmissionCallbackEvent::FAILED,
+                LogLevel::ERROR,
+                error,
+                actual);
+            return;
         }
 
         // Capture the end time immediately after the symbol-period drain.
