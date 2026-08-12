@@ -18,6 +18,7 @@ BackendCompileResult TransmissionController::prepare(
     const TransmissionPrepareOptions& options)
 {
     prepared_plan_ = compiler_.compile(request);
+    prepared_plan_->id.value = next_plan_id_++;
     const BackendCapabilities capabilities = backend_.capabilities();
     if (!supports_mode(capabilities, prepared_plan_->mode))
     {

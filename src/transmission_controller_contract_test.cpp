@@ -7,7 +7,7 @@ namespace {
 void expect(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 class Compiler final : public wsprrypi::IExecutionPlanCompiler {
 public: wsprrypi::ExecutionPlan plan;
-wsprrypi::ExecutionPlan compile(const wsprrypi::TransmissionRequest&) const override { return plan; }
+wsprrypi::ExecutionPlan compile(const wsprrypi::TransmissionRequest& request) const override { auto result=plan; result.request_id=request.id; return result; }
 };
 class Backend final : public wsprrypi::ITransmissionBackend {
 public:
@@ -30,11 +30,16 @@ int main() try {
  compiler.plan.events.push_back({{},std::chrono::seconds{1},wsprrypi::RfEventType::RF_ON,144490500.0,true});
  Backend backend; backend.caps.output_class=wsprrypi::BackendOutputClass::NON_RF_SIMULATION;
  backend.caps.supported_modes=wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::WSPR);
- wsprrypi::TransmissionController controller(compiler,backend); wsprrypi::TransmissionRequest request;
+ wsprrypi::TransmissionController controller(compiler,backend); wsprrypi::TransmissionRequest request; request.id.value=400;
  expect(controller.prepare(request).ok,"simulation must bypass physical GPIO band policy");
+ expect(controller.prepared_plan()->request_id.value==request.id.value,"prepared plan must retain request identity");
+ expect(controller.prepared_plan()->id.value==1,"first prepared plan must receive deterministic identity");
+ expect(controller.prepared_plan()->id.value!=controller.prepared_plan()->request_id.value,"plan and request identities must remain distinct");
  auto result=controller.execute_prepared();
  expect(result.ok && result.cleanup_attempted && result.cleanup.ok && backend.cleanup_calls==1,"successful execution must clean up once");
  expect(controller.prepare(request).ok,"repeat prepare");
+ expect(controller.prepared_plan()->id.value==2,"repeated prepare must receive a distinct plan identity");
+ expect(controller.prepared_plan()->request_id.value==request.id.value,"repeat prepare must retain request identity");
  backend.cleanup_result={false,"injected cleanup failure"}; result=controller.execute_prepared();
  expect(!result.ok && result.faulted && result.cleanup_attempted,"cleanup failure must fail lifecycle");
  expect(result.error.find("injected cleanup failure")!=std::string::npos,"cleanup detail missing");

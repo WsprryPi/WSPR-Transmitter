@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 
 #include "execution_plan_compiler.hpp"
@@ -40,6 +41,7 @@ private:
 
     IExecutionPlanCompiler& compiler_;
     ITransmissionBackend& backend_;
+    std::uint64_t next_plan_id_{1};
     std::optional<ExecutionPlan> prepared_plan_{};
 };
 
