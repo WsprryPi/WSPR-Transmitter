@@ -24,6 +24,8 @@ public:
     bool waitInterruptibleFor(std::chrono::nanoseconds duration) override
     {
         std::unique_lock<std::mutex> lock(mutex_);
+        wait_entered_ = true;
+        condition_.notify_all();
         return !condition_.wait_for(lock, duration, [this] { return stopped_; });
     }
 
@@ -43,10 +45,17 @@ public:
         condition_.notify_all();
     }
 
+    bool waitUntilEntered(std::chrono::nanoseconds timeout)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, timeout, [this] { return wait_entered_; });
+    }
+
 private:
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     bool stopped_{false};
+    bool wait_entered_{false};
 };
 
 void expect(bool condition, const char* message)
@@ -104,6 +113,8 @@ void verify_successful_realtime_execution()
     const auto complete = first_trace.find(
         "\"kind\":\"complete\",\"event_index\":-1,\"logical_ns\":80000000");
     expect(first_event != std::string::npos, "first logical event is missing");
+    expect(second_event != std::string::npos, "second logical event is missing");
+    expect(complete != std::string::npos, "completion marker is missing");
     expect(second_event > first_event, "second logical event is out of order");
     expect(complete > second_event, "completion is out of order");
     expect(backend.cleanup().ok, "real-time cleanup failed");
@@ -128,11 +139,12 @@ void verify_interruptible_wait_cancellation()
     wsprrypi::ExecutionResult execution;
     const auto start = std::chrono::steady_clock::now();
     std::thread worker([&] { execution = backend.execute(plan); });
-    std::this_thread::sleep_for(30ms);
+    const bool entered_wait = context.waitUntilEntered(1s);
     context.cancel();
     worker.join();
     const auto elapsed = std::chrono::steady_clock::now() - start;
 
+    expect(entered_wait, "execution did not enter its interruptible wait");
     expect(execution.stopped, "interrupted wait did not report cancellation");
     expect(!execution.ok, "interrupted wait reported success");
     expect(elapsed < 1500ms, "interrupted wait did not return promptly");

@@ -31,4 +31,5 @@ jobs:
         working-directory: src
         run: |
           make simulated-backend-test
+          timeout 5s make simulated-backend-realtime-test
           make transmission-controller-contract-test
