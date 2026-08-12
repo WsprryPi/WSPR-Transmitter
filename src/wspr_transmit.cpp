@@ -28,6 +28,7 @@
 #include <cassert>
 #include <cerrno>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -54,6 +55,7 @@
 #include "rp1_gpclk_transmit_backend.hpp"
 #include "wspr_transmit_backend_rpi.hpp"
 #include "wspr_transmit_backend_si5351.hpp"
+#include "simulated_transmit_backend.hpp"
 
 // Helper classes and functions in anonymous namespace
 namespace
@@ -89,6 +91,8 @@ namespace
             return "RP1 GPCLK";
         case wsprrypi::BackendKind::SI5351:
             return "SI5351";
+        case wsprrypi::BackendKind::SIMULATED:
+            return "simulated";
         }
 
         return "unknown";
@@ -395,46 +399,78 @@ WsprTransmitter::WsprTransmitter()
 WsprTransmitter::~WsprTransmitter()
 {
     shutdown();
-    cleanupTransmissionBackend();
+    const auto cleanup_result = cleanupTransmissionBackend();
+    if (!cleanup_result.ok)
+    {
+        std::fprintf(
+            stderr,
+            "WsprTransmitter destructor cleanup failed: %s\n",
+            cleanup_result.error.c_str());
+    }
     stop_callback_worker();
 }
 
 void WsprTransmitter::selectBackend(wsprrypi::BackendKind backend_kind)
 {
-    selectBackend(backend_kind, Si5351RuntimeConfig{});
+    selectBackend(
+        backend_kind,
+        Si5351RuntimeConfig{},
+        SimulatedRuntimeConfig{});
 }
 
 void WsprTransmitter::selectBackend(
     wsprrypi::BackendKind backend_kind,
     const Si5351RuntimeConfig &runtime_config)
 {
+    selectBackend(backend_kind, runtime_config, SimulatedRuntimeConfig{});
+}
+
+void WsprTransmitter::selectBackend(
+    wsprrypi::BackendKind backend_kind,
+    const Si5351RuntimeConfig &runtime_config,
+    const SimulatedRuntimeConfig &simulated_config)
+{
     if (backend_ &&
         selected_backend_ == backend_kind &&
         (backend_kind != wsprrypi::BackendKind::SI5351 ||
-         selected_si5351_config_ == runtime_config))
+         selected_si5351_config_ == runtime_config) &&
+        (backend_kind != wsprrypi::BackendKind::SIMULATED ||
+         selected_simulated_config_ == simulated_config))
     {
         return;
     }
 
     shutdown();
-    cleanupTransmissionBackend();
+    requireBackendCleanup("backend replacement");
 
     rpi_backend_ = nullptr;
     selected_backend_ = backend_kind;
     selected_si5351_config_ = runtime_config;
+    selected_simulated_config_ = simulated_config;
 
+    backend_ = createBackend(backend_kind, runtime_config, simulated_config);
+
+    transmission_controller_ =
+        std::make_unique<wsprrypi::TransmissionController>(
+            execution_plan_compiler_,
+            *backend_);
+}
+
+std::unique_ptr<wsprrypi::ITransmissionBackend> WsprTransmitter::createBackend(
+    wsprrypi::BackendKind backend_kind,
+    const Si5351RuntimeConfig& runtime_config,
+    const SimulatedRuntimeConfig& simulated_config)
+{
     switch (backend_kind)
     {
         case wsprrypi::BackendKind::RPI_CLOCK_GPIO:
         {
             auto rpi_backend = std::make_unique<WsprRpiBackend>(*this);
             rpi_backend_ = rpi_backend.get();
-            backend_ = std::move(rpi_backend);
-            break;
+            return rpi_backend;
         }
         case wsprrypi::BackendKind::RP1_GPCLK:
-            backend_ = std::make_unique<WsprRp1GpclkBackend>(*this);
-            break;
+            return std::make_unique<WsprRp1GpclkBackend>(*this);
         case wsprrypi::BackendKind::SI5351:
         {
             WsprSi5351Backend::Config si5351_config;
@@ -460,17 +496,23 @@ void WsprTransmitter::selectBackend(
             }
             si5351_config.power_level = runtime_config.power_level;
             si5351_config.dry_run = false;
-            backend_ = std::make_unique<WsprSi5351Backend>(
+            return std::make_unique<WsprSi5351Backend>(
                 *this,
                 si5351_config);
-            break;
+        }
+        case wsprrypi::BackendKind::SIMULATED:
+        {
+            wsprrypi::SimulatedBackendConfig config;
+            config.virtual_time = simulated_config.virtual_time;
+            config.trace_path = simulated_config.trace_path;
+            config.fail_configure = simulated_config.fail_configure;
+            config.fail_event = simulated_config.fail_event;
+            config.cancel_event = simulated_config.cancel_event;
+            config.fail_cleanup = simulated_config.fail_cleanup;
+            return std::make_unique<wsprrypi::SimulatedTransmitBackend>(*this, config);
         }
     }
-
-    transmission_controller_ =
-        std::make_unique<wsprrypi::TransmissionController>(
-            execution_plan_compiler_,
-            *backend_);
+    throw std::invalid_argument("Unknown transmission backend.");
 }
 
 wsprrypi::StartupQuiesceResult WsprTransmitter::quiesceForStartup()
@@ -665,7 +707,7 @@ void WsprTransmitter::configureExecution(
     }
 
     shutdown();
-    cleanupTransmissionBackend();
+    requireBackendCleanup("legacy execution reconfiguration");
 
     stop_requested_.store(false);
 
@@ -716,15 +758,11 @@ void WsprTransmitter::configureExecution(
     }
     catch (...)
     {
-        try
-        {
-            shutdown();
-            cleanupTransmissionBackend();
-        }
-        catch (...)
-        {
-        }
-        throw;
+        const std::exception_ptr original = std::current_exception();
+        shutdown();
+        rethrowWithCleanupResult(
+            original,
+            "legacy execution configuration failure");
     }
 }
 
@@ -772,7 +810,7 @@ void WsprTransmitter::configureExecution(
     }
 
     shutdown();
-    cleanupTransmissionBackend();
+    requireBackendCleanup("canonical execution reconfiguration");
 
     stop_requested_.store(false);
 
@@ -830,15 +868,11 @@ void WsprTransmitter::configureExecution(
     }
     catch (...)
     {
-        try
-        {
-            shutdown();
-            cleanupTransmissionBackend();
-        }
-        catch (...)
-        {
-        }
-        throw;
+        const std::exception_ptr original = std::current_exception();
+        shutdown();
+        rethrowWithCleanupResult(
+            original,
+            "canonical execution configuration failure");
     }
 }
 
@@ -1101,13 +1135,13 @@ bool WsprTransmitter::recover_from_watchdog_fault_locked()
 void WsprTransmitter::stopAndJoin()
 {
     shutdown();
-    cleanupTransmissionBackend();
+    observeBackendCleanup("explicit stop");
 }
 
 void WsprTransmitter::shutdownForProcessExit()
 {
     shutdown();
-    cleanupTransmissionBackend();
+    observeBackendCleanup("process shutdown");
     backend_.reset();
     rpi_backend_ = nullptr;
     stop_callback_worker();
@@ -1393,7 +1427,7 @@ bool WsprTransmitter::backendRestartCurrentConfiguration()
     const TransmissionRequest request = current_request_;
 
     shutdown();
-    cleanupTransmissionBackend();
+    requireBackendCleanup("watchdog recovery");
 
     configureExecution(request);
     startAsync();
@@ -1854,12 +1888,74 @@ void WsprTransmitter::join_transmission()
     }
 }
 
-void WsprTransmitter::cleanupTransmissionBackend()
+wsprrypi::CleanupResult WsprTransmitter::cleanupTransmissionBackend() noexcept
 {
-    if (backend_ != nullptr)
+    last_cleanup_result_ = backend_ != nullptr
+        ? backend_->cleanup()
+        : wsprrypi::CleanupResult{true, {}};
+    return last_cleanup_result_;
+}
+
+void WsprTransmitter::requireBackendCleanup(const char* context)
+{
+    if (observeBackendCleanup(context))
+        return;
+
+    std::string error = std::string(context) + " cleanup failed";
+    if (!last_cleanup_result_.error.empty())
+        error += ": " + last_cleanup_result_.error;
+    throw std::runtime_error(error);
+}
+
+bool WsprTransmitter::observeBackendCleanup(const char* context)
+{
+    const auto result = cleanupTransmissionBackend();
+    if (result.ok)
+        return true;
+
+    state_.store(State::FAILED, std::memory_order_release);
+    std::string error = std::string(context) + " cleanup failed";
+    if (!result.error.empty())
+        error += ": " + result.error;
+    fire_transmit_cb(
+        TransmissionCallbackEvent::FAILED,
+        LogLevel::ERROR,
+        error,
+        0.0);
+    return false;
+}
+
+[[noreturn]] void WsprTransmitter::rethrowWithCleanupResult(
+    std::exception_ptr original,
+    const char* context)
+{
+    const auto cleanup_result = cleanupTransmissionBackend();
+    if (cleanup_result.ok)
+        std::rethrow_exception(original);
+
+    state_.store(State::FAILED, std::memory_order_release);
+    std::string original_error = "Unknown configuration failure.";
+    try
     {
-        backend_->cleanup();
+        std::rethrow_exception(original);
     }
+    catch (const std::exception& e)
+    {
+        original_error = e.what();
+    }
+    catch (...)
+    {
+    }
+
+    std::string error = original_error + " " + context + " cleanup failed";
+    if (!cleanup_result.error.empty())
+        error += ": " + cleanup_result.error;
+    fire_transmit_cb(
+        TransmissionCallbackEvent::FAILED,
+        LogLevel::ERROR,
+        error,
+        0.0);
+    throw std::runtime_error(error);
 }
 
 int WsprTransmitter::getOutputPowerMilliwatts(int level)
@@ -1915,7 +2011,8 @@ void WsprTransmitter::thread_entry()
 
     try
     {
-        set_thread_priority();
+        if (selected_backend_ != wsprrypi::BackendKind::SIMULATED)
+            set_thread_priority();
     }
     catch (const std::system_error &e)
     {

@@ -122,7 +122,7 @@ public:
     /**
      * @brief Perform best-effort backend cleanup.
      */
-    void cleanup() noexcept override;
+    wsprrypi::CleanupResult cleanup() noexcept override;
 
     /**
      * @brief Return the backend configuration

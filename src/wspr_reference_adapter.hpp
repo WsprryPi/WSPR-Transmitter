@@ -26,59 +26,8 @@
 #ifndef WSPR_REFERENCE_ADAPTER_HPP
 #define WSPR_REFERENCE_ADAPTER_HPP
 
+#include "prepared_wspr_transmission.hpp"
 #include "wspr_ref_api.hpp"
-
-#include <array>
-#include <cstdint>
-#include <string>
-#include <vector>
-
-constexpr std::size_t WSPR_SYMBOL_COUNT = 162U;
-
-struct PreparedWsprFrame
-{
-    std::array<std::uint8_t, WSPR_SYMBOL_COUNT> symbols{};
-};
-
-struct PreparedWsprTransmission
-{
-    std::string plan_type;
-    std::vector<PreparedWsprFrame> frames;
-    std::string callsign;
-    std::string locator;
-    std::string callsign_raw;
-    std::string locator_raw;
-    std::string callsign_normalized;
-    std::string locator_normalized;
-    std::vector<std::string> frame_callsigns;
-    std::vector<std::string> frame_locators;
-    std::size_t total_frame_count = 0;
-    // 1-based frame ordinal within `frames`.
-    std::size_t current_frame = 0;
-    std::string frame_callsign;
-    std::string frame_locator;
-    int power_dbm = 0;
-
-    [[nodiscard]] bool empty() const noexcept
-    {
-        return frames.empty();
-    }
-
-    [[nodiscard]] std::size_t frameCount() const noexcept
-    {
-        return frames.size();
-    }
-
-    [[nodiscard]] std::size_t symbolCountPerFrame() const noexcept
-    {
-        return WSPR_SYMBOL_COUNT;
-    }
-
-    [[nodiscard]] std::size_t totalSymbolCount() const noexcept
-    {
-        return frames.size() * WSPR_SYMBOL_COUNT;
-    }
-};
 
 PreparedWsprTransmission build_prepared_wspr_transmission(
     const std::string& callsign,

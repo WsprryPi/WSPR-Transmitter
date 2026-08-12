@@ -32,7 +32,7 @@ public:
         const wsprrypi::ExecutionPlan& plan) override;
     wsprrypi::StartupQuiesceResult quiesceForStartup() override;
     void stop() noexcept override;
-    void cleanup() noexcept override;
+    wsprrypi::CleanupResult cleanup() noexcept override;
 
 private:
     struct ConfiguredFrame

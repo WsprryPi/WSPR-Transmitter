@@ -31,7 +31,7 @@
 #include <string>
 
 #include "band_gpio.hpp"
-#include "wspr_reference_adapter.hpp"
+#include "prepared_wspr_transmission.hpp"
 
 /**
  * @enum WsprTransmitState

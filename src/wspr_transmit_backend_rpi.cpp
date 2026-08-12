@@ -671,6 +671,12 @@ wsprrypi::BackendInfo WsprRpiBackend::info() const
 wsprrypi::BackendCapabilities WsprRpiBackend::capabilities() const
 {
     wsprrypi::BackendCapabilities caps;
+    caps.output_class = wsprrypi::BackendOutputClass::PHYSICAL_GPIO_RF;
+    caps.supported_modes =
+        wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::WSPR) |
+        wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::QRSS) |
+        wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::FSKCW) |
+        wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::DFCW);
     caps.supports_frequency_switching = true;
     caps.supports_rf_gating = true;
     caps.supports_fade_shape = true;
@@ -1098,9 +1104,10 @@ void WsprRpiBackend::stop() noexcept
     owner_.backendRequestStopTxNoJoin();
 }
 
-void WsprRpiBackend::cleanup() noexcept
+wsprrypi::CleanupResult WsprRpiBackend::cleanup() noexcept
 {
     cleanupTransmission();
+    return {true, {}};
 }
 
 std::optional<WsprRpiBackend::ExecutionPlanConfig>

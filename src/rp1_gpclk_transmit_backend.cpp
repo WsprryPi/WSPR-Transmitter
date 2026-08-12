@@ -45,6 +45,8 @@ wsprrypi::BackendInfo WsprRp1GpclkBackend::info() const
 wsprrypi::BackendCapabilities WsprRp1GpclkBackend::capabilities() const
 {
     wsprrypi::BackendCapabilities caps;
+    caps.output_class = wsprrypi::BackendOutputClass::PHYSICAL_GPIO_RF;
+    caps.supported_modes = 0xffffffffu;
     caps.supports_precomputed_execution = true;
     caps.supports_frequency_switching = true;
     caps.supports_rf_gating = true;
@@ -245,11 +247,12 @@ void WsprRp1GpclkBackend::stop() noexcept
     stop_requested_.store(true, std::memory_order_release);
 }
 
-void WsprRp1GpclkBackend::cleanup() noexcept
+wsprrypi::CleanupResult WsprRp1GpclkBackend::cleanup() noexcept
 {
     stop();
     std::string error;
     std::lock_guard<std::mutex> lock(backend_mutex_);
-    (void)backend_->cleanup(error);
+    const bool ok = backend_->cleanup(error);
     configured_.reset();
+    return {ok, error};
 }

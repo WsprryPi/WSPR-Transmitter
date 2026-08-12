@@ -7,7 +7,7 @@
 #include <variant>
 #include <vector>
 
-#include "wspr_reference_adapter.hpp"
+#include "prepared_wspr_transmission.hpp"
 
 namespace wsprrypi
 {

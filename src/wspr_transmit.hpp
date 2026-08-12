@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -49,12 +50,12 @@
 #include "execution_plan.hpp"
 #include "execution_plan_compiler.hpp"
 #include "transmission_controller.hpp"
-#include "wspr_reference_adapter.hpp"
+#include "prepared_wspr_transmission.hpp"
 #include "wspr_transmit_types.hpp"
 
 class WsprTransmitBackend;
 class WsprRpiBackend;
-class IControllerBridge
+class IControllerBridge : public wsprrypi::IExecutionContext
 {
 public:
     virtual ~IControllerBridge() = default;
@@ -64,8 +65,22 @@ public:
     virtual void backendSignalStopRequest() noexcept = 0;
     virtual void backendRequestStopTxNoJoin() noexcept = 0;
     virtual bool backendWaitInterruptableFor(std::chrono::nanoseconds duration) = 0;
+    bool stopRequested() const noexcept override { return backendShouldStop(); }
+    bool waitInterruptibleFor(std::chrono::nanoseconds duration) override
+    {
+        return backendWaitInterruptableFor(duration);
+    }
     virtual void backendThrowIfStopRequested(const char *context) = 0;
     virtual void backendReportExecutionProgress(std::size_t event_index) noexcept = 0;
+    void reportExecutionProgress(std::size_t event_index) noexcept override
+    {
+        backendReportExecutionProgress(event_index);
+    }
+    std::chrono::nanoseconds logicalNow() const noexcept override
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch());
+    }
     virtual void backendFireTransmitCallback(WsprTransmissionCallbackEvent event,
                                              WsprTransmitLogLevel level,
                                              const std::string &msg,
@@ -138,6 +153,18 @@ public:
         bool app_managed = false;
 
         bool operator==(const Si5351RuntimeConfig &) const = default;
+    };
+
+    struct SimulatedRuntimeConfig
+    {
+        bool virtual_time = true;
+        std::string trace_path = "/tmp/wsprrypi-simulated-trace.json";
+        bool fail_configure = false;
+        long fail_event = -1;
+        long cancel_event = -1;
+        bool fail_cleanup = false;
+
+        bool operator==(const SimulatedRuntimeConfig &) const = default;
     };
 
     /**
@@ -292,6 +319,10 @@ public:
     void selectBackend(
         wsprrypi::BackendKind backend_kind,
         const Si5351RuntimeConfig &si5351_config);
+    void selectBackend(
+        wsprrypi::BackendKind backend_kind,
+        const Si5351RuntimeConfig &si5351_config,
+        const SimulatedRuntimeConfig &simulated_config);
 
     /**
      * Place the selected backend into its safe startup state before any
@@ -420,6 +451,11 @@ public:
      */
     void shutdownForProcessExit();
 
+    const wsprrypi::CleanupResult& lastCleanupResult() const noexcept
+    {
+        return last_cleanup_result_;
+    }
+
     /**
      * @brief Returns true if the DMA watchdog detected a stalled DMA engine.
      */
@@ -511,6 +547,15 @@ public:
     bool backendRestartCurrentConfiguration() override;
 
 private:
+    std::unique_ptr<wsprrypi::ITransmissionBackend> createBackend(
+        wsprrypi::BackendKind backend_kind,
+        const Si5351RuntimeConfig& runtime_config,
+        const SimulatedRuntimeConfig& simulated_config);
+    void requireBackendCleanup(const char* context);
+    bool observeBackendCleanup(const char* context);
+    [[noreturn]] void rethrowWithCleanupResult(
+        std::exception_ptr original,
+        const char* context);
     struct PendingTransmitCallback
     {
         TransmissionCallbackEvent event;
@@ -808,7 +853,7 @@ private:
      *   Tears down DMA state, restores hardware registers, and releases
      *   mailbox-allocated memory used during transmission.
      */
-    void cleanupTransmissionBackend();
+    wsprrypi::CleanupResult cleanupTransmissionBackend() noexcept;
 
     /**
      * @brief Convert a GPIO power level index to milliwatts.
@@ -1027,6 +1072,8 @@ private:
     WsprRpiBackend *rpi_backend_{nullptr};
     wsprrypi::BackendKind selected_backend_{wsprrypi::BackendKind::RPI_CLOCK_GPIO};
     Si5351RuntimeConfig selected_si5351_config_{};
+    SimulatedRuntimeConfig selected_simulated_config_{};
+    wsprrypi::CleanupResult last_cleanup_result_{true, {}};
     std::unique_ptr<wsprrypi::TransmissionController> transmission_controller_;
 };
 
