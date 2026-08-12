@@ -30,8 +30,9 @@ int main() try {
  compiler.plan.events.push_back({{},std::chrono::seconds{1},wsprrypi::RfEventType::RF_ON,144490500.0,true});
  Backend backend; backend.caps.output_class=wsprrypi::BackendOutputClass::NON_RF_SIMULATION;
  backend.caps.supported_modes=wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::WSPR);
- wsprrypi::TransmissionController controller(compiler,backend); wsprrypi::TransmissionRequest request;
+ wsprrypi::TransmissionController controller(compiler,backend); wsprrypi::TransmissionRequest request; request.id.value=400;
  expect(controller.prepare(request).ok,"simulation must bypass physical GPIO band policy");
+ expect(controller.prepared_plan()->id.value==request.id.value,"prepared plan must retain request identity");
  auto result=controller.execute_prepared();
  expect(result.ok && result.cleanup_attempted && result.cleanup.ok && backend.cleanup_calls==1,"successful execution must clean up once");
  expect(controller.prepare(request).ok,"repeat prepare");
