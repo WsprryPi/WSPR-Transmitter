@@ -1930,7 +1930,8 @@ void WsprTransmitter::thread_entry()
 
     try
     {
-        set_thread_priority();
+        if (selected_backend_ != wsprrypi::BackendKind::SIMULATED)
+            set_thread_priority();
     }
     catch (const std::system_error &e)
     {
