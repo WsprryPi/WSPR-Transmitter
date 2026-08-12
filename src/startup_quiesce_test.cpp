@@ -439,7 +439,7 @@ namespace
             return {true, {}};
         }
         void stop() noexcept override {}
-        void cleanup() noexcept override {}
+        wsprrypi::CleanupResult cleanup() noexcept override { return {true, {}}; }
     };
 
     WsprSi5351Backend::Config make_config(

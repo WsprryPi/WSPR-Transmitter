@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -9,6 +10,23 @@
 
 namespace wsprrypi
 {
+
+class IExecutionContext
+{
+public:
+    virtual ~IExecutionContext() = default;
+    virtual bool stopRequested() const noexcept = 0;
+    virtual bool waitInterruptibleFor(std::chrono::nanoseconds duration) = 0;
+    virtual void reportExecutionProgress(std::size_t event_index) noexcept = 0;
+    virtual std::chrono::nanoseconds logicalNow() const noexcept = 0;
+};
+
+enum class BackendOutputClass
+{
+    PHYSICAL_GPIO_RF,
+    EXTERNAL_CLOCK_RF,
+    NON_RF_SIMULATION
+};
 
 struct BackendInfo
 {
@@ -19,6 +37,8 @@ struct BackendInfo
 
 struct BackendCapabilities
 {
+    BackendOutputClass output_class{BackendOutputClass::PHYSICAL_GPIO_RF};
+    std::uint32_t supported_modes{0};
     bool supports_frequency_switching{true};
     bool supports_rf_gating{true};
     bool supports_fade_shape{false};
@@ -30,6 +50,18 @@ struct BackendCapabilities
     double max_frequency_hz{0.0};
     double nominal_frequency_resolution_hz{0.0};
 };
+
+constexpr std::uint32_t transmission_mode_bit(TransmissionMode mode) noexcept
+{
+    return std::uint32_t{1} << static_cast<unsigned>(mode);
+}
+
+inline bool supports_mode(
+    const BackendCapabilities& capabilities,
+    TransmissionMode mode) noexcept
+{
+    return (capabilities.supported_modes & transmission_mode_bit(mode)) != 0;
+}
 
 struct BackendAdjustment
 {
@@ -52,12 +84,20 @@ struct BackendExecutionInputs
     int tx_gpio{0};
 };
 
+struct CleanupResult
+{
+    bool ok{false};
+    std::string error;
+};
+
 struct ExecutionResult
 {
     bool ok{false};
     bool stopped{false};
     bool faulted{false};
     std::string error;
+    bool cleanup_attempted{false};
+    CleanupResult cleanup{};
 };
 
 /** Result of placing a backend into its safe startup state. */
@@ -82,7 +122,7 @@ public:
     virtual StartupQuiesceResult quiesceForStartup() = 0;
 
     virtual void stop() noexcept = 0;
-    virtual void cleanup() noexcept = 0;
+    virtual CleanupResult cleanup() noexcept = 0;
 };
 
 } // namespace wsprrypi

@@ -54,7 +54,7 @@
 
 class WsprTransmitBackend;
 class WsprRpiBackend;
-class IControllerBridge
+class IControllerBridge : public wsprrypi::IExecutionContext
 {
 public:
     virtual ~IControllerBridge() = default;
@@ -64,8 +64,22 @@ public:
     virtual void backendSignalStopRequest() noexcept = 0;
     virtual void backendRequestStopTxNoJoin() noexcept = 0;
     virtual bool backendWaitInterruptableFor(std::chrono::nanoseconds duration) = 0;
+    bool stopRequested() const noexcept override { return backendShouldStop(); }
+    bool waitInterruptibleFor(std::chrono::nanoseconds duration) override
+    {
+        return backendWaitInterruptableFor(duration);
+    }
     virtual void backendThrowIfStopRequested(const char *context) = 0;
     virtual void backendReportExecutionProgress(std::size_t event_index) noexcept = 0;
+    void reportExecutionProgress(std::size_t event_index) noexcept override
+    {
+        backendReportExecutionProgress(event_index);
+    }
+    std::chrono::nanoseconds logicalNow() const noexcept override
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch());
+    }
     virtual void backendFireTransmitCallback(WsprTransmissionCallbackEvent event,
                                              WsprTransmitLogLevel level,
                                              const std::string &msg,

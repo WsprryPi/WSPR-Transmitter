@@ -18,12 +18,22 @@ BackendCompileResult TransmissionController::prepare(
     const TransmissionPrepareOptions& options)
 {
     prepared_plan_ = compiler_.compile(request);
-    const GpioBandPolicyDecision policy =
-        evaluate_gpio_band_policy(*prepared_plan_);
-    if (!policy.allowed)
+    const BackendCapabilities capabilities = backend_.capabilities();
+    if (!supports_mode(capabilities, prepared_plan_->mode))
     {
         prepared_plan_.reset();
-        return BackendCompileResult{false, {}, policy.error};
+        return BackendCompileResult{false, {},
+            "Selected backend does not support the requested transmission mode."};
+    }
+    if (capabilities.output_class == BackendOutputClass::PHYSICAL_GPIO_RF)
+    {
+        const GpioBandPolicyDecision policy =
+            evaluate_gpio_band_policy(*prepared_plan_);
+        if (!policy.allowed)
+        {
+            prepared_plan_.reset();
+            return BackendCompileResult{false, {}, policy.error};
+        }
     }
 
     const BackendCompileResult configure_result = backend_.configure(
@@ -50,7 +60,20 @@ ExecutionResult TransmissionController::execute_prepared()
             "No prepared execution plan."};
     }
 
-    return backend_.execute(*prepared_plan_);
+    ExecutionResult result = backend_.execute(*prepared_plan_);
+    result.cleanup_attempted = true;
+    result.cleanup = backend_.cleanup();
+    if (!result.cleanup.ok)
+    {
+        result.ok = false;
+        result.faulted = true;
+        if (!result.error.empty())
+            result.error += " ";
+        result.error += "Cleanup failed";
+        if (!result.cleanup.error.empty())
+            result.error += ": " + result.cleanup.error;
+    }
+    return result;
 }
 
 ExecutionResult TransmissionController::transmit(

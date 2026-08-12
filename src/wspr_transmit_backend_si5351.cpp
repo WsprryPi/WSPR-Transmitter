@@ -225,6 +225,13 @@ wsprrypi::BackendInfo WsprSi5351Backend::info() const
 wsprrypi::BackendCapabilities WsprSi5351Backend::capabilities() const
 {
     wsprrypi::BackendCapabilities caps;
+    caps.output_class = wsprrypi::BackendOutputClass::EXTERNAL_CLOCK_RF;
+    caps.supported_modes =
+        wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::WSPR) |
+        wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::TONE) |
+        wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::QRSS) |
+        wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::FSKCW) |
+        wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::DFCW);
     caps.supports_frequency_switching = true;
     caps.supports_rf_gating = true;
     caps.supports_fade_shape = true;
@@ -778,10 +785,12 @@ void WsprSi5351Backend::stop() noexcept
     owner_.backendRequestStopTxNoJoin();
 }
 
-void WsprSi5351Backend::cleanup() noexcept
+wsprrypi::CleanupResult WsprSi5351Backend::cleanup() noexcept
 {
-    (void)disableTransmitOutput();
+    const bool disabled = disableTransmitOutput();
     device_.close();
+    wsprrypi::CleanupResult result{
+        disabled, disabled ? std::string{} : "Could not disable Si5351 output."};
     if (configured_)
     {
         log_si5351(
@@ -790,6 +799,7 @@ void WsprSi5351Backend::cleanup() noexcept
             "Si5351 cleanup requested.");
     }
     resetState();
+    return result;
 }
 
 const WsprSi5351Backend::Config&
