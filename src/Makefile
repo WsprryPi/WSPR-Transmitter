@@ -44,6 +44,7 @@ SI5351_TEST_SOURCE := ./si5351_backend_harness.cpp
 SI5351_PLANNER_TEST_SOURCE := ./si5351_planner_test.cpp
 SI5351_TRANSITION_TEST_SOURCE := ./si5351_transition_test.cpp
 SIMULATED_BACKEND_TEST_SOURCE := ./simulated_transmit_backend_test.cpp
+SIMULATED_BACKEND_REALTIME_TEST_SOURCE := ./simulated_transmit_backend_realtime_test.cpp
 TRANSMISSION_CONTROLLER_CONTRACT_TEST_SOURCE := ./transmission_controller_contract_test.cpp
 STARTUP_QUIESCE_TEST_SOURCE := ./startup_quiesce_test.cpp
 SI5351_QUALIFICATION_SOURCE := ./si5351_startup_quiesce_qualification.cpp
@@ -58,7 +59,7 @@ GPIO_QUALIFICATION_TEST_SOURCE := ./gpio_startup_quiesce_qualification_test.cc
 SI5351_MIN_DRIVE_SOURCE := ./si5351_min_drive_qualification.cc
 SI5351_MIN_DRIVE_MAIN_SOURCE := ./si5351_min_drive_qualification_main.cc
 SI5351_MIN_DRIVE_TEST_SOURCE := ./si5351_min_drive_qualification_test.cc
-LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE) $(SI5351_PLANNER_TEST_SOURCE) $(SI5351_TRANSITION_TEST_SOURCE) $(SIMULATED_BACKEND_TEST_SOURCE) $(TRANSMISSION_CONTROLLER_CONTRACT_TEST_SOURCE) $(STARTUP_QUIESCE_TEST_SOURCE) $(SI5351_QUALIFICATION_SOURCE) $(SI5351_QUALIFICATION_MAIN_SOURCE) $(SI5351_QUALIFICATION_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
+LOCAL_CPP_SOURCES := $(filter-out $(SI5351_TEST_SOURCE) $(SI5351_PLANNER_TEST_SOURCE) $(SI5351_TRANSITION_TEST_SOURCE) $(SIMULATED_BACKEND_TEST_SOURCE) $(SIMULATED_BACKEND_REALTIME_TEST_SOURCE) $(TRANSMISSION_CONTROLLER_CONTRACT_TEST_SOURCE) $(STARTUP_QUIESCE_TEST_SOURCE) $(SI5351_QUALIFICATION_SOURCE) $(SI5351_QUALIFICATION_MAIN_SOURCE) $(SI5351_QUALIFICATION_TEST_SOURCE),$(LOCAL_CPP_SOURCES))
 
 # Find in each submodule—but explicitly skip any “main” there:
 SUBMODULE_C_SOURCES   := $(shell find $(SUBMODULE_SRCDIRS) -type f -name '*.c'   ! -name 'main.c')
@@ -103,6 +104,9 @@ TRANSMISSION_CONTROLLER_CONTRACT_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./transmission_controller.o
 SIMULATED_BACKEND_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./simulated_transmit_backend_test.o \
+	$(OBJ_DIR_DEBUG)/./simulated_transmit_backend.o
+SIMULATED_BACKEND_REALTIME_TEST_OBJECTS := \
+	$(OBJ_DIR_DEBUG)/./simulated_transmit_backend_realtime_test.o \
 	$(OBJ_DIR_DEBUG)/./simulated_transmit_backend.o
 SI5351_QUALIFICATION_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./si5351_startup_quiesce_qualification.o \
@@ -259,6 +263,10 @@ build/bin/simulated_transmit_backend_test: $(SIMULATED_BACKEND_TEST_OBJECTS)
 	$(Q)mkdir -p $(BIN_DIR)
 	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
 
+build/bin/simulated_transmit_backend_realtime_test: $(SIMULATED_BACKEND_REALTIME_TEST_OBJECTS)
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CXX) $(CXX_DEBUG_FLAGS) $^ -o $@ $(LDFLAGS)
+
 build/bin/si5351_startup_quiesce_qualification: $(OBJ_DIR_DEBUG)/./si5351_startup_quiesce_qualification_main.o $(SI5351_QUALIFICATION_OBJECTS)
 
 	$(Q)mkdir -p $(BIN_DIR)
@@ -327,7 +335,7 @@ build/bin/$(OUT): $(CPP_OBJECTS) $(C_OBJECTS)
 ##
 # Phony targets
 ##
-.PHONY: clean release debug test si5351-test si5351-planner-test si5351-transition-test simulated-backend-test transmission-controller-contract-test startup-quiesce-test si5351-startup-quiesce-qualification si5351-startup-quiesce-qualification-test si5351-min-drive-qualification si5351-min-drive-qualification-test gpio-startup-quiesce-qualification gpio-startup-quiesce-qualification-test gdb lint macros help
+.PHONY: clean release debug test si5351-test si5351-planner-test si5351-transition-test simulated-backend-test simulated-backend-realtime-test transmission-controller-contract-test startup-quiesce-test si5351-startup-quiesce-qualification si5351-startup-quiesce-qualification-test si5351-min-drive-qualification si5351-min-drive-qualification-test gpio-startup-quiesce-qualification gpio-startup-quiesce-qualification-test gdb lint macros help
 
 clean:
 	$(Q)echo "Cleaning up build artifacts."
@@ -356,6 +364,9 @@ transmission-controller-contract-test: build/bin/transmission_controller_contrac
 
 simulated-backend-test: build/bin/simulated_transmit_backend_test
 	$(Q)./build/bin/simulated_transmit_backend_test
+
+simulated-backend-realtime-test: build/bin/simulated_transmit_backend_realtime_test
+	$(Q)./build/bin/simulated_transmit_backend_realtime_test
 
 startup-quiesce-test: build/bin/startup_quiesce_test
 	$(Q)./build/bin/startup_quiesce_test

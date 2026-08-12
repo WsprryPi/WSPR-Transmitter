@@ -31,4 +31,6 @@ jobs:
         working-directory: src
         run: |
           make simulated-backend-test
+          make build/bin/simulated_transmit_backend_realtime_test
+          timeout 5s ./build/bin/simulated_transmit_backend_realtime_test
           make transmission-controller-contract-test
