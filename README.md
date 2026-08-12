@@ -166,6 +166,19 @@ Common targets:
 The Raspberry Pi runtime path requires appropriate privileges for low-level
 hardware access.
 
+## Debian Contract CI
+
+The `Debian backend contracts` workflow runs the simulator and transmission
+controller contract tests in an isolated Debian Trixie checkout. Those tests
+are standalone and require no hardware or elevated privileges.
+
+Si5351 transition, startup-quiescence, full debug-build, and physical-backend
+regressions still require the dependency topology recorded by the parent
+WsprryPi repository. The parent non-hardware workflow runs those tests against
+the exact pinned sibling submodules. Neither workflow performs installation,
+service management, transmitter device access, live transmission, or RF
+qualification.
+
 ## Runtime Notes
 
 - RF frequency values are expressed in hertz (Hz)

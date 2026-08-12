@@ -50,7 +50,7 @@
 #include "execution_plan.hpp"
 #include "execution_plan_compiler.hpp"
 #include "transmission_controller.hpp"
-#include "wspr_reference_adapter.hpp"
+#include "prepared_wspr_transmission.hpp"
 #include "wspr_transmit_types.hpp"
 
 class WsprTransmitBackend;
