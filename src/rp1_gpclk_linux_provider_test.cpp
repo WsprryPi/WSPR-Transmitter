@@ -55,5 +55,14 @@ void test_failures() {
  Io io; io.open_result=-1; wsprrypi::Rp1GpclkLinuxProvider p(io); std::string e; expect(!p.acquire(2,e) && e.find("No such")!=std::string::npos,"open failure must be reported");
  Io io2; io2.fail_request=RP1_GPCLK_IOC_ACQUIRE; wsprrypi::Rp1GpclkLinuxProvider p2(io2); expect(!p2.acquire(2,e) && io2.closes==1,"acquire ioctl failure must close fd");
 }
+
+void test_supported_drive_values() {
+ for (const std::uint32_t drive : {2U, 4U, 8U, 12U}) {
+  Io io; wsprrypi::Rp1GpclkLinuxProvider provider(io); std::string error;
+  expect(provider.acquire(drive,error), "each supported drive must acquire");
+  expect(io.acquire.drive_ma==drive, "acquire ioctl must preserve each supported drive unchanged");
+  provider.release();
+ }
 }
-int main() { test_wire_contract(); test_failures(); if(failures) return 1; std::cout << "RP1 GPCLK Linux provider client tests passed\n"; }
+}
+int main() { test_wire_contract(); test_supported_drive_values(); test_failures(); if(failures) return 1; std::cout << "RP1 GPCLK Linux provider client tests passed\n"; }
