@@ -12,5 +12,5 @@ public:
  StartupQuiesceResult quiesceForStartup()override; void stop()noexcept override; CleanupResult cleanup()noexcept override; const std::string& traceJson()const noexcept{return json_;}
 private:
  struct Item{std::string kind;long index;long long ns;double hz;bool rf;std::string detail;}; void add(std::string,long,std::chrono::nanoseconds,double,bool,std::string={});void render();
- IExecutionContext& context_;SimulatedBackendConfig config_;std::atomic<bool> stopped_{false};bool configured_{false};bool cleanup_recorded_{false};PlanId plan_id_{};std::vector<Item> items_;std::string json_;
+ IExecutionContext& context_;SimulatedBackendConfig config_;std::atomic<bool> stopped_{false};bool configured_{false};bool cleanup_armed_{false};bool cleanup_recorded_{false};PlanId plan_id_{};std::vector<Item> items_;std::string json_;
 }; }

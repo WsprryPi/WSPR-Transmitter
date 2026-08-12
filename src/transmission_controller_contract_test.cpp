@@ -12,14 +12,14 @@ wsprrypi::ExecutionPlan compile(const wsprrypi::TransmissionRequest&) const over
 class Backend final : public wsprrypi::ITransmissionBackend {
 public:
  wsprrypi::BackendCapabilities caps; wsprrypi::ExecutionResult execution{true,false,false,{}};
- wsprrypi::CleanupResult cleanup_result{true,{}}; int configure_calls{0};
+ wsprrypi::CleanupResult cleanup_result{true,{}}; wsprrypi::BackendCompileResult configure_result{true,{},{}}; int configure_calls{0}; int cleanup_calls{0};
  wsprrypi::BackendInfo info() const override { return {wsprrypi::BackendKind::RPI_CLOCK_GPIO,"double","test"}; }
  wsprrypi::BackendCapabilities capabilities() const override { return caps; }
- wsprrypi::BackendCompileResult configure(const wsprrypi::ExecutionPlan&,const wsprrypi::BackendExecutionInputs&) override { ++configure_calls; return {true,{},{}}; }
+ wsprrypi::BackendCompileResult configure(const wsprrypi::ExecutionPlan&,const wsprrypi::BackendExecutionInputs&) override { ++configure_calls; return configure_result; }
  wsprrypi::ExecutionResult execute(const wsprrypi::ExecutionPlan&) override { return execution; }
  wsprrypi::StartupQuiesceResult quiesceForStartup() override { return {true,{}}; }
  void stop() noexcept override {}
- wsprrypi::CleanupResult cleanup() noexcept override { return cleanup_result; }
+ wsprrypi::CleanupResult cleanup() noexcept override { ++cleanup_calls; return cleanup_result; }
 };
 }
 int main() try {
@@ -32,11 +32,20 @@ int main() try {
  backend.caps.supported_modes=wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::WSPR);
  wsprrypi::TransmissionController controller(compiler,backend); wsprrypi::TransmissionRequest request;
  expect(controller.prepare(request).ok,"simulation must bypass physical GPIO band policy");
- backend.cleanup_result={false,"injected cleanup failure"}; auto result=controller.execute_prepared();
+ auto result=controller.execute_prepared();
+ expect(result.ok && result.cleanup_attempted && result.cleanup.ok && backend.cleanup_calls==1,"successful execution must clean up once");
+ expect(controller.prepare(request).ok,"repeat prepare");
+ backend.cleanup_result={false,"injected cleanup failure"}; result=controller.execute_prepared();
  expect(!result.ok && result.faulted && result.cleanup_attempted,"cleanup failure must fail lifecycle");
  expect(result.error.find("injected cleanup failure")!=std::string::npos,"cleanup detail missing");
  backend.execution={false,false,true,"execution failed first"}; result=controller.execute_prepared();
  expect(result.error.find("execution failed first")!=std::string::npos && result.error.find("injected cleanup failure")!=std::string::npos,"execution failure erased");
+ backend.execution={false,true,false,"cancelled first"}; result=controller.execute_prepared();
+ expect(result.stopped && result.faulted && result.error.find("cancelled first")!=std::string::npos && result.error.find("injected cleanup failure")!=std::string::npos,"cancellation and cleanup failure must both remain observable");
+ Backend configure_failure; configure_failure.caps=backend.caps; configure_failure.configure_result={false,{},"configure failed first"}; configure_failure.cleanup_result={false,"configure cleanup failed"};
+ wsprrypi::TransmissionController failed_prepare(compiler,configure_failure); const auto prepare_result=failed_prepare.prepare(request);
+ expect(!prepare_result.ok && configure_failure.cleanup_calls==1,"configure failure must clean up");
+ expect(prepare_result.error.find("configure failed first")!=std::string::npos && prepare_result.error.find("configure cleanup failed")!=std::string::npos,"configure failure cleanup must preserve both errors");
  Backend unsupported; unsupported.caps.output_class=wsprrypi::BackendOutputClass::NON_RF_SIMULATION;
  unsupported.caps.supported_modes=wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::TONE);
  wsprrypi::TransmissionController rejected(compiler,unsupported);

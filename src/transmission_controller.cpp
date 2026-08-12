@@ -41,8 +41,18 @@ BackendCompileResult TransmissionController::prepare(
         build_backend_inputs(request, options));
     if (!configure_result.ok)
     {
+        BackendCompileResult failure = configure_result;
+        const CleanupResult cleanup_result = backend_.cleanup();
+        if (!cleanup_result.ok)
+        {
+            if (!failure.error.empty())
+                failure.error += " ";
+            failure.error += "Cleanup failed";
+            if (!cleanup_result.error.empty())
+                failure.error += ": " + cleanup_result.error;
+        }
         prepared_plan_.reset();
-        return configure_result;
+        return failure;
     }
 
     apply_adjustments(configure_result);

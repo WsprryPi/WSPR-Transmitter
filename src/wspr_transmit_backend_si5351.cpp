@@ -787,6 +787,12 @@ void WsprSi5351Backend::stop() noexcept
 
 wsprrypi::CleanupResult WsprSi5351Backend::cleanup() noexcept
 {
+    if (!configured_)
+    {
+        device_.close();
+        return {true, {}};
+    }
+
     const bool disabled = disableTransmitOutput();
     device_.close();
     wsprrypi::CleanupResult result{
