@@ -159,11 +159,11 @@ public:
     {
         bool virtual_time = true;
         std::string trace_path = "/tmp/wsprrypi-simulated-trace.json";
-        bool fail_startup_quiesce = false;
         bool fail_configure = false;
         long fail_event = -1;
         long cancel_event = -1;
         bool fail_cleanup = false;
+        bool fail_startup_quiesce = false;
 
         bool operator==(const SimulatedRuntimeConfig &) const = default;
     };

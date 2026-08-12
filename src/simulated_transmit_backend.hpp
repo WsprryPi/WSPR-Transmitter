@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 namespace wsprrypi {
-struct SimulatedBackendConfig { bool virtual_time{true}; std::string trace_path; bool fail_startup_quiesce{false}; bool fail_configure{false}; long fail_event{-1}; long cancel_event{-1}; bool fail_cleanup{false}; };
+struct SimulatedBackendConfig { bool virtual_time{true}; std::string trace_path; bool fail_configure{false}; long fail_event{-1}; long cancel_event{-1}; bool fail_cleanup{false}; bool fail_startup_quiesce{false}; };
 class SimulatedTransmitBackend final : public ITransmissionBackend {
 public:
  SimulatedTransmitBackend(IExecutionContext&,SimulatedBackendConfig={}); BackendInfo info()const override; BackendCapabilities capabilities()const override;
