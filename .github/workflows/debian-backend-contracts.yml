@@ -25,7 +25,7 @@ jobs:
             build-essential ca-certificates git
 
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run standalone backend contracts
         working-directory: src
