@@ -14,7 +14,8 @@ enum class BackendKind
 {
     RPI_CLOCK_GPIO,
     RP1_GPCLK,
-    SI5351
+    SI5351,
+    SIMULATED
 };
 
 enum class ClockSource

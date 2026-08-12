@@ -54,6 +54,7 @@
 #include "rp1_gpclk_transmit_backend.hpp"
 #include "wspr_transmit_backend_rpi.hpp"
 #include "wspr_transmit_backend_si5351.hpp"
+#include "simulated_transmit_backend.hpp"
 
 // Helper classes and functions in anonymous namespace
 namespace
@@ -89,6 +90,8 @@ namespace
             return "RP1 GPCLK";
         case wsprrypi::BackendKind::SI5351:
             return "SI5351";
+        case wsprrypi::BackendKind::SIMULATED:
+            return "simulated";
         }
 
         return "unknown";
@@ -423,18 +426,28 @@ void WsprTransmitter::selectBackend(
     selected_backend_ = backend_kind;
     selected_si5351_config_ = runtime_config;
 
+    backend_ = createBackend(backend_kind, runtime_config);
+
+    transmission_controller_ =
+        std::make_unique<wsprrypi::TransmissionController>(
+            execution_plan_compiler_,
+            *backend_);
+}
+
+std::unique_ptr<wsprrypi::ITransmissionBackend> WsprTransmitter::createBackend(
+    wsprrypi::BackendKind backend_kind,
+    const Si5351RuntimeConfig& runtime_config)
+{
     switch (backend_kind)
     {
         case wsprrypi::BackendKind::RPI_CLOCK_GPIO:
         {
             auto rpi_backend = std::make_unique<WsprRpiBackend>(*this);
             rpi_backend_ = rpi_backend.get();
-            backend_ = std::move(rpi_backend);
-            break;
+            return rpi_backend;
         }
         case wsprrypi::BackendKind::RP1_GPCLK:
-            backend_ = std::make_unique<WsprRp1GpclkBackend>(*this);
-            break;
+            return std::make_unique<WsprRp1GpclkBackend>(*this);
         case wsprrypi::BackendKind::SI5351:
         {
             WsprSi5351Backend::Config si5351_config;
@@ -460,17 +473,19 @@ void WsprTransmitter::selectBackend(
             }
             si5351_config.power_level = runtime_config.power_level;
             si5351_config.dry_run = false;
-            backend_ = std::make_unique<WsprSi5351Backend>(
+            return std::make_unique<WsprSi5351Backend>(
                 *this,
                 si5351_config);
-            break;
+        }
+        case wsprrypi::BackendKind::SIMULATED:
+        {
+            wsprrypi::SimulatedBackendConfig config;
+            config.virtual_time = true;
+            config.trace_path = "/tmp/wsprrypi-simulated-trace.json";
+            return std::make_unique<wsprrypi::SimulatedTransmitBackend>(*this, config);
         }
     }
-
-    transmission_controller_ =
-        std::make_unique<wsprrypi::TransmissionController>(
-            execution_plan_compiler_,
-            *backend_);
+    throw std::invalid_argument("Unknown transmission backend.");
 }
 
 wsprrypi::StartupQuiesceResult WsprTransmitter::quiesceForStartup()

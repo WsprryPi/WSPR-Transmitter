@@ -525,6 +525,9 @@ public:
     bool backendRestartCurrentConfiguration() override;
 
 private:
+    std::unique_ptr<wsprrypi::ITransmissionBackend> createBackend(
+        wsprrypi::BackendKind backend_kind,
+        const Si5351RuntimeConfig& runtime_config);
     struct PendingTransmitCallback
     {
         TransmissionCallbackEvent event;
