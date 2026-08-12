@@ -12,12 +12,12 @@ wsprrypi::ExecutionPlan compile(const wsprrypi::TransmissionRequest& request) co
 class Backend final : public wsprrypi::ITransmissionBackend {
 public:
  wsprrypi::BackendCapabilities caps; wsprrypi::ExecutionResult execution{true,false,false,{}};
- wsprrypi::CleanupResult cleanup_result{true,{}}; wsprrypi::BackendCompileResult configure_result{true,{},{}}; int configure_calls{0}; int cleanup_calls{0};
+ wsprrypi::CleanupResult cleanup_result{true,{}}; wsprrypi::BackendCompileResult configure_result{true,{},{}}; wsprrypi::StartupQuiesceResult quiesce_result{true,{}}; int configure_calls{0}; int cleanup_calls{0}; int quiesce_calls{0};
  wsprrypi::BackendInfo info() const override { return {wsprrypi::BackendKind::RPI_CLOCK_GPIO,"double","test"}; }
  wsprrypi::BackendCapabilities capabilities() const override { return caps; }
  wsprrypi::BackendCompileResult configure(const wsprrypi::ExecutionPlan&,const wsprrypi::BackendExecutionInputs&) override { ++configure_calls; return configure_result; }
  wsprrypi::ExecutionResult execute(const wsprrypi::ExecutionPlan&) override { return execution; }
- wsprrypi::StartupQuiesceResult quiesceForStartup() override { return {true,{}}; }
+ wsprrypi::StartupQuiesceResult quiesceForStartup() override { ++quiesce_calls; return quiesce_result; }
  void stop() noexcept override {}
  wsprrypi::CleanupResult cleanup() noexcept override { ++cleanup_calls; return cleanup_result; }
 };
@@ -31,6 +31,9 @@ int main() try {
  Backend backend; backend.caps.output_class=wsprrypi::BackendOutputClass::NON_RF_SIMULATION;
  backend.caps.supported_modes=wsprrypi::transmission_mode_bit(wsprrypi::TransmissionMode::WSPR);
  wsprrypi::TransmissionController controller(compiler,backend); wsprrypi::TransmissionRequest request; request.id.value=400;
+ expect(controller.quiesceForStartup().ok && backend.quiesce_calls==1,"startup quiesce success must propagate");
+ backend.quiesce_result={false,"injected startup quiesce failure"}; const auto quiesce_failure=controller.quiesceForStartup();
+ expect(!quiesce_failure.ok && quiesce_failure.error=="injected startup quiesce failure" && backend.quiesce_calls==2,"startup quiesce failure must propagate unchanged");
  expect(controller.prepare(request).ok,"simulation must bypass physical GPIO band policy");
  expect(controller.prepared_plan()->request_id.value==request.id.value,"prepared plan must retain request identity");
  expect(controller.prepared_plan()->id.value==1,"first prepared plan must receive deterministic identity");

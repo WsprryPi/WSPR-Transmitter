@@ -505,6 +505,7 @@ std::unique_ptr<wsprrypi::ITransmissionBackend> WsprTransmitter::createBackend(
             wsprrypi::SimulatedBackendConfig config;
             config.virtual_time = simulated_config.virtual_time;
             config.trace_path = simulated_config.trace_path;
+            config.fail_startup_quiesce = simulated_config.fail_startup_quiesce;
             config.fail_configure = simulated_config.fail_configure;
             config.fail_event = simulated_config.fail_event;
             config.cancel_event = simulated_config.cancel_event;
