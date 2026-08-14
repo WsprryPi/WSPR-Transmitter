@@ -89,10 +89,16 @@ inline QualificationState qualification_for(
 
     if (band == "2200 m")
     {
-        return profile == HardwareProfile::BCM2711_750_MHZ_PLLD ||
-                       profile == HardwareProfile::RP1_GPCLK
-                   ? QualificationState::QUALIFIED
-                   : QualificationState::UNQUALIFIED;
+        if (profile == HardwareProfile::BCM2711_750_MHZ_PLLD ||
+            profile == HardwareProfile::RP1_GPCLK)
+            return QualificationState::QUALIFIED;
+        if (profile == HardwareProfile::LEGACY_500_MHZ_PLLD &&
+            (mode == TransmissionMode::TONE ||
+             mode == TransmissionMode::QRSS ||
+             mode == TransmissionMode::FSKCW ||
+             mode == TransmissionMode::DFCW))
+            return QualificationState::QUALIFIED;
+        return QualificationState::UNQUALIFIED;
     }
 
     const bool questionable = band == "12 m" || band == "6 m" || band == "4 m" ||
