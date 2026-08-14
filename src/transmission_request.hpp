@@ -27,6 +27,15 @@ enum class ClockSource
     SI5351_CLK2
 };
 
+enum class HardwareProfile
+{
+    UNSPECIFIED,
+    LEGACY_500_MHZ_PLLD,
+    BCM2711_750_MHZ_PLLD,
+    RP1_GPCLK,
+    SI5351
+};
+
 struct RequestId
 {
     std::uint64_t value{0};
@@ -56,6 +65,9 @@ struct ExecutionPolicy
     bool allow_quantization{false};
     bool allow_backend_approximation{false};
     bool allow_truncation_on_stop{true};
+    bool allow_unqualified_frequency{false};
+    bool allow_non_amateur_frequency{false};
+    HardwareProfile hardware_profile{HardwareProfile::UNSPECIFIED};
 };
 
 struct RequestMetadata

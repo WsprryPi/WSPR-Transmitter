@@ -654,7 +654,12 @@ void WsprTransmitter::configureExecution(
     {
         const auto policy = wsprrypi::evaluate_gpio_band_policy(
             selected_backend_,
-            request.actual_rf_frequency_hz);
+            request.actual_rf_frequency_hz,
+            request.isTone() ? wsprrypi::TransmissionMode::TONE
+                             : wsprrypi::TransmissionMode::WSPR,
+            request.allow_unqualified_frequency,
+            request.allow_non_amateur_frequency,
+            request.hardware_profile);
         if (!policy.allowed)
             throw std::invalid_argument(policy.error);
     }
@@ -668,6 +673,11 @@ void WsprTransmitter::configureExecution(
             si5351_clock_source_from_index(selected_si5351_config_.tx_output);
         controller_request.output.gpio = request.tx_gpio;
         controller_request.calibration.ppm = request.ppm;
+        controller_request.policy.allow_unqualified_frequency =
+            request.allow_unqualified_frequency;
+        controller_request.policy.allow_non_amateur_frequency =
+            request.allow_non_amateur_frequency;
+        controller_request.policy.hardware_profile = request.hardware_profile;
         controller_request.id.value = 1;
 
         wsprrypi::TonePayload payload;
@@ -689,6 +699,11 @@ void WsprTransmitter::configureExecution(
                 : wsprrypi::ClockSource::GPIO_CLK;
         controller_request.output.gpio = request.tx_gpio;
         controller_request.calibration.ppm = request.ppm;
+        controller_request.policy.allow_unqualified_frequency =
+            request.allow_unqualified_frequency;
+        controller_request.policy.allow_non_amateur_frequency =
+            request.allow_non_amateur_frequency;
+        controller_request.policy.hardware_profile = request.hardware_profile;
         controller_request.id.value = 1;
 
         wsprrypi::WsprPayload payload;

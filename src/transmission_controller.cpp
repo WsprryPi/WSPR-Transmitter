@@ -26,9 +26,9 @@ BackendCompileResult TransmissionController::prepare(
         return BackendCompileResult{false, {},
             "Selected backend does not support the requested transmission mode."};
     }
-    if (capabilities.output_class == BackendOutputClass::PHYSICAL_GPIO_RF)
+    if (capabilities.output_class != BackendOutputClass::NON_RF_SIMULATION)
     {
-        const GpioBandPolicyDecision policy =
+        const auto policy =
             evaluate_gpio_band_policy(*prepared_plan_);
         if (!policy.allowed)
         {

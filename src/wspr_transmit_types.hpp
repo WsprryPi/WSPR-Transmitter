@@ -187,6 +187,10 @@ struct TransmissionRequest
      * @brief Original user-facing frequency token for logs and diagnostics.
      */
     std::string frequency_entry_label{};
+    bool allow_unqualified_frequency = false;
+    bool allow_non_amateur_frequency = false;
+    wsprrypi::HardwareProfile hardware_profile =
+        wsprrypi::HardwareProfile::UNSPECIFIED;
 
     /**
      * @brief Whether the scheduler prepared a selector GPIO for this request.
