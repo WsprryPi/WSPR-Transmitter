@@ -94,12 +94,15 @@ inline QualificationState qualification_for(
         if (profile == HardwareProfile::BCM2711_750_MHZ_PLLD ||
             profile == HardwareProfile::RP1_GPCLK)
             return QualificationState::QUALIFIED;
-        if (profile == HardwareProfile::LEGACY_500_MHZ_PLLD &&
-            (mode == TransmissionMode::TONE ||
-             mode == TransmissionMode::QRSS ||
-             mode == TransmissionMode::FSKCW ||
-             mode == TransmissionMode::DFCW))
-            return QualificationState::QUALIFIED;
+        if (profile == HardwareProfile::LEGACY_500_MHZ_PLLD)
+        {
+            if (mode == TransmissionMode::TONE)
+                return QualificationState::QUALIFIED;
+            if (mode == TransmissionMode::QRSS ||
+                mode == TransmissionMode::FSKCW ||
+                mode == TransmissionMode::DFCW)
+                return QualificationState::UNTESTED;
+        }
         return QualificationState::UNQUALIFIED;
     }
 
