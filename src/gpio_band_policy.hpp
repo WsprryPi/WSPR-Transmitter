@@ -79,7 +79,9 @@ inline QualificationState qualification_for(
 
     if (backend == BackendKind::SI5351)
     {
-        if (band == "2200 m" || band == "1.25 m")
+        if (band == "2200 m")
+            return QualificationState::UNTESTED;
+        if (band == "1.25 m")
             return QualificationState::UNAVAILABLE;
         return QualificationState::QUALIFIED;
     }
