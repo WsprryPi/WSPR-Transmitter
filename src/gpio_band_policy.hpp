@@ -112,7 +112,7 @@ inline QualificationState qualification_for(
             return QualificationState::UNAVAILABLE;
         if (band == "6 m" &&
             (mode == TransmissionMode::TONE || mode == TransmissionMode::QRSS ||
-             mode == TransmissionMode::FSKCW))
+             mode == TransmissionMode::FSKCW || mode == TransmissionMode::DFCW))
             return QualificationState::QUALIFIED;
         return QualificationState::UNQUALIFIED;
     }
