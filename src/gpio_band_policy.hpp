@@ -106,8 +106,21 @@ inline QualificationState qualification_for(
     if (!questionable)
         return QualificationState::QUALIFIED;
 
-    // Phase one records mode-specific evidence states without enabling a new
-    // Partial band. CW states become qualified only after keyed qualification.
+    if (profile == HardwareProfile::BCM2711_750_MHZ_PLLD)
+    {
+        if (band == "1.25 m" || band == "70 cm")
+            return QualificationState::UNAVAILABLE;
+        if (band == "6 m" && mode == TransmissionMode::TONE)
+            return QualificationState::QUALIFIED;
+        if (band == "6 m" &&
+            (mode == TransmissionMode::QRSS || mode == TransmissionMode::FSKCW ||
+             mode == TransmissionMode::DFCW))
+            return QualificationState::UNTESTED;
+        return QualificationState::UNQUALIFIED;
+    }
+
+    // Profiles without a completed mode-specific record remain fail-closed.
+    // CW states become qualified only after the applicable qualification.
     if (mode == TransmissionMode::QRSS || mode == TransmissionMode::TONE ||
         mode == TransmissionMode::FSKCW || mode == TransmissionMode::DFCW)
         return QualificationState::UNTESTED;
