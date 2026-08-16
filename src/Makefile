@@ -88,6 +88,7 @@ SI5351_PLANNER_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o
 SI5351_TRANSITION_TEST_OBJECTS := \
 	$(OBJ_DIR_DEBUG)/./si5351_transition_test.o \
+	$(OBJ_DIR_DEBUG)/./transmission_controller.o \
 	$(OBJ_DIR_DEBUG)/./wspr_transmit_backend_si5351.o \
 	$(OBJ_DIR_DEBUG)/./si5351_device.o \
 	$(OBJ_DIR_DEBUG)/./si5351_planner.o

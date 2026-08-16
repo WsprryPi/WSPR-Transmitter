@@ -198,6 +198,8 @@ WsprSi5351Backend::WsprSi5351Backend(
       event_tone_indexes_(),
       si5351_plan_(),
       configured_(false),
+      execution_cleanup_completed_(false),
+      execution_cleanup_result_(),
       stop_requested_(false),
       active_power_level_(1),
       active_drive_strength_(Si5351Device::DriveStrength::MA_2),
@@ -436,9 +438,22 @@ wsprrypi::ExecutionResult WsprSi5351Backend::execute(
     }
 
     auto idle_device = [this]() {
-        (void)disableTransmitOutput();
-        (void)applyIdleProgramming();
+        const bool disabled = disableTransmitOutput();
+        const bool idle_programmed = applyIdleProgramming();
         device_.close();
+        execution_cleanup_completed_ = true;
+        execution_cleanup_result_.ok = disabled && idle_programmed;
+        execution_cleanup_result_.error.clear();
+        if (!disabled)
+            execution_cleanup_result_.error =
+                "Could not disable Si5351 output.";
+        if (!idle_programmed)
+        {
+            if (!execution_cleanup_result_.error.empty())
+                execution_cleanup_result_.error += " ";
+            execution_cleanup_result_.error +=
+                "Could not apply Si5351 idle programming.";
+        }
         log_si5351(
             owner_,
             WsprTransmitLogLevel::DEBUG,
@@ -787,6 +802,13 @@ void WsprSi5351Backend::stop() noexcept
 
 wsprrypi::CleanupResult WsprSi5351Backend::cleanup() noexcept
 {
+    if (execution_cleanup_completed_)
+    {
+        const wsprrypi::CleanupResult result = execution_cleanup_result_;
+        resetState();
+        return result;
+    }
+
     if (!configured_)
     {
         device_.close();
@@ -1033,6 +1055,8 @@ void WsprSi5351Backend::resetState()
     event_tone_indexes_.clear();
     si5351_plan_ = Si5351Planner::Plan{};
     configured_ = false;
+    execution_cleanup_completed_ = false;
+    execution_cleanup_result_ = wsprrypi::CleanupResult{};
     stop_requested_ = false;
     resetActiveDriveStrengthFromConfig();
     current_tone_index_ = invalid_tone_index();

@@ -1,4 +1,5 @@
 #include "execution_plan.hpp"
+#include "transmission_controller.hpp"
 #include "wspr_transmit.hpp"
 #include "wspr_transmit_backend_si5351.hpp"
 
@@ -167,6 +168,24 @@ namespace
     private:
         std::atomic<WsprTransmitState> state_{WsprTransmitState::ENABLED};
         std::atomic<bool> stop_requested_{false};
+    };
+
+    class FixedPlanCompiler final : public wsprrypi::IExecutionPlanCompiler
+    {
+    public:
+        explicit FixedPlanCompiler(wsprrypi::ExecutionPlan plan)
+            : plan_(std::move(plan))
+        {
+        }
+
+        wsprrypi::ExecutionPlan compile(
+            const wsprrypi::TransmissionRequest&) const override
+        {
+            return plan_;
+        }
+
+    private:
+        wsprrypi::ExecutionPlan plan_;
     };
 
     WsprSi5351Backend::Config config(
@@ -458,6 +477,131 @@ namespace
             "successful execution cleanup should leave all outputs disabled");
     }
 
+    void test_controller_consumes_completed_cleanup_without_reopening()
+    {
+        const wsprrypi::TransmissionMode modes[] = {
+            wsprrypi::TransmissionMode::WSPR,
+            wsprrypi::TransmissionMode::QRSS,
+            wsprrypi::TransmissionMode::FSKCW,
+            wsprrypi::TransmissionMode::DFCW};
+        for (const wsprrypi::TransmissionMode mode : modes)
+        {
+            TestBridge bridge;
+            auto adapter = std::make_shared<FakeI2CAdapter>();
+            WsprSi5351Backend backend(bridge, config(adapter));
+            wsprrypi::ExecutionPlan plan = mode ==
+                    wsprrypi::TransmissionMode::WSPR
+                ? four_tone_plan(4)
+                : mode == wsprrypi::TransmissionMode::QRSS
+                    ? single_tone_plan()
+                    : four_tone_plan(2);
+            plan.mode = mode;
+            for (std::size_t i = 0; i < plan.events.size(); ++i)
+                plan.events[i].frequency_hz = 14097100.0 +
+                    static_cast<double>(i);
+            FixedPlanCompiler compiler(plan);
+            wsprrypi::TransmissionController controller(compiler, backend);
+            wsprrypi::TransmissionRequest request;
+            request.id.value = plan.request_id.value;
+            request.output.backend = wsprrypi::BackendKind::SI5351;
+
+            const wsprrypi::BackendCompileResult prepared = controller.prepare(
+                request, wsprrypi::TransmissionPrepareOptions{1});
+            expect(prepared.ok,
+                "controller-level Si5351 plan should prepare");
+            const wsprrypi::ExecutionResult result =
+                controller.execute_prepared();
+            expect(result.ok && result.cleanup_attempted && result.cleanup.ok,
+                "controller must consume successful in-execute cleanup");
+            expect(adapter->registers[kOutputEnableRegister] ==
+                    kOutputDisableAll,
+                "controller cleanup must leave register 3 at 0xFF");
+            expect(adapter->open_calls == 1 && adapter->close_calls == 1,
+                "controller cleanup must not reopen or re-close I2C");
+            expect(backend.cleanup().ok,
+                "cleanup must remain idempotent after controller consumption");
+            expect(adapter->open_calls == 1 && adapter->close_calls == 1,
+                "repeated cleanup must not touch the closed I2C session");
+        }
+    }
+
+    void test_controller_preserves_genuine_idle_cleanup_failure()
+    {
+        TestBridge bridge;
+        auto adapter = std::make_shared<FakeI2CAdapter>();
+        FakeI2CAdapter* const adapter_state = adapter.get();
+        bool output_was_enabled = false;
+        adapter->after_write =
+            [adapter_state, &output_was_enabled](
+                std::uint8_t address,
+                std::uint8_t value,
+                std::size_t)
+            {
+                if (address != kOutputEnableRegister)
+                    return;
+                if (value == kClk0Enabled)
+                {
+                    output_was_enabled = true;
+                    return;
+                }
+                if (output_was_enabled && value == kOutputDisableAll)
+                {
+                    adapter_state->fail_address = 16;
+                    adapter_state->fail_address_occurrence =
+                        adapter_state->address_attempts[16] + 1;
+                }
+            };
+        WsprSi5351Backend backend(bridge, config(adapter));
+        wsprrypi::ExecutionPlan plan = single_tone_plan();
+        FixedPlanCompiler compiler(plan);
+        wsprrypi::TransmissionController controller(compiler, backend);
+        wsprrypi::TransmissionRequest request;
+        request.id.value = plan.request_id.value;
+        request.output.backend = wsprrypi::BackendKind::SI5351;
+
+        expect(controller.prepare(
+                request, wsprrypi::TransmissionPrepareOptions{1}).ok,
+            "cleanup-failure controller plan should prepare");
+        const wsprrypi::ExecutionResult result = controller.execute_prepared();
+        expect(!result.ok && result.faulted && result.cleanup_attempted &&
+                !result.cleanup.ok,
+            "genuine idle-programming failure must fail controller cleanup");
+        expect(result.error.find("idle programming") != std::string::npos,
+            "genuine cleanup failure detail must remain observable");
+        expect(adapter->registers[kOutputEnableRegister] == kOutputDisableAll,
+            "idle-programming failure must still leave output inhibited");
+        expect(adapter->open_calls == 1 && adapter->close_calls == 1,
+            "failed cleanup result must not trigger post-close I2C access");
+    }
+
+    void test_controller_consumes_interrupted_cleanup()
+    {
+        TestBridge bridge;
+        bridge.interrupt_on_wait_call = 1;
+        auto adapter = std::make_shared<FakeI2CAdapter>();
+        WsprSi5351Backend backend(bridge, config(adapter));
+        wsprrypi::ExecutionPlan plan = single_tone_plan(
+            2.409358, std::chrono::seconds(1));
+        plan.events[0].frequency_hz = 14097100.0;
+        FixedPlanCompiler compiler(plan);
+        wsprrypi::TransmissionController controller(compiler, backend);
+        wsprrypi::TransmissionRequest request;
+        request.id.value = plan.request_id.value;
+        request.output.backend = wsprrypi::BackendKind::SI5351;
+
+        expect(controller.prepare(
+                request, wsprrypi::TransmissionPrepareOptions{1}).ok,
+            "interrupted controller plan should prepare");
+        const wsprrypi::ExecutionResult result = controller.execute_prepared();
+        expect(result.ok && result.stopped && result.cleanup_attempted &&
+                result.cleanup.ok,
+            "controller must consume successful interrupted cleanup");
+        expect(adapter->registers[kOutputEnableRegister] == kOutputDisableAll,
+            "interrupted controller cleanup must inhibit the output");
+        expect(adapter->open_calls == 1 && adapter->close_calls == 1,
+            "interrupted controller cleanup must use one I2C session");
+    }
+
     void test_transition_failure_stays_inhibited()
     {
         TestBridge bridge;
@@ -606,6 +750,9 @@ int main()
     test_single_tone_calibration_reporting_and_cleanup();
     test_single_tone_interruption_cleans_up();
     test_162_symbol_transition_order();
+    test_controller_consumes_completed_cleanup_without_reopening();
+    test_controller_preserves_genuine_idle_cleanup_failure();
+    test_controller_consumes_interrupted_cleanup();
     test_transition_failure_stays_inhibited();
     test_transition_interruptions_stay_inhibited();
     test_symbol_wait_interruption_cleans_up();

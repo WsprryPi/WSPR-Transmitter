@@ -259,6 +259,8 @@ private:
     std::vector<std::size_t> event_tone_indexes_;
     Si5351Planner::Plan si5351_plan_;
     bool configured_;
+    bool execution_cleanup_completed_;
+    wsprrypi::CleanupResult execution_cleanup_result_;
     bool stop_requested_;
     int active_power_level_;
     Si5351Device::DriveStrength active_drive_strength_;
