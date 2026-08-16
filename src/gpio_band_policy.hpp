@@ -94,12 +94,11 @@ inline QualificationState qualification_for(
             return QualificationState::QUALIFIED;
         if (profile == HardwareProfile::LEGACY_500_MHZ_PLLD)
         {
-            if (mode == TransmissionMode::TONE)
-                return QualificationState::QUALIFIED;
-            if (mode == TransmissionMode::QRSS ||
+            if (mode == TransmissionMode::TONE ||
+                mode == TransmissionMode::QRSS ||
                 mode == TransmissionMode::FSKCW ||
                 mode == TransmissionMode::DFCW)
-                return QualificationState::UNTESTED;
+                return QualificationState::QUALIFIED;
         }
         return QualificationState::UNQUALIFIED;
     }
